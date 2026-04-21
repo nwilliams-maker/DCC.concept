@@ -2237,9 +2237,6 @@ def run_pod_tab(pod_name):
         with t_sent:
             if not sent and not sent_ghosts: st.info("No pending routes sent.")
             
-            with t_sent:
-            if not sent and not sent_ghosts: st.info("No pending routes sent.")
-            
             # 1. Render Live Sent Routes (Read-Only)
             for i, c in enumerate(sent):
                 ic_name = c.get('contractor_name', 'Unknown')
