@@ -7,12 +7,15 @@ so a dashboard interaction does not build every dispatch card at once.
 
 import hashlib
 import html
+import base64
+import os
 from datetime import date, timedelta
 
+import requests
 import streamlit as st
 
 
-STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "Selected", "Routed", "Accepted")
+STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "Selected", "Field Nation", "Routed", "Accepted")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red")
 
 
@@ -25,7 +28,7 @@ def _route_status(route, sent_db, nearest_miles=None):
     route_hash = _route_hash(route)
     local = st.session_state.get(f"route_state_{route_hash}")
     if local == "field_nation":
-        return "Routed"
+        return "Field Nation"
     if local == "email_sent":
         return "Routed"
     if local == "finalized":
@@ -40,7 +43,9 @@ def _route_status(route, sent_db, nearest_miles=None):
             status = str(match.get("status", "")).lower()
             if status in ("accepted", "finalized"):
                 return "Accepted"
-            if status in ("sent", "field_nation", "declined"):
+            if status == "field_nation":
+                return "Field Nation"
+            if status in ("sent", "declined"):
                 return "Routed"
     if route.get("status") == "Flagged" or (nearest_miles is not None and nearest_miles > 50):
         return "Flagged"
@@ -105,6 +110,45 @@ def _clear_selection(keys):
         st.session_state[f"revamp_bulk_{key}"] = False
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_fn_assignment_ids():
+    """Resolve Field Nation separately from the capped dispatch worker feed."""
+    key = (os.environ.get("ONFLEET_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("ONFLEET_KEY is not configured")
+    auth = {"Authorization": "Basic " + base64.b64encode(f"{key}:".encode()).decode()}
+    teams_response = requests.get("https://onfleet.com/api/v2/teams", headers=auth, timeout=15)
+    teams_response.raise_for_status()
+    team_data = teams_response.json()
+    teams = team_data if isinstance(team_data, list) else team_data.get("teams", [])
+    team = next((t for t in teams if isinstance(t, dict)
+                 and "field nation" in str(t.get("name", "")).lower()), None)
+    if not team:
+        raise RuntimeError("Field Nation team is missing from this Onfleet account")
+    seen = set()
+    last_id = None
+    for _ in range(100):
+        url = "https://onfleet.com/api/v2/workers" + (f"?lastId={last_id}" if last_id else "")
+        response = requests.get(url, headers=auth, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        workers = data if isinstance(data, list) else data.get("workers", [])
+        if not workers:
+            break
+        for worker in workers:
+            if not isinstance(worker, dict):
+                continue
+            phone = "".join(c for c in str(worker.get("phone") or "") if c.isdigit())[-10:]
+            if phone == "6302869764":
+                return {"fn_team_id": team.get("id"), "fn_worker_id": worker.get("id")}
+        next_id = (data.get("lastId") if isinstance(data, dict) else None) or workers[-1].get("id")
+        if not next_id or next_id in seen:
+            break
+        seen.add(next_id)
+        last_id = next_id
+    raise RuntimeError("Field Nation placeholder worker (ending 9764) was not found in Onfleet")
+
+
 def render_workspace(can_access_tab, process_pod, render_dispatch,
                      haversine, db_engine, assign_tasks_to_fn_team,
                      fetch_sent_records_from_sheet, default_due_days=14):
@@ -116,10 +160,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     .revamp-pill {border:1px solid #e3ddf2;border-radius:8px;padding:6px 10px;
                   font-size:.82rem;color:#43506c;background:#fff;display:inline-block;margin:0 6px 8px 0}
     .revamp-panel-title {font-weight:700;color:#2a3040;margin:8px 0}
-    div[class*="st-key-revamp_route_"] button {text-align:left;justify-content:flex-start;
-        min-height:4.4rem;border-radius:8px;border:1px solid #e8e2f3;
-        background:#fff;color:#35405b;white-space:pre-wrap}
+    div[class*="st-key-revamp_route_"] button {min-height:2.5rem;border-radius:8px;
+        border:1px solid #e8e2f3;background:#fff;color:#35405b}
     div[class*="st-key-revamp_route_"] button:hover {border-color:#6841b0;background:#f8f4ff}
+    div[class*="st-key-revamp_bulk_"] label {width:100%;cursor:pointer;align-items:flex-start}
+    div[class*="st-key-revamp_bulk_"] label p {white-space:normal;overflow-wrap:anywhere;
+        line-height:1.35;font-weight:650;color:#243047}
     </style>
     """, unsafe_allow_html=True)
 
@@ -187,7 +233,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 continue
             seen_hashes.add(route_hash)
             ghost_status = str(ghost.get("status", "")).lower()
-            state = "Accepted" if ghost_status in ("accepted", "finalized") else "Routed"
+            state = ("Accepted" if ghost_status in ("accepted", "finalized") else
+                     "Field Nation" if ghost_status in ("field_nation", "posted") else "Routed")
             route = {
                 "_is_ghost": True, "wo": ghost.get("wo", ""),
                 "city": ghost.get("city", "Unknown"),
@@ -208,31 +255,41 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         f'<span class="revamp-pill">Routes <b>{len(all_routes)}</b></span>'
         f'<span class="revamp-pill">Tasks <b>{total_tasks}</b></span>'
         f'<span class="revamp-pill">Flagged <b>{counts["Flagged"]}</b></span>'
+        f'<span class="revamp-pill">Field Nation <b>{counts["Field Nation"]}</b></span>'
         f'<span class="revamp-pill">Accepted <b>{counts["Accepted"]}</b></span>',
         unsafe_allow_html=True,
     )
 
+    if st.session_state.pop("_revamp_show_fn_next", False):
+        st.session_state["revamp_status"] = "Field Nation"
     status = st.radio("Route status", STATUSES, horizontal=True,
                       label_visibility="collapsed", key="revamp_status")
+    show_cvs = st.toggle("Show CVS Kiosk Removal routes", value=False,
+                         key="revamp_show_cvs_removal",
+                         help="Show removal routes in Ready and Flagged. Routes already sent or assigned remain visible.")
     matching = [entry for entry in all_routes if
                 (status == "All" or entry[2] == status or
                  (status == "Over 50 mi" and entry[4] and entry[4][1] > 50
                   and entry[2] in ("Ready", "Flagged")) or
                  (status == "Selected" and
                   st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))) and
-                (not search or search in _searchable(entry[1]))]
+                (not search or search in _searchable(entry[1])) and
+                (show_cvs or entry[2] not in ("Ready", "Flagged") or
+                 not entry[1].get("is_removal"))]
+    matching.sort(key=lambda entry: (str(entry[1].get("state") or "").upper(),
+                                     str(entry[1].get("city") or "").lower(), entry[0]))
     st.caption(f"Showing {len(matching)} matching route{'s' if len(matching) != 1 else ''}")
 
     visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
                     if entry[2] in ("Ready", "Flagged")]
-    select_col, clear_col, due_col, action_col = st.columns([1, 1, 1.4, 1.7],
+    select_col, clear_col, due_col, action_col = st.columns([1.35, 1, 1.3, 1.7],
                                                            vertical_alignment="bottom")
     with select_col:
-        st.button("Select visible", key="revamp_select_visible",
+        st.button(f"Select all {len(visible_keys)} matching", key="revamp_select_visible",
                   on_click=_select_visible, args=(visible_keys,),
                   disabled=not visible_keys, use_container_width=True)
     with clear_col:
-        st.button("Clear", key="revamp_clear_selection", on_click=_clear_selection,
+        st.button("Clear selection", key="revamp_clear_selection", on_click=_clear_selection,
                   args=([f"{e[0]}:{e[3]}" for e in all_routes],),
                   use_container_width=True)
     with due_col:
@@ -245,53 +302,73 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     with action_col:
         assign_clicked = st.button(f"Assign {len(chosen)} to Field Nation",
                                    key="revamp_assign_fn", type="primary",
-                                   disabled=not chosen or db_engine is None or
-                                            not fn_team_id or not fn_worker_id,
+                                   disabled=not chosen or db_engine is None,
                                    use_container_width=True)
     if db_engine is None:
         st.caption("Field Nation assignment needs the new Railway database connection.")
-    elif not fn_team_id or not fn_worker_id:
-        st.caption("Field Nation team and worker must be loaded before bulk assignment.")
     if assign_clicked:
-        from revamp_bulk_fn import bulk_assign
-        saved, skipped, errors = bulk_assign(
-            db_engine, [(pod, route) for pod, route, _, _, _ in chosen], fn_due,
-            assign_tasks_to_fn_team, fn_team_id, fn_worker_id,
-        )
-        for route_hash, _ in saved:
-            st.session_state[f"route_state_{route_hash}"] = "field_nation"
-            st.session_state[f"reverted_{route_hash}"] = False
-        _clear_selection([f"{pod}:{route_hash}" for pod, _, _, route_hash, _ in chosen])
-        if saved:
-            fetch_sent_records_from_sheet.clear()
-            st.success(f"Saved {len(saved)} route(s) to Field Nation.")
-        if skipped:
-            st.info(f"{len(skipped)} route(s) were already assigned.")
-        if errors:
-            st.error(f"{len(errors)} route(s) could not be assigned: " +
-                     "; ".join(msg for _, msg in errors[:3]))
+        if not fn_team_id or not fn_worker_id:
+            try:
+                connection = _fetch_fn_assignment_ids()
+                fn_team_id = connection.get("fn_team_id")
+                fn_worker_id = connection.get("fn_worker_id")
+                st.session_state["_fn_team_id"] = fn_team_id
+                st.session_state["_fn_worker_id"] = fn_worker_id
+            except Exception as exc:
+                st.error(f"Could not load Field Nation from Onfleet: {exc}")
+        if not fn_team_id or not fn_worker_id:
+            st.error("Field Nation team or placeholder worker was not found in Onfleet. Selection is preserved; check the Onfleet team and worker setup.")
+        else:
+            from revamp_bulk_fn import bulk_assign
+            saved, skipped, errors = bulk_assign(
+                db_engine, [(pod, route) for pod, route, _, _, _ in chosen], fn_due,
+                assign_tasks_to_fn_team, fn_team_id, fn_worker_id,
+            )
+            for route_hash, _ in saved:
+                st.session_state[f"route_state_{route_hash}"] = "field_nation"
+                st.session_state[f"reverted_{route_hash}"] = False
+            _clear_selection([f"{pod}:{route_hash}" for pod, _, _, route_hash, _ in chosen
+                              if route_hash in {saved_hash for saved_hash, _ in saved}])
+            if saved:
+                fetch_sent_records_from_sheet.clear()
+                st.success(f"Saved {len(saved)} route(s) to Field Nation.")
+            if skipped:
+                st.info(f"{len(skipped)} route(s) were already assigned.")
+            if errors:
+                st.error(f"{len(errors)} route(s) could not be assigned: " +
+                         "; ".join(msg for _, msg in errors[:3]))
+            elif saved:
+                st.session_state["_revamp_show_fn_next"] = True
+                st.rerun()
 
-    left, right = st.columns([1, 3], gap="small")
+    left, right = st.columns([2, 3], gap="medium")
     with left:
         st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
         with st.container(height=650, border=True):
             if not matching:
                 st.info("No matching routes.")
+            current_state = None
             for pod, route, state, route_hash, nearest in matching:
+                state_name = str(route.get("state") or "Unknown state").strip().upper()
+                if state_name != current_state:
+                    current_state = state_name
+                    state_count = sum(1 for entry in matching
+                                      if str(entry[1].get("state") or "Unknown state").strip().upper() == state_name)
+                    st.markdown(f"#### 📍 {html.escape(state_name)} · {state_count} routes")
                 key = f"{pod}:{route_hash}"
                 city = route.get("city") or "Unknown city"
-                label = (f"{city}, {route.get('state', '')} · {state}"
-                         f"\n{pod} pod · {route.get('stops', 0)} stops · "
-                         f"{len(route.get('data', []))} tasks")
-                if nearest:
-                    label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
-                select_cell, route_cell = st.columns([0.13, 0.87], vertical_alignment="center")
-                with select_cell:
+                with st.container(border=True):
                     if state in ("Ready", "Flagged"):
-                        st.checkbox("Select for FN", key=f"revamp_bulk_{key}",
-                                    label_visibility="collapsed")
-                with route_cell:
-                    if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
+                        removal = " · CVS Kiosk Removal" if route.get("is_removal") else ""
+                        st.checkbox(f"{city}, {route.get('state', '')} · {state}{removal}",
+                                    key=f"revamp_bulk_{key}")
+                    else:
+                        st.markdown(f"**{html.escape(str(city))}, {html.escape(str(route.get('state', '')))} · {state}**")
+                    st.caption(f"{pod} pod · {route.get('stops', 0)} stops · "
+                               f"{len(route.get('data', []))} tasks")
+                    if nearest:
+                        st.caption(f"Closest IC: {nearest[0]} · {nearest[1]:.1f} mi")
+                    if st.button("View route", key=f"revamp_route_{key}", use_container_width=True):
                         st.session_state["revamp_selected_route"] = key
 
     with right:
