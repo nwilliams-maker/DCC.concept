@@ -303,7 +303,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         if state in ("Ready", "Flagged"):
             # Reuse the existing contractor, compensation, routing, FN,
             # bundling and link-generation logic for the selected live route.
-            render_dispatch(20000, route, pod)
+            dispatch_route = dict(route)
+            if nearest and nearest[1] > 50:
+                dispatch_route["status"] = "Flagged"
+            render_dispatch(20000, dispatch_route, pod)
         else:
             st.info("This route's follow-up actions are available in Full tools.")
             st.button("Open Full tools", key="revamp_open_tools",
