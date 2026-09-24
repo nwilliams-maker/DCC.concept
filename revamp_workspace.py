@@ -9,7 +9,7 @@ import hashlib
 import html
 import base64
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 import streamlit as st
@@ -157,9 +157,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     <style>
     .revamp-heading {font-size:1.65rem;font-weight:750;color:#243047;margin:0 0 6px}
     .revamp-meta {font-size:.82rem;color:#52617c;margin:0 0 12px}
-    .revamp-pill {border:1px solid #e3ddf2;border-radius:8px;padding:6px 10px;
-                  font-size:.82rem;color:#43506c;background:#fff;display:inline-block;margin:0 6px 8px 0}
+    .revamp-pill {border:1px solid #dfe4ef;border-radius:7px;padding:6px 10px;
+                  font-size:.78rem;color:#43506c;background:#fff;display:inline-block;margin:0 6px 8px 0}
+    .revamp-pill b {color:#253454}
     .revamp-panel-title {font-weight:700;color:#2a3040;margin:8px 0}
+    div[class*="st-key-revamp_status"] div[role="radiogroup"] {border:1px solid #dfe4ef;
+        border-radius:11px;padding:8px 10px;gap:6px;background:#fff;flex-wrap:wrap}
+    div[class*="st-key-revamp_status"] label {border-radius:9px;padding:7px 10px;
+        cursor:pointer;white-space:nowrap}
+    div[class*="st-key-revamp_status"] label:has(input:checked) {background:#f1eaff;color:#5730a3}
     div[class*="st-key-revamp_route_"] button {min-height:2.5rem;border-radius:8px;
         border:1px solid #e8e2f3;background:#fff;color:#35405b}
     div[class*="st-key-revamp_route_"] button:hover {border-color:#6841b0;background:#f8f4ff}
@@ -183,7 +189,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         st.info("Your account has no static pod access. Open Full tools for your available workspaces.")
         return
     pod_options = (["All my pods"] if len(accessible) > 1 else []) + accessible
-    filter_col, refresh_col = st.columns([3, 1], vertical_alignment="bottom")
+    filter_col, _, refresh_col = st.columns([1.4, 4.5, 1], vertical_alignment="bottom")
     with filter_col:
         pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod")
     selected_pods = accessible if pod_choice == "All my pods" else [pod_choice]
@@ -250,11 +256,21 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                 entry[2] in ("Ready", "Flagged"))
     counts["Selected"] = sum(1 for entry in all_routes
                              if st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))
+    counts["All"] = len(all_routes)
     total_tasks = sum(len(route.get("data", [])) for _, route, _, _, _ in all_routes)
+    last_sync = st.session_state.get("_last_sync_ts")
+    sync_age = "Sync available"
+    if isinstance(last_sync, datetime):
+        minutes = max(0, int((datetime.now() - last_sync).total_seconds() // 60))
+        sync_age = f"Synced {minutes}m ago"
+    unselected = sum(entry[2] in ("Ready", "Flagged") for entry in all_routes) - counts["Selected"]
     st.markdown(
+        f'<span class="revamp-pill">◇ Pod <b>{html.escape(str(pod_choice))}</b></span>'
+        f'<span class="revamp-pill">↻ {html.escape(sync_age)}</span>'
         f'<span class="revamp-pill">Routes <b>{len(all_routes)}</b></span>'
         f'<span class="revamp-pill">Tasks <b>{total_tasks}</b></span>'
         f'<span class="revamp-pill">Flagged <b>{counts["Flagged"]}</b></span>'
+        f'<span class="revamp-pill">Unselected <b>{max(0, unselected)}</b></span>'
         f'<span class="revamp-pill">Field Nation <b>{counts["Field Nation"]}</b></span>'
         f'<span class="revamp-pill">Accepted <b>{counts["Accepted"]}</b></span>',
         unsafe_allow_html=True,
@@ -263,7 +279,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if st.session_state.pop("_revamp_show_fn_next", False):
         st.session_state["revamp_status"] = "Field Nation"
     status = st.radio("Route status", STATUSES, horizontal=True,
-                      label_visibility="collapsed", key="revamp_status")
+                      label_visibility="collapsed", key="revamp_status",
+                      format_func=lambda option: f"{option}  {counts[option]}")
     show_cvs = st.toggle("Show CVS Kiosk Removal routes", value=False,
                          key="revamp_show_cvs_removal",
                          help="Show removal routes in Ready and Flagged. Routes already sent or assigned remain visible.")
@@ -278,20 +295,19 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                  not entry[1].get("is_removal"))]
     matching.sort(key=lambda entry: (str(entry[1].get("state") or "").upper(),
                                      str(entry[1].get("city") or "").lower(), entry[0]))
-    st.caption(f"Showing {len(matching)} matching route{'s' if len(matching) != 1 else ''}")
-
     visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
                     if entry[2] in ("Ready", "Flagged")]
-    select_col, clear_col, due_col, action_col = st.columns([1.35, 1, 1.3, 1.7],
-                                                           vertical_alignment="bottom")
+    select_col, clear_col = st.columns([5, 1], vertical_alignment="bottom")
     with select_col:
-        st.button(f"Select all {len(visible_keys)} matching", key="revamp_select_visible",
+        st.button(f"☑ Select all {len(visible_keys)} matching on this tab", key="revamp_select_visible",
                   on_click=_select_visible, args=(visible_keys,),
                   disabled=not visible_keys, use_container_width=True)
     with clear_col:
         st.button("Clear selection", key="revamp_clear_selection", on_click=_clear_selection,
                   args=([f"{e[0]}:{e[3]}" for e in all_routes],),
                   use_container_width=True)
+    st.caption(f"Showing {len(matching)} matching route{'s' if len(matching) != 1 else ''}")
+    _, due_col, action_col = st.columns([2.5, 1.4, 1.7], vertical_alignment="bottom")
     with due_col:
         fn_due = st.date_input("Field Nation due", value=date.today() + timedelta(days=default_due_days),
                                key="revamp_fn_due")
