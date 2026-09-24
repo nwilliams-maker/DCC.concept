@@ -608,7 +608,7 @@ def sync_onfleet_for_fn_assignment(
     resolved_route_plan_id = route_plan_id_hint
 
     if not task_ids:
-        return {"partial": False, "partialReason": "", "routePlanId": resolved_route_plan_id}
+        return {"partial": True, "partialReason": "No Onfleet task IDs available to locate the Route Plan Name", "routePlanId": resolved_route_plan_id}
 
     headers = _onfleet_auth_header()
     new_meta = [
@@ -633,14 +633,21 @@ def sync_onfleet_for_fn_assignment(
             rename_resp = onfleet_fetch_with_backoff("put", f"{ONFLEET_BASE}/routePlans/{rp_id}", json_body={"name": wo})
             if rename_resp.status_code < 400:
                 resolved_route_plan_id = rp_id
-        except Exception:  # noqa: BLE001
-            pass
+            else:
+                partial = True
+                partial_reason = f"Onfleet Route Plan Name update returned HTTP {rename_resp.status_code}"
+        except Exception as exc:  # noqa: BLE001
+            partial = True
+            partial_reason = f"Onfleet Route Plan Name update failed: {exc}"
+    else:
+        partial = True
+        partial_reason = "Onfleet route plan was not found for this route"
 
     # Part B: per-task metadata + worker re-PUT.
     for i, tid in enumerate(task_ids):
         if time.time() - start > _FA_BUDGET_S:
             partial = True
-            partial_reason = f"time budget reached during Onfleet sync ({i}/{len(task_ids)} tasks)"
+            partial_reason = (partial_reason + "; " if partial_reason else "") + f"time budget reached during Onfleet sync ({i}/{len(task_ids)} tasks)"
             break
 
         current_worker = None
