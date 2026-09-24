@@ -45,6 +45,13 @@ class RevampTests(unittest.TestCase):
         self.assertEqual(scope["_route_status"](route, {}, 50.1), "Flagged")
         self.assertEqual(scope["_route_status"](
             route, {"t1": {"status": "field_nation"}}, 50.1), "Field Nation")
+        self.assertEqual(scope["_route_status"](
+            route, {"t1": {"status": "sent"}}, 50.1), "Sent")
+        self.assertEqual(scope["_route_status"](
+            route, {"t1": {"status": "declined"}}, 50.1), "Declined")
+        scope["st"].session_state["route_state_" + scope["_route_hash"](route)] = "email_sent"
+        self.assertEqual(scope["_route_status"](
+            route, {"t1": {"status": "accepted"}}, 50.1), "Accepted")
 
     def test_bulk_fn_retries_skip_existing_and_keep_route_stops(self):
         stored = {}
