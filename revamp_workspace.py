@@ -394,20 +394,22 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         stage_counts = {stage: sum(_fn_stage(e[3], fn_posted, fn_providers) == stage
                                    for e in matching) for stage in ("Pending", "Posted", "Assigned")}
         st.caption("  |  ".join(f"{stage}: {count}" for stage, count in stage_counts.items()))
-    _, due_col, action_col = st.columns([2.5, 1.4, 1.7], vertical_alignment="bottom")
-    with due_col:
-        fn_due = st.date_input("Field Nation due", value=date.today() + timedelta(days=default_due_days),
-                               key="revamp_fn_due")
     chosen = [entry for entry in all_routes if entry[2] in ("Ready", "Flagged")
               and st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False)]
     fn_team_id = st.session_state.get("_fn_team_id")
     fn_worker_id = st.session_state.get("_fn_worker_id")
-    with action_col:
-        assign_clicked = st.button(f"Assign {len(chosen)} to Field Nation",
-                                   key="revamp_assign_fn", type="primary",
-                                   disabled=not chosen or db_engine is None,
-                                   use_container_width=True)
-    if db_engine is None:
+    assign_clicked = False
+    if status != "Field Nation":
+        _, due_col, action_col = st.columns([2.5, 1.4, 1.7], vertical_alignment="bottom")
+        with due_col:
+            fn_due = st.date_input("Field Nation due", value=date.today() + timedelta(days=default_due_days),
+                                   key="revamp_fn_due")
+        with action_col:
+            assign_clicked = st.button(f"Assign {len(chosen)} to Field Nation",
+                                       key="revamp_assign_fn", type="primary",
+                                       disabled=not chosen or db_engine is None,
+                                       use_container_width=True)
+    if db_engine is None and status != "Field Nation":
         st.caption("Field Nation assignment needs the new Railway database connection.")
     if assign_clicked:
         if not fn_team_id or not fn_worker_id:
