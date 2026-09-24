@@ -142,10 +142,20 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod")
     selected_pods = accessible if pod_choice == "All my pods" else [pod_choice]
     with refresh_col:
-        if st.button("↻ Sync routes", key="revamp_sync", use_container_width=True):
-            for pod in selected_pods:
-                process_pod(pod)
-            st.rerun()
+        sync_clicked = st.button("↻ Sync routes", key="revamp_sync", use_container_width=True)
+    if sync_clicked:
+        fetch_sent_records_from_sheet.clear()
+        for pod in selected_pods:
+            process_pod(pod)
+
+    # The original pod tabs populate these session keys during their own
+    # render. This workspace runs before those tabs, so hydrate the same
+    # Postgres-backed state here for routed and accepted cards.
+    sent_db, ghost_db, archived_wos, history_db = fetch_sent_records_from_sheet()
+    st.session_state["sent_db"] = sent_db
+    st.session_state["ghost_db"] = ghost_db
+    st.session_state["archived_wos"] = archived_wos
+    st.session_state["_history_db"] = history_db
 
     loaded = [pod for pod in selected_pods if f"clusters_{pod}" in st.session_state]
     if not loaded:
@@ -155,7 +165,6 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if missing:
         st.caption("Not loaded yet: " + ", ".join(missing) + ". Sync routes to add them.")
 
-    sent_db = st.session_state.get("sent_db", {}) or {}
     eligible_ics = _eligible_ics(st.session_state.get("ic_df"))
     all_routes = []
     seen_hashes = set()
@@ -172,7 +181,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     # Accepted routes often leave Onfleet's unassigned feed; include the
     # persisted ghost records so they remain visible in this workspace.
     for pod in loaded:
-        for ghost in (st.session_state.get("ghost_db", {}) or {}).get(pod, []):
+        for ghost in (ghost_db or {}).get(pod, []):
             route_hash = str(ghost.get("hash") or "")
             if not route_hash or route_hash in seen_hashes:
                 continue
@@ -194,7 +203,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                 entry[2] in ("Ready", "Flagged"))
     counts["Selected"] = sum(1 for entry in all_routes
                              if st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))
-    total_tasks = sum(len(route.get("data", [])) for _, route, _, _ in all_routes)
+    total_tasks = sum(len(route.get("data", [])) for _, route, _, _, _ in all_routes)
     st.markdown(
         f'<span class="revamp-pill">Routes <b>{len(all_routes)}</b></span>'
         f'<span class="revamp-pill">Tasks <b>{total_tasks}</b></span>'
