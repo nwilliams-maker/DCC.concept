@@ -30,9 +30,10 @@ external credentials; this action changes work orders and Onfleet tasks.
 
 The separate Railway project is **DCC Revamp**. Deploy this repository from
 the `revamp/reference-layout` branch and configure it independently. Required
-for a functional dispatcher session: `ONFLEET_KEY`, `MAPBOX_TOKEN`,
-`DATABASE_URL`, `STAY_SALT`, `DCC_SHARED_SECRET`, and any existing app login
-variables. Set `DCC_REVAMP_UI=1`. Do not copy credentials into GitHub. The
+for a functional dispatcher session: `ONFLEET_KEY`, `MAPBOX_TOKEN`, and
+`DATABASE_URL`. `STAY_SALT` enables persistent sign-in; other integration
+credentials depend on which copied tools you use. Set `DCC_REVAMP_UI=1`.
+Do not copy credentials into GitHub. The
 connected Railway integration exposes names but withholds existing secret
 values, so they must be supplied in Railway's secure Variables screen.
 
