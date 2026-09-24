@@ -1,0 +1,15 @@
+# Additional dependencies for the database backend.
+# Install alongside the app's existing requirements.txt:
+#   pip install -r requirements.txt -r migration/requirements.txt
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.13
+
+# Step 5: the portal_api.py service (a separate Railway service from the
+# Streamlit app -- see migration/README.md, "Deploying portal_api.py"). Only
+# needed by that service's build, but kept in this same file rather than a
+# third requirements file since both are "the migration's extra deps".
+# Pinned to what migration/tests/test_portal_api.py was actually run
+# against, per this repo's existing pin-everything policy (see the main
+# requirements.txt's "security audit C6" comment).
+fastapi==0.141.1
+uvicorn==0.46.0

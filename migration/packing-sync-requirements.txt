@@ -1,0 +1,4 @@
+requests==2.32.3
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.13
+playwright==1.55.0

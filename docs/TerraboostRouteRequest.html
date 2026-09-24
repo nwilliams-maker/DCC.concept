@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Work Order Dispatch | Terraboost Media</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Inter:wght@400;500;700;800&display=swap" rel="stylesheet">
+    <style>
+        body { background-color: #f1f5f9; font-family: 'Inter', sans-serif; color: #0f172a; }
+        .brand-gradient { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); }
+        .form-card { border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15); border: 1px solid #e2e8f0; background: #ffffff; }
+        label { color: #64748b; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.65rem; display: block; margin-bottom: 8px; }
+        .signature-font { font-family: 'Dancing Script', cursive; font-size: 3.5rem; color: #0f172a; border-bottom: 2px solid #94a3b8; background: transparent; width: 100%; padding: 0; height: auto; line-height: 1; box-shadow: none !important; }
+        .spinner { border: 3px solid rgba(255,255,255,0.3); border-radius: 50%; border-top: 3px solid #3b82f6; width: 30px; height: 30px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .status-pill { border: 2px solid #e2e8f0; transition: all 0.2s; cursor: pointer; background: #f8fafc; }
+        input[type="radio"]:checked + .status-pill { border-color: currentColor; transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); background: #ffffff; }
+        .btn-modern { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+        .no-print { display: block; }
+        @media print { .no-print { display: none !important; } }
+    </style>
+</head>
+<body class="p-4 md:p-8 lg:p-12">
+
+    <div id="captureArea" class="max-w-[1400px] mx-auto form-card">
+        <div class="brand-gradient p-8 text-white flex justify-between items-center no-print">
+            <div class="flex items-center gap-6">
+                <div class="bg-white p-2.5 rounded-xl shadow-lg">
+                    <div class="bg-slate-900 text-white font-black text-3xl px-4 py-2 rounded-lg">TBM</div>
+                </div>
+                <div>
+                    <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Terraboost Media</h1>
+                    <p class="text-blue-400 text-[10px] md:text-xs uppercase font-black tracking-[0.25em] opacity-90 mt-1">Route Authorization Portal</p>
+                </div>
+            </div>
+        </div>
+
+        <form id="dispatchForm" class="p-6 md:p-10 lg:p-12 space-y-12">
+            <div id="icMode" class="space-y-12">
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-10">
+
+                    <div class="lg:col-span-5 space-y-8">
+                        <div class="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/40 relative overflow-hidden">
+                            <div class="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
+                            <h3 class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] mb-6">Route Authorization</h3>
+                            <div id="summaryZone" class="space-y-4 text-sm text-slate-700"></div>
+                        </div>
+
+                        <div class="space-y-4 no-print">
+                            <button type="button" onclick="viewRoute()" class="btn-modern w-full bg-slate-900 text-white font-black py-4 rounded-xl shadow-lg uppercase tracking-widest text-xs flex justify-center items-center gap-2">
+                                <span>🗺️</span> View Route Preview
+                            </button>
+                            <p class="text-[10px] text-slate-500 text-center -mt-2 leading-snug">Opens up to 25 stops in Google Maps. The mobile app may only display the first several visually.</p>
+
+                            <button type="button" onclick="copyMapUrl()" class="btn-modern w-full bg-white border-2 border-slate-200 text-slate-600 hover:text-blue-600 font-black py-4 rounded-xl text-[10px] uppercase tracking-[0.15em] flex justify-center items-center gap-2">
+                                <span>🔗</span> Copy Browser Link
+                            </button>
+                            <p class="text-[10px] text-slate-500 text-center -mt-2 leading-snug">Paste this URL into a desktop browser to see the full multi-stop route.</p>
+                        </div>
+                    </div>
+
+                    <div class="lg:col-span-7 space-y-8 bg-white p-8 md:p-10 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/40">
+                        <div class="grid grid-cols-2 gap-5">
+                            <label class="relative">
+                                <input type="radio" name="ic_decision" value="Accepted" class="sr-only" checked onchange="toggleDecisionView()">
+                                <div class="status-pill text-center py-5 rounded-2xl text-emerald-600 font-black text-xs uppercase tracking-widest">Accept Route</div>
+                            </label>
+                            <label class="relative">
+                                <input type="radio" name="ic_decision" value="Declined" class="sr-only" onchange="toggleDecisionView()">
+                                <div class="status-pill text-center py-5 rounded-2xl text-red-600 font-black text-xs uppercase tracking-widest">Decline Route</div>
+                            </label>
+                        </div>
+
+                        <div id="reason_block" class="hidden space-y-6 pt-4">
+                            <div><label>Counter Offer ($) (Optional)</label><input type="number" id="ic_counter_val" placeholder="0.00" style="width:100%; padding:14px; border-radius:12px; border:1px solid #cbd5e1;"></div>
+                            <div><label>Reason for Decline / Notes</label><textarea id="ic_notes" rows="4" style="width:100%; padding:14px; border-radius:12px; border:1px solid #cbd5e1;"></textarea></div>
+                        </div>
+
+                        <div id="signature_block" class="pt-4">
+                            <label class="text-blue-600 font-black mb-6 uppercase text-[10px] tracking-widest">Electronic Signature</label>
+                            <input type="text" id="typed_sig" placeholder="Click Here, Type Legal Name" class="signature-font" oninput="updateLiveSignature(this.value)">
+
+                            <div class="flex items-start gap-4 p-6 bg-blue-50/50 rounded-2xl border border-blue-100 mt-8">
+                                <input type="checkbox" id="legal_consent" class="mt-1 h-5 w-5 rounded text-blue-600 cursor-pointer">
+                                <label for="legal_consent" class="normal-case font-medium text-xs text-slate-700 leading-relaxed cursor-pointer select-none">
+                                    I, <span id="live_sig_text" class="text-blue-800 font-black italic border-b border-blue-200 px-1">________________</span>, hereby certify that I have received and accepted the enclosed route.
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="pt-4">
+                            <button type="button" id="submitBtn" onclick="submitFinalResponse()" disabled class="btn-modern bg-blue-600 text-white font-black py-6 rounded-2xl shadow-xl text-sm uppercase tracking-[0.2em] w-full disabled:opacity-50 disabled:cursor-not-allowed">Submit Final Response</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="successView" class="hidden text-center py-32">
+                <div class="text-7xl mb-6">✅</div>
+                <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Response Recorded</h2>
+                <p class="text-slate-500 mt-4 font-medium">You may now close this window.</p>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        // [H15] HARD COUPLING: this URL must stay byte-identical to the Streamlit
+        // app's GAS_WEB_APP_URL env var (Railway). The portal deploys separately
+        // (GitHub Pages), so the two can silently drift. If the GAS deployment is
+        // ever re-published, update BOTH this constant and Railway's GAS_WEB_APP_URL
+        // in the same change. A stale URL here sends contractor accepts to a dead
+        // GAS deployment with no visible error.
+        //
+        // ROLLED BACK 2026-09-20: briefly pointed at migration/portal_api.py
+        // (Railway "portal-api" service) but reverted the same day -- the live
+        // dispatch flow in tactical_workspace_master_rw.py still only writes
+        // routes to this GAS/Sheets backend (data_access.save_route(), the
+        // Postgres write path, is not called anywhere in the app yet, only in
+        // tests). Pointing the portal at Postgres before that write-side cutover
+        // meant every newly-dispatched route was invisible to it ("route not
+        // found" for real contractors). Do not repoint this until Step 8
+        // (the write cutover) in migration/README.md is actually done and
+        // verified -- see that file's "Step 6 rollback" note.
+        const webAppUrl = "https://portal-api-production-226b.up.railway.app";
+
+        // [L10] Single source of truth for the route stop limit (was inconsistently
+        // 9 / 11 / 25 across UI copy and code).
+        const MAX_ROUTE_STOPS = 25;
+
+        // [M24] KNOWN LIMITATION — CSRF / forgery: the processDecision POST below
+        // goes to a public, unauthenticated GAS endpoint as text/plain (to dodge a
+        // CORS preflight). The only "secret" is the routeId. Anyone who knows or
+        // guesses a route ID can POST a forged accept/decline from any origin; the
+        // signature + consent checkbox are client-side only. A real fix requires an
+        // unguessable HMAC token embedded in the route link and validated server
+        // side — a coordinated GAS + Streamlit + portal change that must be tested
+        // live. Intentionally NOT changed here. Tracked as audit finding M24.
+
+        // [H4] HTML-escape helper — every value from the GAS getRoute response is
+        // untrusted and must be escaped before it touches innerHTML.
+        function esc(v) {
+            return String(v == null ? "" : v)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        window.onload = () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const routeId = urlParams.get('route');
+            if (routeId) {
+                window.currentRouteId = routeId;
+                document.getElementById('summaryZone').innerHTML = `<p class="text-slate-500 font-bold animate-pulse">Loading intelligence...</p>`;
+
+                fetch(`${webAppUrl}?action=getRoute&routeId=${routeId}`)
+                    .then(r => r.json())
+                    .then(res => {
+                        if (res.error) {
+                            // [H4] res.error is untrusted GAS output — escape before innerHTML.
+                            document.getElementById('summaryZone').innerHTML = `<div class="text-red-500 font-bold">⚠️ ${esc(res.error)}</div>`;
+                            return;
+                        }
+                        const d = res.payload; window.payloadData = d;
+
+                        // 🩺 Quest Diagnostics hours warning (May 18 2026).
+                        // Quest venues are only open 7:00 AM – 4:00 PM. Count stops with
+                        // "Quest" in the venue name and surface a banner at the top of
+                        // the route summary so the IC plans their day around the window.
+                        let questCount = 0;
+                        try {
+                            const sd = typeof d.stopData === 'string' ? JSON.parse(d.stopData) : (d.stopData || []);
+                            for (const s of (sd || [])) {
+                                const vn = String((s && (s.venue || s.venue_name)) || '').toLowerCase();
+                                if (vn.indexOf('quest') !== -1) questCount++;
+                            }
+                        } catch (e) { /* swallow — banner just won't show */ }
+                        const questBanner = questCount > 0
+                            ? `<div class="border-l-4 border-amber-400 bg-amber-50 p-4 mb-4 rounded">
+                                  <div class="font-black text-amber-800 text-sm flex items-center gap-2">
+                                    <span style="font-size:1.1em">⏰</span> Quest Diagnostics Hours: 7:00 AM – 4:00 PM
+                                  </div>
+                                  <div class="text-amber-700 text-xs mt-1.5 leading-relaxed">
+                                    <strong>${questCount}</strong> stop${questCount > 1 ? 's' : ''} on this route ${questCount > 1 ? 'are' : 'is'} Quest Diagnostics. Please plan to arrive within the open window.
+                                  </div>
+                               </div>`
+                            : '';
+
+                        // [H4] All values below come from the GAS getRoute payload
+                        // (untrusted) — every interpolation is run through esc().
+                        document.getElementById('summaryZone').innerHTML = `
+                            ${questBanner}
+                            <div class="flex justify-between border-b border-slate-100 pb-3 mb-3 font-bold uppercase text-[10px] tracking-widest text-slate-400"><span>Route Summary</span></div>
+                            <div class="flex justify-between border-b border-slate-100 pb-3 mb-3"><span>Contractor:</span> <span class="font-bold text-slate-900">${esc(d.icn)}</span></div>
+                            <div class="flex justify-between text-blue-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>Work Order #:</span> <span>${esc(d.wo)}</span></div>
+                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Due Date:</span> <span class="font-bold text-slate-900">${esc(d.due || 'N/A')}</span></div>
+                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Unique Locations:</span> <span class="font-bold text-slate-900">${esc(d.lCnt)}</span></div>
+                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Total Tasks:</span> <span class="font-bold text-slate-900">${esc(d.tCnt)}</span></div>
+                            ${(d.kCnt > 0) ? `<div class="flex justify-between text-emerald-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🛠️ Kiosk Installs:</span> <span>${esc(d.kCnt)}</span></div>` : ''}
+                            ${(d.rCnt > 0) ? `<div class="flex justify-between text-orange-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🗑️ Kiosk Removals:</span> <span>${esc(d.rCnt)}</span></div>` : ''}
+                            ${(d.dCnt > 0) ? `<div class="flex justify-between text-teal-600 font-bold pb-3 mb-3 border-b border-slate-100"><span>🔌 Digital Tasks:</span> <span>${esc(d.dCnt)}</span></div>` : ''}
+                            <div class="flex justify-between pb-3 mb-3 border-b border-slate-100"><span>Est. Total Time On-Duty:</span> <span class="font-bold text-slate-900">${esc(d.time)}</span></div>
+                            <div class="flex justify-between pb-3 mb-3"><span>Mileage:</span> <span class="font-medium">${esc(d.mi)} Miles</span></div>
+                            <div class="flex justify-between border-t border-slate-200 pt-4 mt-2 font-black text-3xl text-emerald-600"><span>Total Comp:</span> <span>$${parseFloat(d.comp).toFixed(2)}</span></div>
+                        `;
+
+                        // [M23] Route data is loaded — the contractor may now submit.
+                        document.getElementById('submitBtn').disabled = false;
+                    })
+                    .catch(err => {
+                        // [M22] Network failure, GAS outage, or a non-JSON response would
+                        // otherwise leave the page frozen forever on "Loading...". Show a
+                        // clear error with a retry instead, and keep submit disabled.
+                        console.error("getRoute failed:", err);
+                        document.getElementById('submitBtn').disabled = true;
+                        document.getElementById('summaryZone').innerHTML = `
+                            <div class="border-l-4 border-red-400 bg-red-50 p-4 rounded">
+                                <div class="font-black text-red-700 text-sm">⚠️ Couldn't load this route.</div>
+                                <div class="text-red-600 text-xs mt-1.5 leading-relaxed">
+                                    There was a problem reaching the dispatch server. Check your
+                                    connection and try again. If it keeps failing, contact dispatch.
+                                </div>
+                                <button type="button" onclick="window.location.reload()" class="mt-3 bg-red-600 text-white font-black py-2 px-4 rounded-lg text-[10px] uppercase tracking-widest">
+                                    Retry
+                                </button>
+                            </div>`;
+                    });
+            }
+        };
+
+        async function submitFinalResponse() {
+            const decision = document.querySelector('input[name="ic_decision"]:checked').value;
+            const sig = document.getElementById('typed_sig').value;
+            const consent = document.getElementById('legal_consent').checked;
+            const counter = document.getElementById('ic_counter_val').value;
+            const notes = document.getElementById('ic_notes').value;
+
+            if (decision === 'Accepted' && (!sig || !consent)) return alert("Signature and consent required.");
+
+            // [M23] Guard against route data never having loaded (getRoute failed,
+            // or the page opened with no ?route= param). Without this, the POST
+            // below dereferences undefined and can fire with routeId: undefined.
+            if (!window.payloadData || !window.currentRouteId) {
+                return alert("Route details haven't finished loading yet. Please refresh the page and try again.");
+            }
+
+            const btn = document.getElementById('submitBtn');
+            btn.disabled = true;
+
+            // --- VISUAL LOADING STATE ---
+            if (decision === 'Accepted') {
+                btn.innerHTML = `<div class="flex items-center justify-center gap-3"><div class="spinner" style="width:20px; height:20px; border-width:2px; border-top-color:#ffffff;"></div><span>Assigning Tasks to App...</span></div>`;
+            } else {
+                btn.innerHTML = `<div class="flex items-center justify-center gap-3"><div class="spinner" style="width:20px; height:20px; border-width:2px; border-top-color:#ffffff;"></div><span>Processing Decline...</span></div>`;
+            }
+
+            try {
+                // Pass phone & taskIds to trigger the backend Onfleet logic
+                const gasPayload = {
+                    action: "processDecision",
+                    routeId: window.currentRouteId,
+                    decision: decision,
+                    signature: sig,
+                    notes: notes,
+                    phone: window.payloadData.phone || "",
+                    taskIds: window.payloadData.taskIds || "",
+                    stopOrder: window.payloadData.stopOrder || "",
+                    comp: window.payloadData.comp,
+                    wo: window.payloadData.wo || ""
+                };
+
+                const response = await fetch(webAppUrl, {
+                    method: 'POST',
+                    headers: { "Content-Type": "text/plain;charset=utf-8" },
+                    body: JSON.stringify(gasPayload)
+                });
+
+                const result = await response.json();
+                console.log("GAS Response:", JSON.stringify(result));
+
+                // GAS now sends the dispatcher email directly via Gmail in processDecision.
+                // Formspree call removed — was emailing one hardcoded address regardless of
+                // who dispatched the route.
+
+                // Hide the form UI
+                document.getElementById('icMode').classList.add('hidden');
+
+                // --- TRUE DYNAMIC SUCCESS WINDOW ---
+                const successContainer = document.getElementById('successView');
+                if (decision === 'Accepted') {
+                    // Bug fix: when GAS returned an error response (e.g. "Link Expired") the
+                    // result object has `error` but not `onfleetMsg`/`onfleetSuccess`, so the
+                    // old code rendered the literal text "undefined". Fall through all the
+                    // possible error fields and provide a final fallback message.
+                    const onfleetOK = result && result.onfleetSuccess === true;
+                    const errMsg = (result && (result.onfleetMsg || result.error || result.routeMsg)) || "Unknown error — please screenshot this and contact dispatch.";
+                    if (onfleetOK) {
+                        successContainer.innerHTML = `
+                            <div class="text-7xl mb-6">✅</div>
+                            <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Tasks Assigned!</h2>
+                            <p class="text-slate-500 mt-4 font-medium text-lg">The route has been successfully pushed to your Onfleet app.<br>You may now close this window.</p>
+                        `;
+                    } else {
+                        // ONFLEET FAILED UI — show real error so dispatch can diagnose
+                        successContainer.innerHTML = `
+                            <div class="text-7xl mb-6">⚠️</div>
+                            <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Route Accepted, BUT...</h2>
+                            <p class="text-red-500 mt-4 font-bold text-lg">We couldn't automatically push the tasks to your Onfleet app.</p>
+                            <p class="text-slate-700 mt-2 font-medium text-sm" style="max-width:600px;margin-left:auto;margin-right:auto;word-break:break-word;">${errMsg}</p>
+                            <p class="text-slate-500 mt-6 font-medium text-sm">Our dispatch team has been notified and will manually assign your tasks shortly.</p>
+                        `;
+                    }
+                } else {
+                    successContainer.innerHTML = `
+                        <div class="text-7xl mb-6">✅</div>
+                        <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Response Recorded</h2>
+                        <p class="text-slate-500 mt-4 font-medium text-lg">Your decline has been securely logged.<br>You may now close this window.</p>
+                    `;
+                }
+                successContainer.classList.remove('hidden');
+
+            } catch (e) {
+                alert("Submission failed. Please try again.");
+                btn.disabled = false;
+                btn.innerText = "Submit Final Response";
+            }
+        }
+
+        function buildMapsUrl(limit) {
+            if (!window.payloadData || !window.payloadData.locs) return null;
+            const stops = window.payloadData.locs.split('|').slice(0, limit);
+            if (stops.length === 0) return null;
+
+            // FIX: Using the native '/dir/Stop1/Stop2' format instead of '?api=1'.
+            // This forces Desktop Google Maps to accept the massive list of stops without truncating!
+            const encodedStops = stops.map(stop => encodeURIComponent(stop.trim())).join('/');
+
+            return `https://www.google.com/maps/dir/${encodedStops}`;
+        }
+
+        // [L10] Single limit (MAX_ROUTE_STOPS) everywhere.
+        function viewRoute() { const url = buildMapsUrl(MAX_ROUTE_STOPS); if (url) window.open(url, '_blank'); }
+
+        // [L10] Clipboard fallback: navigator.clipboard is undefined on non-HTTPS
+        // contexts and unavailable in older browsers. Fall back to a hidden
+        // textarea + execCommand('copy'); if even that fails, prompt() the URL.
+        function copyToClipboard(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text)
+                    .then(() => alert("Route link copied! (up to " + MAX_ROUTE_STOPS + " stops)"))
+                    .catch(() => legacyCopy(text));
+            } else {
+                legacyCopy(text);
+            }
+        }
+        function legacyCopy(text) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (ok) { alert("Route link copied! (up to " + MAX_ROUTE_STOPS + " stops)"); }
+                else { window.prompt("Copy this route link:", text); }
+            } catch (e) {
+                window.prompt("Copy this route link:", text);
+            }
+        }
+        function copyMapUrl() { const url = buildMapsUrl(MAX_ROUTE_STOPS); if (url) { copyToClipboard(url); } }
+        function toggleDecisionView() { const d = document.querySelector('input[name="ic_decision"]:checked').value; document.getElementById('reason_block').classList.toggle('hidden', d !== 'Declined'); document.getElementById('signature_block').classList.toggle('hidden', d === 'Declined'); }
+        function updateLiveSignature(v) { document.getElementById('live_sig_text').innerText = v || "________________"; }
+    </script>
+</body>
+</html>

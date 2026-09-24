@@ -1,0 +1,19 @@
+[theme]
+primaryColor = "#633094"
+backgroundColor = "#f1f5f9"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#0f172a"
+
+# Apr 27 2026 — added [server] block to harden the WebSocket against Railway's edge
+# proxy closing idle connections, which was forcing fresh sessions every ~13 minutes
+# and reverting every pod to the Initialize button. Diagnostic showed a clean ws-close
+# with no errors — classic signature of an upstream idle timeout.
+#
+# May 3 2026 — enableStaticServing = true so the watcher JS at static/dcc_watcher.js
+# is served at /app/static/dcc_watcher.js. Required for the v9 watcher load pattern.
+[server]
+headless = true
+enableWebsocketCompression = false
+enableXsrfProtection = false
+enableCORS = false
+enableStaticServing = true

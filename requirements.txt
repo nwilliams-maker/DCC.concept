@@ -1,0 +1,17 @@
+# Pinned for reproducible Railway builds (security audit C6).
+# Unpinned dependencies previously caused a silent production outage when a
+# Streamlit release shipped between two rebuilds. Every dependency is now
+# pinned to an exact version. If a future rebuild misbehaves, confirm these
+# match a known-good `pip freeze` of the working Railway container and adjust.
+streamlit==1.39.0
+requests==2.32.3
+pandas==2.2.3
+folium==0.18.0
+streamlit-folium==0.23.1
+# Optional Postgres backend (see migration/README.md). Only exercised when
+# DATABASE_URL is set in Railway; otherwise data_access.py is imported but
+# never called, and the app behaves exactly as it does today.
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.13
+
+reportlab==4.2.5

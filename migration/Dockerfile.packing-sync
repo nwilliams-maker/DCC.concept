@@ -1,0 +1,7 @@
+FROM mcr.microsoft.com/playwright/python:v1.55.0-noble
+
+WORKDIR /app
+COPY migration/packing-sync-requirements.txt /app/migration/packing-sync-requirements.txt
+RUN pip install --no-cache-dir -r /app/migration/packing-sync-requirements.txt
+COPY migration /app/migration
+CMD ["python", "-u", "-m", "migration.packing_list_sync"]

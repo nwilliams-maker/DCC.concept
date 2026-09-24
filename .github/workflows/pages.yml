@@ -1,0 +1,49 @@
+name: Deploy Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Without `pages: write` + `id-token: write`, actions/deploy-pages@v4 returns 401.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deploy at a time — prevents queued runs from racing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # SECURITY AUDIT C2: publish ONLY the contractor-facing portal, not the
+          # whole repository. Previously path '.' served every backend source
+          # file publicly at https://<user>.github.io/<repo>/<filename>.
+          #
+          # ACTION REQUIRED before pushing this change: in the GitHub repo,
+          # create a folder named docs/ and move portal-dcc-rw.html into it.
+          # Move any other public portal assets there too. Commit the move
+          # together with this file. Public URL is unchanged:
+          #   https://<user>.github.io/<repo>/portal-dcc-rw.html
+          path: 'docs'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
