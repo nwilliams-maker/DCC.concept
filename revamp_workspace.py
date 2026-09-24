@@ -121,6 +121,10 @@ def _fn_csv_route(route, route_hash, ghost_to_cluster):
     return {**route, "_cluster_hash": route_hash}
 
 
+def _toggle_state_group(key):
+    st.session_state[key] = not st.session_state.get(key, False)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _fetch_fn_assignment_ids():
     """Resolve Field Nation separately from the capped dispatch worker feed."""
@@ -178,21 +182,24 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     div[class*="st-key-revamp_status"] label {border-radius:9px;padding:7px 10px;
         cursor:pointer;white-space:nowrap}
     div[class*="st-key-revamp_status"] label:has(input:checked) {background:#f1eaff;color:#5730a3}
-    div[class*="st-key-revamp_route_"] button {height:auto!important;min-height:4.4rem;
-        border-radius:8px;border:1px solid #e8e2f3;background:#fff;color:#35405b;
-        padding:10px 12px;text-align:left;justify-content:flex-start;white-space:normal}
+    div[class*="st-key-revamp_route_"] button {height:auto!important;min-height:4rem;
+        border-radius:9px;border:1px solid #e9e5f1;background:#fff;color:#35405b;
+        padding:9px 12px;text-align:left;justify-content:flex-start;white-space:normal;
+        box-shadow:none;margin:2px 0 4px}
     div[class*="st-key-revamp_route_"] button p {white-space:pre-line!important;
-        overflow-wrap:anywhere;line-height:1.4;margin:0;text-align:left}
+        overflow-wrap:break-word;line-height:1.4;margin:0;text-align:left;font-size:.82rem}
     div[class*="st-key-revamp_route_"] button:hover {border-color:#6841b0;background:#f8f4ff}
+    div[class*="st-key-revamp_state_toggle_"] button {background:#f6f3fc;
+        border:1px solid #e5dcf3;border-radius:9px;min-height:2.55rem;
+        width:100%;box-shadow:none;text-align:left;justify-content:space-between;
+        color:#493278;font-weight:700;padding:6px 13px;margin:8px 0 5px}
+    div[class*="st-key-revamp_state_toggle_"] button:hover {background:#eee7fa;
+        border-color:#c7b2e7}
     div[class*="st-key-revamp_bulk_"] label, div[class*="st-key-revamp_fn_"] label
         {width:100%;cursor:pointer;align-items:flex-start}
     div[class*="st-key-revamp_bulk_"] label p, div[class*="st-key-revamp_fn_"] label p
         {white-space:normal;overflow-wrap:anywhere;
         line-height:1.35;font-weight:650;color:#243047}
-    div[class*="st-key-revamp_state_"] details {border:1px solid #e4dfef;
-        border-radius:10px;background:#fff;margin:6px 0 12px;overflow:hidden}
-    div[class*="st-key-revamp_state_"] summary {font-weight:700;color:#453276;
-        padding:8px 12px;background:#f8f6fc}
     </style>
     """, unsafe_allow_html=True)
 
@@ -446,10 +453,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 st.session_state["_revamp_show_fn_next"] = True
                 st.rerun()
 
-    left, right = st.columns([2, 3], gap="medium")
+    left, right = st.columns([2.1, 3], gap="medium")
     with left:
         st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
-        with st.container(height=650, border=True):
+        with st.container(height=650, border=False):
             if not matching:
                 st.info("No matching routes.")
             grouped = {}
@@ -458,15 +465,22 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 state_name = str(entry[1].get("state") or "Unknown state").strip().upper()
                 grouped.setdefault((stage, state_name), []).append(entry)
             last_stage = None
-            for (stage, state_name), entries in grouped.items():
+            for group_index, ((stage, state_name), entries) in enumerate(grouped.items()):
                 if status == "Field Nation" and stage != last_stage:
                     st.markdown(f"**{stage}**")
                     last_stage = stage
-                with st.expander(f"{state_name}  ·  {len(entries)} routes", expanded=len(grouped) == 1):
+                group_key = f"_revamp_group_{status}_{stage}_{state_name}"
+                st.session_state.setdefault(group_key, group_index == 0)
+                is_open = st.session_state[group_key]
+                st.button(f"{state_name}  ·  {len(entries)} {'route' if len(entries) == 1 else 'routes'}  {'−' if is_open else '+'}",
+                          key=f"revamp_state_toggle_{status}_{stage}_{state_name}",
+                          on_click=_toggle_state_group, args=(group_key,),
+                          use_container_width=True)
+                if is_open:
                     for pod, route, state, route_hash, nearest in entries:
                         key = f"{pod}:{route_hash}"
                         city = route.get("city") or "Unknown city"
-                        select_col, card_col = st.columns([.11, .89], vertical_alignment="center")
+                        select_col, card_col = st.columns([.09, .91], gap="small", vertical_alignment="center")
                         with select_col:
                             if state in ("Ready", "Flagged"):
                                 st.checkbox("Select route for Field Nation", key=f"revamp_bulk_{key}",
@@ -479,9 +493,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             card_state = stage if status == "Field Nation" else state
                             provider = str(fn_providers.get(route_hash) or "").strip()
                             provider_label = f" · FN: {provider}" if provider else ""
+                            stops = route.get('stops', 0)
+                            tasks = len(route.get('data', [])) or len((route.get('_ghost_record') or {}).get('task_ids') or [])
                             label = (f"{city}, {route.get('state', '')} · {card_state}{provider_label}{removal}\n"
-                                     f"{pod} pod · {route.get('stops', 0)} stops · "
-                                     f"{len(route.get('data', [])) or len((route.get('_ghost_record') or {}).get('task_ids') or [])} tasks")
+                                     f"{pod} · {stops} {'stop' if stops == 1 else 'stops'} · "
+                                     f"{tasks} {'task' if tasks == 1 else 'tasks'}")
                             if nearest:
                                 label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
                             if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
