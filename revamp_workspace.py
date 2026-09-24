@@ -395,8 +395,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         st.session_state["revamp_status"] = "Accepted"
         _remember_view()
     status = st.radio("Route status", STATUSES, horizontal=True,
-                      label_visibility="collapsed", key="revamp_status", on_change=_remember_view,
-                      format_func=lambda option: f"{option}  {counts[option]}")
+                      label_visibility="collapsed", key="revamp_status", on_change=_remember_view)
     notice = st.session_state.pop("_revamp_notice", None)
     if notice:
         (st.warning if notice[0] == "warning" else st.success)(notice[1])
