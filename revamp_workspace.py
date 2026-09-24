@@ -317,6 +317,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     status = st.radio("Route status", STATUSES, horizontal=True,
                       label_visibility="collapsed", key="revamp_status",
                       format_func=lambda option: f"{option}  {counts[option]}")
+    notice = st.session_state.pop("_revamp_notice", None)
+    if notice:
+        (st.warning if notice[0] == "warning" else st.success)(notice[1])
     show_cvs = st.toggle("Show CVS Kiosk Removal routes", value=False,
                          key="revamp_show_cvs_removal",
                          help="Show removal routes in Ready and Flagged. Routes already sent or assigned remain visible.")
@@ -561,10 +564,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             fetch_sent_records_from_sheet.clear()
                             st.session_state.pop(f"route_state_{route_hash}", None)
                             if result.get("partial"):
-                                st.warning(f"Route moved to Accepted, but Onfleet rename needs attention: {result.get('partialReason', 'unknown error')}")
+                                st.session_state["_revamp_notice"] = (
+                                    "warning", f"Route moved to Accepted, but Onfleet Route Plan Name needs attention: {result.get('partialReason', 'unknown error')}")
                             else:
-                                st.success(f"Assigned to {provider.strip()}. Onfleet route named {result.get('wo', 'FN route')}.")
+                                st.session_state["_revamp_notice"] = (
+                                    "success", f"Assigned to {provider.strip()}. Onfleet route named {result.get('wo', 'FN route')}.")
                             st.session_state["_revamp_show_accepted_next"] = True
+                            st.rerun()
                         except Exception as exc:
                             st.error(f"Could not assign Field Nation rep: {exc}")
         else:
