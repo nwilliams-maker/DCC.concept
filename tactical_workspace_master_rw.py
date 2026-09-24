@@ -10543,7 +10543,9 @@ if os.environ.get("DCC_REVAMP_UI") == "1":
         st.radio("Workspace", ["Dispatch", "Full tools"], key="revamp_mode")
     if st.session_state["revamp_mode"] == "Dispatch":
         from revamp_workspace import render_workspace
-        render_workspace(_can_access_tab, process_pod, render_dispatch)
+        render_workspace(_can_access_tab, process_pod, render_dispatch,
+                         haversine, DB_ENGINE, assign_tasks_to_fn_team,
+                         fetch_sent_records_from_sheet, DEFAULT_DUE_DAYS)
         st.stop()
 
 # Updated Main Tabs

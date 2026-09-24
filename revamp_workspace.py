@@ -7,11 +7,12 @@ so a dashboard interaction does not build every dispatch card at once.
 
 import hashlib
 import html
+from datetime import date, timedelta
 
 import streamlit as st
 
 
-STATUSES = ("All", "Ready", "Flagged", "Selected", "Routed", "Accepted")
+STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "Selected", "Routed", "Accepted")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red")
 
 
@@ -20,7 +21,7 @@ def _route_hash(route):
     return hashlib.md5("".join(ids).encode()).hexdigest()
 
 
-def _route_status(route, sent_db):
+def _route_status(route, sent_db, nearest_miles=None):
     route_hash = _route_hash(route)
     local = st.session_state.get(f"route_state_{route_hash}")
     if local == "field_nation":
@@ -41,7 +42,7 @@ def _route_status(route, sent_db):
                 return "Accepted"
             if status in ("sent", "field_nation", "declined"):
                 return "Routed"
-    if route.get("status") == "Flagged":
+    if route.get("status") == "Flagged" or (nearest_miles is not None and nearest_miles > 50):
         return "Flagged"
     return "Ready"
 
@@ -59,7 +60,54 @@ def _open_full_tools():
     st.session_state["revamp_mode"] = "Full tools"
 
 
-def render_workspace(can_access_tab, process_pod, render_dispatch):
+def _eligible_ics(ic_df):
+    if ic_df is None or ic_df.empty:
+        return []
+    columns = {str(c).strip().lower(): c for c in ic_df.columns}
+    if not all(k in columns for k in ("lat", "lng", "ic list")):
+        return []
+    result = []
+    for _, row in ic_df.iterrows():
+        if str(row.get(columns["ic list"], "")).strip().upper() not in (
+            "ACTIVE", "IN TRAINING", "NEED INSURANCE"
+        ):
+            continue
+        try:
+            latitude = float(row[columns["lat"]])
+            longitude = float(row[columns["lng"]])
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                continue
+        except (ValueError, TypeError):
+            continue
+        result.append((str(row.get(columns.get("name"), "Unknown")), latitude, longitude))
+    return result
+
+
+def _nearest_ic(route, eligible_ics, haversine):
+    center = route.get("center")
+    if not center or len(center) != 2:
+        return None
+    distances = []
+    for name, latitude, longitude in eligible_ics:
+        distance = haversine(center[0], center[1], latitude, longitude)
+        if distance is not None and 0 <= distance < float("inf"):
+            distances.append((name, distance))
+    return min(distances, key=lambda row: row[1]) if distances else None
+
+
+def _select_visible(keys):
+    for key in keys:
+        st.session_state[f"revamp_bulk_{key}"] = True
+
+
+def _clear_selection(keys):
+    for key in keys:
+        st.session_state[f"revamp_bulk_{key}"] = False
+
+
+def render_workspace(can_access_tab, process_pod, render_dispatch,
+                     haversine, db_engine, assign_tasks_to_fn_team,
+                     fetch_sent_records_from_sheet, default_due_days=14):
     """Render one selected route while retaining the existing dispatch actions."""
     st.markdown("""
     <style>
@@ -108,14 +156,42 @@ def render_workspace(can_access_tab, process_pod, render_dispatch):
         st.caption("Not loaded yet: " + ", ".join(missing) + ". Sync routes to add them.")
 
     sent_db = st.session_state.get("sent_db", {}) or {}
+    eligible_ics = _eligible_ics(st.session_state.get("ic_df"))
     all_routes = []
+    seen_hashes = set()
     for pod in loaded:
         for route in st.session_state.get(f"clusters_{pod}", []):
             if route.get("is_digital"):
                 continue
-            all_routes.append((pod, route, _route_status(route, sent_db), _route_hash(route)))
+            nearest = _nearest_ic(route, eligible_ics, haversine)
+            route_hash = _route_hash(route)
+            seen_hashes.add(route_hash)
+            all_routes.append((pod, route,
+                               _route_status(route, sent_db, nearest[1] if nearest else None),
+                               route_hash, nearest))
+    # Accepted routes often leave Onfleet's unassigned feed; include the
+    # persisted ghost records so they remain visible in this workspace.
+    for pod in loaded:
+        for ghost in (st.session_state.get("ghost_db", {}) or {}).get(pod, []):
+            route_hash = str(ghost.get("hash") or "")
+            if not route_hash or route_hash in seen_hashes:
+                continue
+            seen_hashes.add(route_hash)
+            ghost_status = str(ghost.get("status", "")).lower()
+            state = "Accepted" if ghost_status in ("accepted", "finalized") else "Routed"
+            route = {
+                "_is_ghost": True, "wo": ghost.get("wo", ""),
+                "city": ghost.get("city", "Unknown"),
+                "state": ghost.get("state", ""),
+                "stops": ghost.get("stops", ghost.get("lCnt", 0)),
+                "data": [],
+            }
+            all_routes.append((pod, route, state, route_hash, None))
     counts = {status: sum(1 for entry in all_routes if entry[2] == status)
               for status in STATUSES[1:]}
+    counts["Over 50 mi"] = sum(1 for entry in all_routes
+                                if entry[4] and entry[4][1] > 50 and
+                                entry[2] in ("Ready", "Flagged"))
     selected_key = st.session_state.get("revamp_selected_route")
     counts["Selected"] = sum(1 for entry in all_routes
                              if f"{entry[0]}:{entry[3]}" == selected_key)
@@ -132,9 +208,59 @@ def render_workspace(can_access_tab, process_pod, render_dispatch):
                       label_visibility="collapsed", key="revamp_status")
     matching = [entry for entry in all_routes if
                 (status == "All" or entry[2] == status or
+                 (status == "Over 50 mi" and entry[4] and entry[4][1] > 50
+                  and entry[2] in ("Ready", "Flagged")) or
                  (status == "Selected" and f"{entry[0]}:{entry[3]}" == selected_key)) and
                 (not search or search in _searchable(entry[1]))]
     st.caption(f"Showing {len(matching)} matching route{'s' if len(matching) != 1 else ''}")
+
+    visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
+                    if entry[2] in ("Ready", "Flagged")]
+    select_col, clear_col, due_col, action_col = st.columns([1, 1, 1.4, 1.7],
+                                                           vertical_alignment="bottom")
+    with select_col:
+        st.button("Select visible", key="revamp_select_visible",
+                  on_click=_select_visible, args=(visible_keys,),
+                  disabled=not visible_keys, use_container_width=True)
+    with clear_col:
+        st.button("Clear", key="revamp_clear_selection", on_click=_clear_selection,
+                  args=([f"{e[0]}:{e[3]}" for e in all_routes],),
+                  use_container_width=True)
+    with due_col:
+        fn_due = st.date_input("Field Nation due", value=date.today() + timedelta(days=default_due_days),
+                               key="revamp_fn_due")
+    chosen = [entry for entry in all_routes if entry[2] in ("Ready", "Flagged")
+              and st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False)]
+    fn_team_id = st.session_state.get("_fn_team_id")
+    fn_worker_id = st.session_state.get("_fn_worker_id")
+    with action_col:
+        assign_clicked = st.button(f"Assign {len(chosen)} to Field Nation",
+                                   key="revamp_assign_fn", type="primary",
+                                   disabled=not chosen or db_engine is None or
+                                            not fn_team_id or not fn_worker_id,
+                                   use_container_width=True)
+    if db_engine is None:
+        st.caption("Field Nation assignment needs the new Railway database connection.")
+    elif not fn_team_id or not fn_worker_id:
+        st.caption("Field Nation team and worker must be loaded before bulk assignment.")
+    if assign_clicked:
+        from revamp_bulk_fn import bulk_assign
+        saved, skipped, errors = bulk_assign(
+            db_engine, [(pod, route) for pod, route, _, _, _ in chosen], fn_due,
+            assign_tasks_to_fn_team, fn_team_id, fn_worker_id,
+        )
+        for route_hash, _ in saved:
+            st.session_state[f"route_state_{route_hash}"] = "field_nation"
+            st.session_state[f"reverted_{route_hash}"] = False
+        _clear_selection([f"{pod}:{route_hash}" for pod, _, _, route_hash, _ in chosen])
+        if saved:
+            fetch_sent_records_from_sheet.clear()
+            st.success(f"Saved {len(saved)} route(s) to Field Nation.")
+        if skipped:
+            st.info(f"{len(skipped)} route(s) were already assigned.")
+        if errors:
+            st.error(f"{len(errors)} route(s) could not be assigned: " +
+                     "; ".join(msg for _, msg in errors[:3]))
 
     left, right = st.columns([1, 3], gap="small")
     with left:
@@ -142,14 +268,22 @@ def render_workspace(can_access_tab, process_pod, render_dispatch):
         with st.container(height=650, border=True):
             if not matching:
                 st.info("No matching routes.")
-            for pod, route, state, route_hash in matching:
+            for pod, route, state, route_hash, nearest in matching:
                 key = f"{pod}:{route_hash}"
                 city = route.get("city") or "Unknown city"
                 label = (f"{city}, {route.get('state', '')} · {state}"
                          f"\n{pod} pod · {route.get('stops', 0)} stops · "
                          f"{len(route.get('data', []))} tasks")
-                if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
-                    st.session_state["revamp_selected_route"] = key
+                if nearest:
+                    label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
+                select_cell, route_cell = st.columns([0.13, 0.87], vertical_alignment="center")
+                with select_cell:
+                    if state in ("Ready", "Flagged"):
+                        st.checkbox("Select for FN", key=f"revamp_bulk_{key}",
+                                    label_visibility="collapsed")
+                with route_cell:
+                    if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
+                        st.session_state["revamp_selected_route"] = key
 
     with right:
         selection = st.session_state.get("revamp_selected_route")
@@ -159,11 +293,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch):
         if current is None:
             st.info("Select a route from the list.")
             return
-        pod, route, state, route_hash = current
+        pod, route, state, route_hash, nearest = current
         title = f"{route.get('city', 'Route')}, {route.get('state', '')}"
         st.markdown(f"### {html.escape(title)}  ·  {html.escape(state)}")
         st.caption(f"{pod} pod · {route.get('stops', 0)} stops · "
                    f"{len(route.get('data', []))} tasks")
+        if nearest:
+            st.caption(f"Closest eligible IC: {nearest[0]} · {nearest[1]:.1f} mi")
         if state in ("Ready", "Flagged"):
             # Reuse the existing contractor, compensation, routing, FN,
             # bundling and link-generation logic for the selected live route.
