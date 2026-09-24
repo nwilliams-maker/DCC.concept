@@ -10146,6 +10146,32 @@ if '_auth_user' not in st.session_state:
             height=0,
         )
 
+# Temporary workbook migration on this isolated revamp service. The form is
+# disabled unless both Railway variables are set; never exposes the DB URL.
+if os.environ.get("DCC_WORKBOOK_IMPORT") == "1" and st.query_params.get("import_workbook") == "1":
+    import hmac as _hmac
+    st.title("DCC Revamp workbook import")
+    with st.form("_one_time_import_form"):
+        _import_token = st.text_input("Import token", type="password")
+        _import_file = st.file_uploader("WO Request workbook", type=["xlsx"])
+        _import_submit = st.form_submit_button("Import routes and Field Nation")
+    if _import_submit:
+        _expected = os.environ.get("DCC_WORKBOOK_IMPORT_TOKEN") or ""
+        if not _expected or not _hmac.compare_digest(_expected, _import_token):
+            st.error("Invalid import token")
+        elif _import_file is None:
+            st.error("Select the workbook first")
+        else:
+            from migration.import_workbook import import_workbook
+            try:
+                with st.spinner("Importing and verifying records"):
+                    _summary = import_workbook(_import_file.getvalue(), DATABASE_URL)
+                st.success("Import complete")
+                st.json(_summary)
+            except Exception as _import_error:
+                st.error(f"Import failed: {type(_import_error).__name__}: {_import_error}")
+    st.stop()
+
 # --- LOGIN GATE ---
 # Block all downstream rendering until the user signs in. Once authenticated,
 # their record sits in st.session_state['_auth_user'] for the lifetime of the
