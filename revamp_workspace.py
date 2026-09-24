@@ -125,6 +125,78 @@ def _toggle_state_group(key):
     st.session_state[key] = not st.session_state.get(key, False)
 
 
+def _refresh_bulk_actions():
+    st.session_state["_revamp_refresh_bulk_actions"] = True
+
+
+def _remember_view():
+    status = st.session_state.get("revamp_status")
+    if status in STATUSES:
+        st.query_params["view"] = status
+
+
+def _remember_pod():
+    pod = st.session_state.get("revamp_pod")
+    if pod:
+        st.query_params["pod"] = pod
+
+
+@st.fragment
+def _render_route_list(matching, status, fn_posted, fn_providers):
+    """State toggles rerun only this list; route clicks refresh the detail pane."""
+    st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+    with st.container(height=650, border=False):
+        if not matching:
+            st.info("No matching routes.")
+        grouped = {}
+        for entry in matching:
+            stage = _fn_stage(entry[3], fn_posted, fn_providers) if status == "Field Nation" else ""
+            state_name = str(entry[1].get("state") or "Unknown state").strip().upper()
+            grouped.setdefault((stage, state_name), []).append(entry)
+        last_stage = None
+        for group_index, ((stage, state_name), entries) in enumerate(grouped.items()):
+            if status == "Field Nation" and stage != last_stage:
+                st.markdown(f"**{stage}**")
+                last_stage = stage
+            group_key = f"_revamp_group_{status}_{stage}_{state_name}"
+            st.session_state.setdefault(group_key, group_index == 0)
+            is_open = st.session_state[group_key]
+            st.button(f"{state_name}  ·  {len(entries)} {'route' if len(entries) == 1 else 'routes'}  {'−' if is_open else '+'}",
+                      key=f"revamp_state_toggle_{status}_{stage}_{state_name}",
+                      on_click=_toggle_state_group, args=(group_key,),
+                      use_container_width=True)
+            if not is_open:
+                continue
+            for pod, route, state, route_hash, nearest in entries:
+                key = f"{pod}:{route_hash}"
+                city = route.get("city") or "Unknown city"
+                select_col, card_col = st.columns([.09, .91], gap="small", vertical_alignment="center")
+                with select_col:
+                    if state in ("Ready", "Flagged"):
+                        st.checkbox("Select route for Field Nation", key=f"revamp_bulk_{key}",
+                                    label_visibility="collapsed", on_change=_refresh_bulk_actions)
+                    elif status == "Field Nation":
+                        st.checkbox("Select for Field Nation CSV", key=f"revamp_fn_{key}",
+                                    label_visibility="collapsed", on_change=_refresh_bulk_actions)
+                with card_col:
+                    removal = " · CVS Removal" if route.get("is_removal") else ""
+                    card_state = stage if status == "Field Nation" else state
+                    provider = str(fn_providers.get(route_hash) or "").strip()
+                    provider_label = f" · FN: {provider}" if provider else ""
+                    stops = route.get("stops", 0)
+                    tasks = len(route.get("data", [])) or len((route.get("_ghost_record") or {}).get("task_ids") or [])
+                    label = (f"{city}, {route.get('state', '')} · {card_state}{provider_label}{removal}\n"
+                             f"{pod} · {stops} {'stop' if stops == 1 else 'stops'} · "
+                             f"{tasks} {'task' if tasks == 1 else 'tasks'}")
+                    if nearest:
+                        label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
+                    if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
+                        st.session_state["revamp_selected_route"] = key
+                        st.rerun(scope="app")
+    if st.session_state.pop("_revamp_refresh_bulk_actions", False):
+        st.rerun(scope="app")
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _fetch_fn_assignment_ids():
     """Resolve Field Nation separately from the capped dispatch worker feed."""
@@ -217,9 +289,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         st.info("Your account has no pod access. Contact an administrator to update your access.")
         return
     pod_options = (["All my pods"] if len(accessible) > 1 else []) + accessible
+    remembered_pod = st.query_params.get("pod")
+    if st.session_state.get("revamp_pod") not in pod_options:
+        st.session_state["revamp_pod"] = remembered_pod if remembered_pod in pod_options else pod_options[0]
     filter_col, _, refresh_col = st.columns([1.4, 4.5, 1], vertical_alignment="bottom")
     with filter_col:
-        pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod")
+        pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod", on_change=_remember_pod)
     selected_pods = accessible if pod_choice == "All my pods" else [pod_choice]
     with refresh_col:
         sync_clicked = st.button("Sync routes", key="revamp_sync", use_container_width=True)
@@ -310,12 +385,17 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     for key in st.session_state.pop("_revamp_fn_clear_next", []):
         st.session_state[f"revamp_fn_{key}"] = False
+    remembered_status = st.query_params.get("view")
+    if st.session_state.get("revamp_status") not in STATUSES:
+        st.session_state["revamp_status"] = remembered_status if remembered_status in STATUSES else "All"
     if st.session_state.pop("_revamp_show_fn_next", False):
         st.session_state["revamp_status"] = "Field Nation"
+        _remember_view()
     if st.session_state.pop("_revamp_show_accepted_next", False):
         st.session_state["revamp_status"] = "Accepted"
+        _remember_view()
     status = st.radio("Route status", STATUSES, horizontal=True,
-                      label_visibility="collapsed", key="revamp_status",
+                      label_visibility="collapsed", key="revamp_status", on_change=_remember_view,
                       format_func=lambda option: f"{option}  {counts[option]}")
     notice = st.session_state.pop("_revamp_notice", None)
     if notice:
@@ -458,53 +538,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     left, right = st.columns([2.1, 3], gap="medium")
     with left:
-        st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
-        with st.container(height=650, border=False):
-            if not matching:
-                st.info("No matching routes.")
-            grouped = {}
-            for entry in matching:
-                stage = _fn_stage(entry[3], fn_posted, fn_providers) if status == "Field Nation" else ""
-                state_name = str(entry[1].get("state") or "Unknown state").strip().upper()
-                grouped.setdefault((stage, state_name), []).append(entry)
-            last_stage = None
-            for group_index, ((stage, state_name), entries) in enumerate(grouped.items()):
-                if status == "Field Nation" and stage != last_stage:
-                    st.markdown(f"**{stage}**")
-                    last_stage = stage
-                group_key = f"_revamp_group_{status}_{stage}_{state_name}"
-                st.session_state.setdefault(group_key, group_index == 0)
-                is_open = st.session_state[group_key]
-                st.button(f"{state_name}  ·  {len(entries)} {'route' if len(entries) == 1 else 'routes'}  {'−' if is_open else '+'}",
-                          key=f"revamp_state_toggle_{status}_{stage}_{state_name}",
-                          on_click=_toggle_state_group, args=(group_key,),
-                          use_container_width=True)
-                if is_open:
-                    for pod, route, state, route_hash, nearest in entries:
-                        key = f"{pod}:{route_hash}"
-                        city = route.get("city") or "Unknown city"
-                        select_col, card_col = st.columns([.09, .91], gap="small", vertical_alignment="center")
-                        with select_col:
-                            if state in ("Ready", "Flagged"):
-                                st.checkbox("Select route for Field Nation", key=f"revamp_bulk_{key}",
-                                            label_visibility="collapsed")
-                            elif status == "Field Nation":
-                                st.checkbox("Select for Field Nation CSV", key=f"revamp_fn_{key}",
-                                            label_visibility="collapsed")
-                        with card_col:
-                            removal = " · CVS Removal" if route.get("is_removal") else ""
-                            card_state = stage if status == "Field Nation" else state
-                            provider = str(fn_providers.get(route_hash) or "").strip()
-                            provider_label = f" · FN: {provider}" if provider else ""
-                            stops = route.get('stops', 0)
-                            tasks = len(route.get('data', [])) or len((route.get('_ghost_record') or {}).get('task_ids') or [])
-                            label = (f"{city}, {route.get('state', '')} · {card_state}{provider_label}{removal}\n"
-                                     f"{pod} · {stops} {'stop' if stops == 1 else 'stops'} · "
-                                     f"{tasks} {'task' if tasks == 1 else 'tasks'}")
-                            if nearest:
-                                label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
-                            if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
-                                st.session_state["revamp_selected_route"] = key
+        _render_route_list(matching, status, fn_posted, fn_providers)
 
     with right:
         selection = st.session_state.get("revamp_selected_route")
