@@ -491,7 +491,10 @@ def _fetch_onfleet_open_tasks_cached():
     }
 
 
-st.set_page_config(page_title="Terraboost Media: Dispatch Command Center", layout="wide")
+st.set_page_config(
+    page_title="Terraboost Media: Dispatch Command Center", layout="wide",
+    initial_sidebar_state="collapsed" if os.environ.get("DCC_REVAMP_UI") == "1" else "auto",
+)
 
 # ── COMPACT-BUTTON CSS (global — May 16 2026) ────────────────────────────────
 # Streamlit 1.39 has no `st.button(size="small")`. The default 38px-tall buttons
@@ -10569,14 +10572,16 @@ st.session_state['_asc_ran_this_render'] = False
 # default, while keeping every existing DCC screen and action under Full tools.
 # Production DCC never sets this flag and never imports the new UI module.
 if os.environ.get("DCC_REVAMP_UI") == "1":
-    with st.sidebar:
-        st.radio("Workspace", ["Dispatch", "Full tools"], key="revamp_mode")
+    st.session_state.setdefault("revamp_mode", "Dispatch")
     if st.session_state["revamp_mode"] == "Dispatch":
         from revamp_workspace import render_workspace
         render_workspace(_can_access_tab, process_pod, render_dispatch,
                          haversine, DB_ENGINE, assign_tasks_to_fn_team,
                          fetch_sent_records_from_sheet, DEFAULT_DUE_DAYS)
         st.stop()
+    if st.button("← Back to Dispatch", key="revamp_back_to_dispatch"):
+        st.session_state["revamp_mode"] = "Dispatch"
+        st.rerun()
 
 # Updated Main Tabs
 # --- POD-LOCKED LANDING ---
