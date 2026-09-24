@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pandas as pd
 
@@ -95,6 +96,38 @@ class RevampTests(unittest.TestCase):
                                                        fn_team_id="team")
         self.assertFalse(saved or skipped)
         self.assertEqual(len(errors), 1)
+
+    def test_field_nation_stages_and_csv_rebuild_from_saved_route(self):
+        scope = load_functions("revamp_workspace.py", ["_fn_stage", "_fn_csv_route"])
+        h = "saved-hash"
+        self.assertEqual(scope["_fn_stage"](h, {}, {}), "Pending")
+        self.assertEqual(scope["_fn_stage"](h, {h: "posted"}, {}), "Posted")
+        self.assertEqual(scope["_fn_stage"](h, {h: "posted"}, {h: "Alex"}), "Assigned")
+        ghost = {"hash": h, "task_ids": ["one"]}
+        calls = []
+        def rebuild(saved, skip_geocode=False):
+            calls.append((saved, skip_geocode))
+            return {"data": [{"id": "one", "full": "123 Main St"}], "city": "Chicago"}
+        route = scope["_fn_csv_route"]({"_is_ghost": True, "_ghost_record": ghost}, h, rebuild)
+        self.assertEqual(route["_cluster_hash"], h)
+        self.assertEqual(route["data"][0]["full"], "123 Main St")
+        self.assertEqual(calls, [(ghost, True)])
+
+    def test_onfleet_route_plan_rename_failure_is_visible(self):
+        import time
+        calls = []
+        def request(method, url, json_body=None):
+            calls.append((method, url, json_body))
+            if method == "get":
+                return SimpleNamespace(status_code=200, json=lambda: {"routePlan": "plan-1", "worker": None})
+            return SimpleNamespace(status_code=403)
+        scope = load_functions("migration/fn_side_effects.py", ["sync_onfleet_for_fn_assignment"],
+                               {"Any": Any, "time": time, "_FA_BUDGET_S": 300, "ONFLEET_BASE": "https://onfleet.example",
+                                "_onfleet_auth_header": lambda: {}, "onfleet_fetch_with_backoff": request})
+        result = scope["sync_onfleet_for_fn_assignment"](["task-1"], "FN-Alex-9/24", "Alex")
+        self.assertTrue(result["partial"])
+        self.assertIn("Route Plan Name", result["partialReason"])
+        self.assertIn(("put", "https://onfleet.example/routePlans/plan-1", {"name": "FN-Alex-9/24"}), calls)
 
 
 if __name__ == "__main__":
