@@ -62,10 +62,6 @@ def _searchable(route):
     return " ".join(str(field) for field in fields).lower()
 
 
-def _open_full_tools():
-    st.session_state["revamp_mode"] = "Full tools"
-
-
 def _eligible_ics(ic_df):
     if ic_df is None or ic_df.empty:
         return []
@@ -111,6 +107,20 @@ def _clear_selection(keys):
         st.session_state[f"revamp_bulk_{key}"] = False
 
 
+def _fn_stage(route_hash, posted, providers):
+    if str(providers.get(route_hash) or "").strip():
+        return "Assigned"
+    return "Posted" if route_hash in posted else "Pending"
+
+
+def _fn_csv_route(route, route_hash, ghost_to_cluster):
+    if route.get("_is_ghost"):
+        route = ghost_to_cluster(route.get("_ghost_record") or {}, skip_geocode=True) if ghost_to_cluster else None
+    if not route or not route.get("data"):
+        return None
+    return {**route, "_cluster_hash": route_hash}
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _fetch_fn_assignment_ids():
     """Resolve Field Nation separately from the capped dispatch worker feed."""
@@ -152,7 +162,8 @@ def _fetch_fn_assignment_ids():
 
 def render_workspace(can_access_tab, process_pod, render_dispatch,
                      haversine, db_engine, assign_tasks_to_fn_team,
-                     fetch_sent_records_from_sheet, default_due_days=14):
+                     fetch_sent_records_from_sheet, default_due_days=14,
+                     fn_ghost_to_cluster=None):
     """Render one selected route while retaining the existing dispatch actions."""
     st.markdown("""
     <style>
@@ -173,13 +184,19 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     div[class*="st-key-revamp_route_"] button p {white-space:pre-line!important;
         overflow-wrap:anywhere;line-height:1.4;margin:0;text-align:left}
     div[class*="st-key-revamp_route_"] button:hover {border-color:#6841b0;background:#f8f4ff}
-    div[class*="st-key-revamp_bulk_"] label {width:100%;cursor:pointer;align-items:flex-start}
-    div[class*="st-key-revamp_bulk_"] label p {white-space:normal;overflow-wrap:anywhere;
+    div[class*="st-key-revamp_bulk_"] label, div[class*="st-key-revamp_fn_"] label
+        {width:100%;cursor:pointer;align-items:flex-start}
+    div[class*="st-key-revamp_bulk_"] label p, div[class*="st-key-revamp_fn_"] label p
+        {white-space:normal;overflow-wrap:anywhere;
         line-height:1.35;font-weight:650;color:#243047}
+    div[class*="st-key-revamp_state_"] details {border:1px solid #e4dfef;
+        border-radius:10px;background:#fff;margin:6px 0 12px;overflow:hidden}
+    div[class*="st-key-revamp_state_"] summary {font-weight:700;color:#453276;
+        padding:8px 12px;background:#f8f6fc}
     </style>
     """, unsafe_allow_html=True)
 
-    heading, search_col, tools_col = st.columns([1.6, 3, .7], vertical_alignment="center")
+    heading, search_col = st.columns([1.6, 3], vertical_alignment="center")
     with heading:
         st.markdown('<div class="revamp-heading">Dispatch</div>', unsafe_allow_html=True)
     with search_col:
@@ -187,13 +204,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             "Search routes", placeholder="Search venue, VID, city, state, ZIP, SIO or kiosk",
             label_visibility="collapsed", key="revamp_search",
         ).strip().lower()
-    with tools_col:
-        st.button("Full tools", key="revamp_top_tools", on_click=_open_full_tools,
-                  use_container_width=True)
 
     accessible = [pod for pod in PODS if can_access_tab(pod)]
     if not accessible:
-        st.info("Your account has no static pod access. Open Full tools for your available workspaces.")
+        st.info("Your account has no pod access. Contact an administrator to update your access.")
         return
     pod_options = (["All my pods"] if len(accessible) > 1 else []) + accessible
     filter_col, _, refresh_col = st.columns([1.4, 4.5, 1], vertical_alignment="bottom")
@@ -201,7 +215,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod")
     selected_pods = accessible if pod_choice == "All my pods" else [pod_choice]
     with refresh_col:
-        sync_clicked = st.button("↻ Sync routes", key="revamp_sync", use_container_width=True)
+        sync_clicked = st.button("Sync routes", key="revamp_sync", use_container_width=True)
     if sync_clicked:
         fetch_sent_records_from_sheet.clear()
         for pod in selected_pods:
@@ -252,6 +266,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      "Declined" if ghost_status == "declined" else "Routed")
             route = {
                 "_is_ghost": True, "wo": ghost.get("wo", ""),
+                "_ghost_record": ghost,
                 "city": ghost.get("city", "Unknown"),
                 "state": ghost.get("state", ""),
                 "stops": ghost.get("stops", ghost.get("lCnt", 0)),
@@ -274,8 +289,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         sync_age = f"Synced {minutes}m ago"
     unselected = sum(entry[2] in ("Ready", "Flagged") for entry in all_routes) - counts["Selected"]
     st.markdown(
-        f'<span class="revamp-pill">◇ Pod <b>{html.escape(str(pod_choice))}</b></span>'
-        f'<span class="revamp-pill">↻ {html.escape(sync_age)}</span>'
+        f'<span class="revamp-pill">Pod <b>{html.escape(str(pod_choice))}</b></span>'
+        f'<span class="revamp-pill">{html.escape(sync_age)}</span>'
         f'<span class="revamp-pill">Routes <b>{len(all_routes)}</b></span>'
         f'<span class="revamp-pill">Tasks <b>{total_tasks}</b></span>'
         f'<span class="revamp-pill">Flagged <b>{counts["Flagged"]}</b></span>'
@@ -286,8 +301,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         unsafe_allow_html=True,
     )
 
+    for key in st.session_state.pop("_revamp_fn_clear_next", []):
+        st.session_state[f"revamp_fn_{key}"] = False
     if st.session_state.pop("_revamp_show_fn_next", False):
         st.session_state["revamp_status"] = "Field Nation"
+    if st.session_state.pop("_revamp_show_accepted_next", False):
+        st.session_state["revamp_status"] = "Accepted"
     status = st.radio("Route status", STATUSES, horizontal=True,
                       label_visibility="collapsed", key="revamp_status",
                       format_func=lambda option: f"{option}  {counts[option]}")
@@ -303,20 +322,78 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 (not search or search in _searchable(entry[1])) and
                 (show_cvs or entry[2] not in ("Ready", "Flagged") or
                  not entry[1].get("is_removal"))]
-    matching.sort(key=lambda entry: (str(entry[1].get("state") or "").upper(),
+    fn_posted = (ghost_db or {}).get("_fn_posted", {}) or {}
+    fn_providers = (ghost_db or {}).get("_fn_provider", {}) or {}
+    matching.sort(key=lambda entry: (({"Pending": 0, "Posted": 1, "Assigned": 2}[
+                                      _fn_stage(entry[3], fn_posted, fn_providers)]
+                                      if status == "Field Nation" else 0),
+                                     str(entry[1].get("state") or "").upper(),
                                      str(entry[1].get("city") or "").lower(), entry[0]))
+    selection_prefix = "revamp_fn_" if status == "Field Nation" else "revamp_bulk_"
     visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
-                    if entry[2] in ("Ready", "Flagged")]
+                    if entry[2] == "Field Nation" or
+                    (status != "Field Nation" and entry[2] in ("Ready", "Flagged"))]
+    def select_visible():
+        for key in visible_keys:
+            st.session_state[f"{selection_prefix}{key}"] = True
+    def clear_visible():
+        for key in visible_keys:
+            st.session_state[f"{selection_prefix}{key}"] = False
     select_col, clear_col = st.columns([5, 1], vertical_alignment="bottom")
     with select_col:
-        st.button(f"☑ Select all {len(visible_keys)} matching on this tab", key="revamp_select_visible",
-                  on_click=_select_visible, args=(visible_keys,),
+        st.button(f"Select all {len(visible_keys)} matching on this tab", key="revamp_select_visible",
+                  on_click=select_visible,
                   disabled=not visible_keys, use_container_width=True)
     with clear_col:
-        st.button("Clear selection", key="revamp_clear_selection", on_click=_clear_selection,
-                  args=([f"{e[0]}:{e[3]}" for e in all_routes],),
+        st.button("Clear selection", key="revamp_clear_selection", on_click=clear_visible,
                   use_container_width=True)
     st.caption(f"Showing {len(matching)} matching route{'s' if len(matching) != 1 else ''}")
+    if status == "Field Nation":
+        from fn_utils import generate_combined_fn_upload
+        from migration import data_access as fn_data
+        fn_selected = [entry for entry in all_routes if entry[2] == "Field Nation"
+                       and st.session_state.get(f"revamp_fn_{entry[0]}:{entry[3]}")]
+        pending = [entry for entry in fn_selected if _fn_stage(entry[3], fn_posted, fn_providers) == "Pending"]
+        csv_routes = [_fn_csv_route(entry[1], entry[3], fn_ghost_to_cluster) for entry in fn_selected]
+        csv_routes = [route for route in csv_routes if route]
+        csv_data = None
+        if csv_routes:
+            try:
+                csv_data, stop_count, _ = generate_combined_fn_upload(csv_routes)
+            except Exception as exc:
+                st.error(f"Could not build Field Nation CSV: {exc}")
+        csv_col, posted_col, link_col = st.columns([2, 1.5, 1], vertical_alignment="bottom")
+        with csv_col:
+            st.download_button(f"Download bulk CSV ({len(csv_routes)} routes)",
+                               data=csv_data.getvalue() if csv_data else b"",
+                               file_name=f"FN_Combined_{date.today():%Y%m%d}.csv",
+                               mime="text/csv", disabled=csv_data is None,
+                               use_container_width=True, key="revamp_fn_csv")
+        with posted_col:
+            posted_clicked = st.button(f"Mark {len(pending)} Posted", disabled=not pending or db_engine is None,
+                                       use_container_width=True, key="revamp_fn_posted")
+        with link_col:
+            st.link_button("Open Field Nation", "https://app.fieldnation.com/projects", use_container_width=True)
+        if fn_selected and not csv_routes:
+            st.warning("Selected routes have no task addresses available for a CSV.")
+        if posted_clicked:
+            failures = []
+            for pod, route, _, route_hash, _ in pending:
+                try:
+                    result = fn_data.mirror_mark_fn_posted_by_cluster_hash(db_engine, route_hash)
+                    if not result.get("success"):
+                        raise RuntimeError(result.get("skipped") or result.get("error") or "Order not found")
+                    st.session_state.setdefault("_revamp_fn_clear_next", []).append(f"{pod}:{route_hash}")
+                except Exception as exc:
+                    failures.append(f"{route.get('city', 'Route')}: {exc}")
+            if failures:
+                st.error("Could not mark Posted: " + "; ".join(failures[:3]))
+            else:
+                fetch_sent_records_from_sheet.clear()
+                st.rerun()
+        stage_counts = {stage: sum(_fn_stage(e[3], fn_posted, fn_providers) == stage
+                                   for e in matching) for stage in ("Pending", "Posted", "Assigned")}
+        st.caption("  |  ".join(f"{stage}: {count}" for stage, count in stage_counts.items()))
     _, due_col, action_col = st.columns([2.5, 1.4, 1.7], vertical_alignment="bottom")
     with due_col:
         fn_due = st.date_input("Field Nation due", value=date.today() + timedelta(days=default_due_days),
@@ -373,30 +450,40 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         with st.container(height=650, border=True):
             if not matching:
                 st.info("No matching routes.")
-            current_state = None
-            for pod, route, state, route_hash, nearest in matching:
-                state_name = str(route.get("state") or "Unknown state").strip().upper()
-                if state_name != current_state:
-                    current_state = state_name
-                    state_count = sum(1 for entry in matching
-                                      if str(entry[1].get("state") or "Unknown state").strip().upper() == state_name)
-                    st.markdown(f"#### 📍 {html.escape(state_name)} · {state_count} routes")
-                key = f"{pod}:{route_hash}"
-                city = route.get("city") or "Unknown city"
-                select_col, card_col = st.columns([.11, .89], vertical_alignment="center")
-                with select_col:
-                    if state in ("Ready", "Flagged"):
-                        st.checkbox("Select route for Field Nation", key=f"revamp_bulk_{key}",
-                                    label_visibility="collapsed")
-                with card_col:
-                    removal = " · CVS Removal" if route.get("is_removal") else ""
-                    label = (f"{city}, {route.get('state', '')} · {state}{removal}\n"
-                             f"{pod} pod · {route.get('stops', 0)} stops · "
-                             f"{len(route.get('data', []))} tasks")
-                    if nearest:
-                        label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
-                    if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
-                        st.session_state["revamp_selected_route"] = key
+            grouped = {}
+            for entry in matching:
+                stage = _fn_stage(entry[3], fn_posted, fn_providers) if status == "Field Nation" else ""
+                state_name = str(entry[1].get("state") or "Unknown state").strip().upper()
+                grouped.setdefault((stage, state_name), []).append(entry)
+            last_stage = None
+            for (stage, state_name), entries in grouped.items():
+                if status == "Field Nation" and stage != last_stage:
+                    st.markdown(f"**{stage}**")
+                    last_stage = stage
+                with st.expander(f"{state_name}  ·  {len(entries)} routes", expanded=len(grouped) == 1):
+                    for pod, route, state, route_hash, nearest in entries:
+                        key = f"{pod}:{route_hash}"
+                        city = route.get("city") or "Unknown city"
+                        select_col, card_col = st.columns([.11, .89], vertical_alignment="center")
+                        with select_col:
+                            if state in ("Ready", "Flagged"):
+                                st.checkbox("Select route for Field Nation", key=f"revamp_bulk_{key}",
+                                            label_visibility="collapsed")
+                            elif status == "Field Nation":
+                                st.checkbox("Select for Field Nation CSV", key=f"revamp_fn_{key}",
+                                            label_visibility="collapsed")
+                        with card_col:
+                            removal = " · CVS Removal" if route.get("is_removal") else ""
+                            card_state = stage if status == "Field Nation" else state
+                            provider = str(fn_providers.get(route_hash) or "").strip()
+                            provider_label = f" · FN: {provider}" if provider else ""
+                            label = (f"{city}, {route.get('state', '')} · {card_state}{provider_label}{removal}\n"
+                                     f"{pod} pod · {route.get('stops', 0)} stops · "
+                                     f"{len(route.get('data', [])) or len((route.get('_ghost_record') or {}).get('task_ids') or [])} tasks")
+                            if nearest:
+                                label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
+                            if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
+                                st.session_state["revamp_selected_route"] = key
 
     with right:
         selection = st.session_state.get("revamp_selected_route")
@@ -420,7 +507,47 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             if nearest and nearest[1] > 50:
                 dispatch_route["status"] = "Flagged"
             render_dispatch(20000, dispatch_route, pod)
+        elif state == "Field Nation":
+            from migration import data_access as fn_data
+            stage = _fn_stage(route_hash, fn_posted, fn_providers)
+            st.caption(f"Field Nation: {stage}")
+            if stage == "Pending":
+                st.info("Select this route for the bulk CSV. After posting the CSV to Field Nation, mark it Posted above.")
+            else:
+                provider = st.text_input("Field Nation rep", value=str(fn_providers.get(route_hash) or ""),
+                                         key=f"revamp_provider_{pod}_{route_hash}",
+                                         placeholder="Enter the rep's name")
+                save_col, assigned_col = st.columns(2)
+                with save_col:
+                    if st.button("Save rep", key=f"revamp_save_rep_{pod}_{route_hash}",
+                                 disabled=db_engine is None, use_container_width=True):
+                        try:
+                            result = fn_data.mirror_set_fn_provider_by_cluster_hash(db_engine, route_hash, provider.strip())
+                            if not result.get("success"):
+                                raise RuntimeError(result.get("skipped") or result.get("error") or "Order not found")
+                            fetch_sent_records_from_sheet.clear()
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Could not save Field Nation rep: {exc}")
+                with assigned_col:
+                    if st.button("Mark Assigned", key=f"revamp_mark_assigned_{pod}_{route_hash}",
+                                 disabled=db_engine is None or not provider.strip(), use_container_width=True):
+                        try:
+                            # Persist the current input before promoting the order to Accepted.
+                            saved = fn_data.mirror_set_fn_provider_by_cluster_hash(db_engine, route_hash, provider.strip())
+                            if not saved.get("success"):
+                                raise RuntimeError(saved.get("skipped") or saved.get("error") or "Order not found")
+                            result = fn_data.mark_fn_assigned(db_engine, saved["work_order"])
+                            if not result.get("success"):
+                                raise RuntimeError(result.get("error") or "Assignment failed")
+                            fetch_sent_records_from_sheet.clear()
+                            st.session_state.pop(f"route_state_{route_hash}", None)
+                            if result.get("partial"):
+                                st.warning(f"Route moved to Accepted, but Onfleet rename needs attention: {result.get('partialReason', 'unknown error')}")
+                            else:
+                                st.success(f"Assigned to {provider.strip()}. Onfleet route named {result.get('wo', 'FN route')}.")
+                            st.session_state["_revamp_show_accepted_next"] = True
+                        except Exception as exc:
+                            st.error(f"Could not assign Field Nation rep: {exc}")
         else:
-            st.info("This route's follow-up actions are available in Full tools.")
-            st.button("Open Full tools", key="revamp_open_tools",
-                      on_click=_open_full_tools)
+            st.caption(f"Route {route.get('wo') or route_hash}")
