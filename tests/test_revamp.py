@@ -43,6 +43,8 @@ class RevampTests(unittest.TestCase):
         route = {"status": "Ready", "data": [{"id": "t1"}]}
         self.assertEqual(scope["_route_status"](route, {}, 50), "Ready")
         self.assertEqual(scope["_route_status"](route, {}, 50.1), "Flagged")
+        self.assertEqual(scope["_route_status"](
+            route, {"t1": {"status": "field_nation"}}, 50.1), "Field Nation")
 
     def test_bulk_fn_retries_skip_existing_and_keep_route_stops(self):
         stored = {}
