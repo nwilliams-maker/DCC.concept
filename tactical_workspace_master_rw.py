@@ -10153,8 +10153,8 @@ if os.environ.get("DCC_WORKBOOK_IMPORT") == "1" and st.query_params.get("import_
     st.title("DCC Revamp workbook import")
     with st.form("_one_time_import_form"):
         _import_token = st.text_input("Import token", type="password")
-        _import_file = st.file_uploader("WO Request workbook", type=["xlsx"])
-        _import_submit = st.form_submit_button("Import routes and Field Nation")
+        _import_file = st.file_uploader("WO Request workbook or DCC snapshot", type=["xlsx", "zip"])
+        _import_submit = st.form_submit_button("Import selected file")
     if _import_submit:
         _expected = os.environ.get("DCC_WORKBOOK_IMPORT_TOKEN") or ""
         if not _expected or not _hmac.compare_digest(_expected, _import_token):
@@ -10162,10 +10162,14 @@ if os.environ.get("DCC_WORKBOOK_IMPORT") == "1" and st.query_params.get("import_
         elif _import_file is None:
             st.error("Select the workbook first")
         else:
-            from migration.import_workbook import import_workbook
             try:
                 with st.spinner("Importing and verifying records"):
-                    _summary = import_workbook(_import_file.getvalue(), DATABASE_URL)
+                    if _import_file.name.lower().endswith(".zip"):
+                        from migration.import_snapshot import import_snapshot
+                        _summary = import_snapshot(_import_file.getvalue(), DATABASE_URL)
+                    else:
+                        from migration.import_workbook import import_workbook
+                        _summary = import_workbook(_import_file.getvalue(), DATABASE_URL)
                 st.success("Import complete")
                 st.json(_summary)
             except Exception as _import_error:
