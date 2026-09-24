@@ -2825,7 +2825,7 @@ from fn_utils import FN_STATE_MANAGER, generate_fn_upload, generate_combined_fn_
 
 
 
-def _fn_ghost_to_cluster(g):
+def _fn_ghost_to_cluster(g, skip_geocode=False):
     """Reconstruct a live-cluster-shaped dict from an FN sheet ghost.
 
     Why this exists: when "Assign to Field Nation" pushes OnFleet tasks to
@@ -3012,7 +3012,7 @@ def _fn_ghost_to_cluster(g):
     # in the Atlantic.
     center = (0.0, 0.0)
     _has_real_center = False
-    if addrs_seen:
+    if addrs_seen and not skip_geocode:
         try:
             _coords = _mapbox_geocode(addrs_seen[0])
             if _coords:
@@ -10572,16 +10572,12 @@ st.session_state['_asc_ran_this_render'] = False
 # default, while keeping every existing DCC screen and action under Full tools.
 # Production DCC never sets this flag and never imports the new UI module.
 if os.environ.get("DCC_REVAMP_UI") == "1":
-    st.session_state.setdefault("revamp_mode", "Dispatch")
-    if st.session_state["revamp_mode"] == "Dispatch":
-        from revamp_workspace import render_workspace
-        render_workspace(_can_access_tab, process_pod, render_dispatch,
-                         haversine, DB_ENGINE, assign_tasks_to_fn_team,
-                         fetch_sent_records_from_sheet, DEFAULT_DUE_DAYS)
-        st.stop()
-    if st.button("← Back to Dispatch", key="revamp_back_to_dispatch"):
-        st.session_state["revamp_mode"] = "Dispatch"
-        st.rerun()
+    from revamp_workspace import render_workspace
+    render_workspace(_can_access_tab, process_pod, render_dispatch,
+                     haversine, DB_ENGINE, assign_tasks_to_fn_team,
+                     fetch_sent_records_from_sheet, DEFAULT_DUE_DAYS,
+                     _fn_ghost_to_cluster)
+    st.stop()
 
 # Updated Main Tabs
 # --- POD-LOCKED LANDING ---
