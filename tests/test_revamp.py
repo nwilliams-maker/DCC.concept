@@ -36,6 +36,14 @@ class RevampTests(unittest.TestCase):
                                        lambda a, b, c, d: abs(a - c) + abs(b - d))
         self.assertEqual(nearest, ("Active Farther", 60))
 
+    def test_exactly_50_is_ready_and_over_50_is_flagged(self):
+        scope = load_functions("revamp_workspace.py", ["_route_hash", "_route_status"],
+                               {"hashlib": hashlib,
+                                "st": SimpleNamespace(session_state={})})
+        route = {"status": "Ready", "data": [{"id": "t1"}]}
+        self.assertEqual(scope["_route_status"](route, {}, 50), "Ready")
+        self.assertEqual(scope["_route_status"](route, {}, 50.1), "Flagged")
+
     def test_bulk_fn_retries_skip_existing_and_keep_route_stops(self):
         stored = {}
         moved = []
