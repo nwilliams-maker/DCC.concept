@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -330,9 +330,20 @@ def mirror_remove_field_nation_by_cluster_hash(engine: sa.Engine, cluster_hash: 
 def mark_fn_posted(engine: sa.Engine, work_order: str) -> None:
     """Replaces `markFNPosted`."""
     with engine.begin() as conn:
-        conn.execute(
-            sa.text("UPDATE field_nation_orders SET status = 'posted', updated_at = now() WHERE work_order = :wo"),
+        row = conn.execute(
+            sa.text("SELECT payload FROM field_nation_orders WHERE work_order = :wo FOR UPDATE"),
             {"wo": work_order},
+        ).first()
+        if row is None:
+            raise ValueError(f"Field Nation order not found: {work_order}")
+        payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        payload = dict(payload)
+        payload.setdefault("fn_posted_ts", datetime.now(timezone.utc).isoformat())
+        conn.execute(
+            sa.text("""UPDATE field_nation_orders
+                       SET status = 'posted', payload = :payload, updated_at = now()
+                       WHERE work_order = :wo"""),
+            {"wo": work_order, "payload": json.dumps(payload)},
         )
 
 def mirror_mark_fn_posted_by_cluster_hash(engine: sa.Engine, cluster_hash: str) -> dict[str, Any]:
