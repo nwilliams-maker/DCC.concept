@@ -129,6 +129,43 @@ class RevampTests(unittest.TestCase):
         self.assertIn("Route Plan Name", result["partialReason"])
         self.assertIn(("put", "https://onfleet.example/routePlans/plan-1", {"name": "FN-Alex-9/24"}), calls)
 
+    def test_state_toggle_keeps_view_and_fn_selection_updates_actions(self):
+        from streamlit.testing.v1 import AppTest
+        source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import pandas as pd
+from revamp_workspace import render_workspace
+st.session_state.setdefault("clusters_Blue", [
+    {{"city":"Chicago","state":"IL","stops":1,"data":[{{"id":"ready-1","full":"101 Main St"}}]}},
+    {{"city":"Detroit","state":"MI","stops":1,"data":[{{"id":"ready-2","full":"102 Main St"}}]}},
+    {{"city":"Madison","state":"WI","stops":1,"data":[{{"id":"fn-1","full":"103 Main St, Madison, WI 53703"}}]}},
+])
+st.session_state.setdefault("ic_df", pd.DataFrame())
+def records():
+    return {{"fn-1":{{"status":"field_nation"}}}}, {{"Blue":[],"_fn_posted":{{}},"_fn_provider":{{}}}}, set(), {{}}
+records.clear = lambda: None
+render_workspace(lambda pod: pod == "Blue", lambda pod: None,
+    lambda i, route, pod: st.write("Detail: " + route["city"]),
+    lambda *args: 0, object(), lambda *args: None, records)
+'''
+        app = AppTest.from_string(source).run()
+        app.radio(key="revamp_status").set_value("Ready").run()
+        app.button(key="revamp_state_toggle_Ready__MI").click().run()
+        self.assertEqual(app.radio(key="revamp_status").value, "Ready")
+        self.assertEqual(app.query_params["view"], ["Ready"])
+        detroit = next(button for button in app.button if button.label.startswith("Detroit"))
+        detroit.click().run()
+        self.assertEqual(app.radio(key="revamp_status").value, "Ready")
+        self.assertFalse(app.exception)
+        app.radio(key="revamp_status").set_value("Field Nation").run()
+        selected = next(checkbox for checkbox in app.checkbox if checkbox.key.startswith("revamp_fn_"))
+        selected.check().run()
+        self.assertEqual(app.radio(key="revamp_status").value, "Field Nation")
+        self.assertEqual(app.button(key="revamp_fn_posted").label, "Mark 1 Posted")
+        self.assertFalse(app.exception)
+
 
 if __name__ == "__main__":
     unittest.main()
