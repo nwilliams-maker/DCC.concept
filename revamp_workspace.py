@@ -192,9 +192,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     counts["Over 50 mi"] = sum(1 for entry in all_routes
                                 if entry[4] and entry[4][1] > 50 and
                                 entry[2] in ("Ready", "Flagged"))
-    selected_key = st.session_state.get("revamp_selected_route")
     counts["Selected"] = sum(1 for entry in all_routes
-                             if f"{entry[0]}:{entry[3]}" == selected_key)
+                             if st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))
     total_tasks = sum(len(route.get("data", [])) for _, route, _, _ in all_routes)
     st.markdown(
         f'<span class="revamp-pill">Routes <b>{len(all_routes)}</b></span>'
@@ -210,7 +209,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 (status == "All" or entry[2] == status or
                  (status == "Over 50 mi" and entry[4] and entry[4][1] > 50
                   and entry[2] in ("Ready", "Flagged")) or
-                 (status == "Selected" and f"{entry[0]}:{entry[3]}" == selected_key)) and
+                 (status == "Selected" and
+                  st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))) and
                 (not search or search in _searchable(entry[1]))]
     st.caption(f"Showing {len(matching)} matching route{'s' if len(matching) != 1 else ''}")
 
