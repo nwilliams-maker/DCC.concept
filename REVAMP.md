@@ -38,3 +38,5 @@ values, so they must be supplied in Railway's secure Variables screen.
 
 The first deployment can verify packaging and startup, but live route
 operations require those variables and a deliberately chosen database.
+
+Railway source: `nwilliams-maker/DCC.concept` at `revamp/reference-layout`.
