@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 
 
-STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "Selected", "Field Nation", "Routed", "Accepted")
+STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Routed")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red")
 
 
@@ -27,12 +27,7 @@ def _route_hash(route):
 def _route_status(route, sent_db, nearest_miles=None):
     route_hash = _route_hash(route)
     local = st.session_state.get(f"route_state_{route_hash}")
-    if local == "field_nation":
-        return "Field Nation"
-    if local == "email_sent":
-        return "Routed"
-    if local == "finalized":
-        return "Accepted"
+    persisted_status = ""
     if not st.session_state.get(f"reverted_{route_hash}"):
         match = next(
             (sent_db.get(str(t.get("id", "")).strip()) for t in route.get("data", [])
@@ -40,13 +35,19 @@ def _route_status(route, sent_db, nearest_miles=None):
             None,
         )
         if match:
-            status = str(match.get("status", "")).lower()
-            if status in ("accepted", "finalized"):
-                return "Accepted"
-            if status == "field_nation":
-                return "Field Nation"
-            if status in ("sent", "declined"):
-                return "Routed"
+            persisted_status = str(match.get("status", "")).lower()
+    if persisted_status in ("accepted", "finalized"):
+        return "Accepted"
+    if persisted_status == "declined":
+        return "Declined"
+    if local == "field_nation" or persisted_status == "field_nation":
+        return "Field Nation"
+    if local == "email_sent" or persisted_status == "sent":
+        return "Sent"
+    if local == "declined":
+        return "Declined"
+    if local == "finalized":
+        return "Accepted"
     if route.get("status") == "Flagged" or (nearest_miles is not None and nearest_miles > 50):
         return "Flagged"
     return "Ready"
@@ -246,7 +247,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             seen_hashes.add(route_hash)
             ghost_status = str(ghost.get("status", "")).lower()
             state = ("Accepted" if ghost_status in ("accepted", "finalized") else
-                     "Field Nation" if ghost_status in ("field_nation", "posted") else "Routed")
+                     "Field Nation" if ghost_status in ("field_nation", "posted") else
+                     "Sent" if ghost_status == "sent" else
+                     "Declined" if ghost_status == "declined" else "Routed")
             route = {
                 "_is_ghost": True, "wo": ghost.get("wo", ""),
                 "city": ghost.get("city", "Unknown"),
@@ -278,6 +281,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         f'<span class="revamp-pill">Flagged <b>{counts["Flagged"]}</b></span>'
         f'<span class="revamp-pill">Unselected <b>{max(0, unselected)}</b></span>'
         f'<span class="revamp-pill">Field Nation <b>{counts["Field Nation"]}</b></span>'
+        f'<span class="revamp-pill">Sent <b>{counts["Sent"]}</b></span>'
         f'<span class="revamp-pill">Accepted <b>{counts["Accepted"]}</b></span>',
         unsafe_allow_html=True,
     )
