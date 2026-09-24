@@ -166,8 +166,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     div[class*="st-key-revamp_status"] label {border-radius:9px;padding:7px 10px;
         cursor:pointer;white-space:nowrap}
     div[class*="st-key-revamp_status"] label:has(input:checked) {background:#f1eaff;color:#5730a3}
-    div[class*="st-key-revamp_route_"] button {min-height:2.5rem;border-radius:8px;
-        border:1px solid #e8e2f3;background:#fff;color:#35405b}
+    div[class*="st-key-revamp_route_"] button {height:auto!important;min-height:4.4rem;
+        border-radius:8px;border:1px solid #e8e2f3;background:#fff;color:#35405b;
+        padding:10px 12px;text-align:left;justify-content:flex-start;white-space:normal}
+    div[class*="st-key-revamp_route_"] button p {white-space:pre-line!important;
+        overflow-wrap:anywhere;line-height:1.4;margin:0;text-align:left}
     div[class*="st-key-revamp_route_"] button:hover {border-color:#6841b0;background:#f8f4ff}
     div[class*="st-key-revamp_bulk_"] label {width:100%;cursor:pointer;align-items:flex-start}
     div[class*="st-key-revamp_bulk_"] label p {white-space:normal;overflow-wrap:anywhere;
@@ -175,7 +178,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     </style>
     """, unsafe_allow_html=True)
 
-    heading, search_col = st.columns([2, 3], vertical_alignment="center")
+    heading, search_col, tools_col = st.columns([1.6, 3, .7], vertical_alignment="center")
     with heading:
         st.markdown('<div class="revamp-heading">Dispatch</div>', unsafe_allow_html=True)
     with search_col:
@@ -183,6 +186,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             "Search routes", placeholder="Search venue, VID, city, state, ZIP, SIO or kiosk",
             label_visibility="collapsed", key="revamp_search",
         ).strip().lower()
+    with tools_col:
+        st.button("Full tools", key="revamp_top_tools", on_click=_open_full_tools,
+                  use_container_width=True)
 
     accessible = [pod for pod in PODS if can_access_tab(pod)]
     if not accessible:
@@ -373,18 +379,19 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                     st.markdown(f"#### 📍 {html.escape(state_name)} · {state_count} routes")
                 key = f"{pod}:{route_hash}"
                 city = route.get("city") or "Unknown city"
-                with st.container(border=True):
+                select_col, card_col = st.columns([.11, .89], vertical_alignment="center")
+                with select_col:
                     if state in ("Ready", "Flagged"):
-                        removal = " · CVS Kiosk Removal" if route.get("is_removal") else ""
-                        st.checkbox(f"{city}, {route.get('state', '')} · {state}{removal}",
-                                    key=f"revamp_bulk_{key}")
-                    else:
-                        st.markdown(f"**{html.escape(str(city))}, {html.escape(str(route.get('state', '')))} · {state}**")
-                    st.caption(f"{pod} pod · {route.get('stops', 0)} stops · "
-                               f"{len(route.get('data', []))} tasks")
+                        st.checkbox("Select route for Field Nation", key=f"revamp_bulk_{key}",
+                                    label_visibility="collapsed")
+                with card_col:
+                    removal = " · CVS Removal" if route.get("is_removal") else ""
+                    label = (f"{city}, {route.get('state', '')} · {state}{removal}\n"
+                             f"{pod} pod · {route.get('stops', 0)} stops · "
+                             f"{len(route.get('data', []))} tasks")
                     if nearest:
-                        st.caption(f"Closest IC: {nearest[0]} · {nearest[1]:.1f} mi")
-                    if st.button("View route", key=f"revamp_route_{key}", use_container_width=True):
+                        label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
+                    if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
                         st.session_state["revamp_selected_route"] = key
 
     with right:
