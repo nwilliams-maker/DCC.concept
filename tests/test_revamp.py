@@ -155,6 +155,8 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
         app.button(key="revamp_state_toggle_Ready__MI").click().run()
         self.assertEqual(app.radio(key="revamp_status").value, "Ready")
         self.assertEqual(app.query_params["view"], ["Ready"])
+        app.button(key="revamp_select_visible").click().run()
+        self.assertEqual(app.radio(key="revamp_status").value, "Ready")
         detroit = next(button for button in app.button if button.label.startswith("Detroit"))
         detroit.click().run()
         self.assertEqual(app.radio(key="revamp_status").value, "Ready")
