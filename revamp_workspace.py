@@ -1228,7 +1228,16 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                     if entry[2] == "Field Nation" or
                     (status != "Field Nation" and entry[2] in ("Ready", "Flagged"))]
     def select_visible():
-        for key in visible_keys:
+        # Field Nation bulk selection is intentionally Pending-only. Posted
+        # and Assigned routes must be selected individually if needed.
+        keys_to_select = visible_keys
+        if status == "Field Nation":
+            keys_to_select = [
+                f"{entry[0]}:{entry[3]}" for entry in matching
+                if entry[2] == "Field Nation"
+                and _fn_stage(entry[3], fn_posted, fn_providers) == "Pending"
+            ]
+        for key in keys_to_select:
             st.session_state[f"{selection_prefix}{key}"] = True
     def clear_visible():
         for key in visible_keys:
@@ -1278,8 +1287,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             with sel_col:
                 st.caption(f"{len(fn_selected)} selected · {stop_count} stops")
             with select_col:
-                st.button("Select all", key="revamp_fn_select_all",
-                          on_click=select_visible, disabled=not visible_keys,
+                _pending_selectable = stage_counts["Pending"]
+                st.button("Select all pending", key="revamp_fn_select_all",
+                          on_click=select_visible, disabled=not _pending_selectable,
                           use_container_width=True)
             with csv_col:
                 st.download_button(f"Download CSV ({len(csv_routes)})",
