@@ -40,8 +40,14 @@ def _background_pod_build(pod, process_pod, cluster_store, refresh=False):
     jobs = _pod_build_jobs()
     with jobs["lock"]:
         current = jobs["jobs"].get(pod)
-        if current is not None and (not current.done() or (not refresh and pod in cluster_store())):
-            return current
+        previous = None
+        if current is not None:
+            if not current.done():
+                if not refresh or jobs.get("refreshing", {}).get(pod):
+                    return current
+                previous = current  # manual refresh follows the running load
+            elif not refresh and pod in cluster_store():
+                return current
 
         progress = {"phase": "connecting", "downloaded": 0, "pages": 0,
                     "value": 0.02, "message": "Connecting to OnFleet"}
@@ -69,6 +75,8 @@ def _background_pod_build(pod, process_pod, cluster_store, refresh=False):
                     progress["message"] = message
 
         def build():
+            if previous is not None:
+                previous.result()
             with _pod_load_locks()[pod]:
                 print(f"[revamp/sync] background build starting {pod}", flush=True)
                 result = process_pod(pod, warm_only=True, refresh_tasks=refresh,
@@ -83,6 +91,7 @@ def _background_pod_build(pod, process_pod, cluster_store, refresh=False):
 
         current = jobs["executor"].submit(build)
         jobs["jobs"][pod] = current
+        jobs.setdefault("refreshing", {})[pod] = refresh
         return current
 
 
