@@ -550,7 +550,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
       background:#eef1f4;flex-wrap:wrap
     }
     div[class*="st-key-revamp_status"] label {
-      border-radius:7px;padding:6px 9px;cursor:pointer;white-space:nowrap;
+      border-radius:7px;padding:5px 8px;cursor:pointer;white-space:nowrap;
       color:#667085;font-weight:650;border:1px solid transparent!important
     }
     div[class*="st-key-revamp_status"] label:has(input:checked) {
@@ -563,11 +563,16 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     .stButton > button,
     .stDownloadButton > button,
     .stLinkButton > a {
-      border-radius:8px!important;
+      border-radius:7px!important;
       border:1px solid var(--rv-border-strong)!important;
       background:#fff!important;
       color:#344054!important;
-      font-weight:680!important;
+      font-weight:660!important;
+      font-size:.76rem!important;
+      min-height:30px!important;
+      height:auto!important;
+      padding:.28rem .58rem!important;
+      line-height:1.05!important;
       box-shadow:0 1px 2px rgba(16,24,40,.04)!important;
       transition:background .12s ease,border-color .12s ease,box-shadow .12s ease,transform .12s ease!important;
     }
@@ -591,9 +596,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     /* Only Outlook remains a branded Terraboost-purple action */
     div[class*="st-key-revamp_outlook_action"] a {
-      min-height:44px!important;display:flex;align-items:center;justify-content:center;
+      min-height:30px!important;display:flex;align-items:center;justify-content:center;
       background:var(--rv-brand)!important;color:#fff!important;border:1px solid var(--rv-brand)!important;
-      border-radius:9px!important;font-size:.9rem!important;font-weight:720!important;
+      border-radius:9px!important;font-size:.78rem!important;font-weight:720!important;
       box-shadow:0 3px 9px rgba(99,48,148,.16)!important
     }
     div[class*="st-key-revamp_outlook_action"] a:hover {background:#52257e!important;border-color:#52257e!important}
@@ -601,7 +606,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     /* Sync action is utilitarian, not purple */
     div[class*="st-key-revamp_sync"] button {
       background:#fff!important;border:1px solid var(--rv-border-strong)!important;
-      color:#344054!important;border-radius:8px!important;min-height:39px!important
+      color:#344054!important;border-radius:8px!important;min-height:32px!important
     }
 
     /* Route inbox */
@@ -613,9 +618,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     div[class*="st-key-revamp_state_toggle_"] button {
       background:transparent!important;border:0!important;border-bottom:1px solid #dde2e8!important;
-      border-radius:0!important;min-height:2.2rem!important;width:100%;box-shadow:none!important;
+      border-radius:0!important;min-height:1.85rem!important;width:100%;box-shadow:none!important;
       text-align:left;justify-content:space-between;color:#667085!important;font-weight:760!important;
-      padding:7px 7px;margin:9px 0 4px
+      padding:5px 7px;margin:9px 0 4px
     }
     div[class*="st-key-revamp_state_toggle_"] button p {
       font-size:.72rem!important;text-transform:uppercase;letter-spacing:.065em
@@ -623,15 +628,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     div[class*="st-key-revamp_state_toggle_"] button:hover {background:#e8ebef!important;border-radius:6px!important}
 
     div[class*="st-key-revamp_route_"] button {
-      height:auto!important;min-height:4.45rem;border-radius:9px!important;
+      height:auto!important;min-height:3.65rem;border-radius:9px!important;
       border:1px solid #dfe3e8!important;background:#fff!important;color:#27364a!important;
-      padding:10px 12px!important;text-align:left!important;justify-content:flex-start!important;
+      padding:7px 10px!important;text-align:left!important;justify-content:flex-start!important;
       white-space:normal!important;box-shadow:0 1px 2px rgba(16,24,40,.035)!important;
       margin:2px 0 5px!important;transition:all .12s ease!important
     }
     div[class*="st-key-revamp_route_"] button p {
-      white-space:pre-line!important;overflow-wrap:break-word;line-height:1.38!important;
-      margin:0;text-align:left!important;font-size:.79rem!important;font-weight:620!important
+      white-space:pre-line!important;overflow-wrap:break-word;line-height:1.28!important;
+      margin:0;text-align:left!important;font-size:.75rem!important;font-weight:620!important
     }
     div[class*="st-key-revamp_route_"] button:hover {
       transform:translateY(-1px);border-color:#aeb5c0!important;background:#fff!important;
@@ -665,7 +670,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     /* Bulk/action toolbar */
     div[class*="st-key-revamp_action_bar"] {
       border:1px solid var(--rv-border);border-radius:10px;background:#fff;
-      padding:8px 10px;margin:8px 0 10px;box-shadow:0 1px 3px rgba(16,24,40,.035)
+      padding:6px 8px;margin:6px 0 8px;box-shadow:0 1px 3px rgba(16,24,40,.035)
     }
     div[class*="st-key-revamp_action_bar"] button {min-height:34px!important}
 
@@ -684,7 +689,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     div[class*="st-key-revamp_shopify_action"] a {
       background:var(--rv-green)!important;color:#fff!important;border-color:var(--rv-green)!important;
-      min-height:42px!important;font-weight:720!important
+      min-height:32px!important;font-weight:720!important
     }
     div[class*="st-key-revamp_shopify_action"] a:hover {
       background:#12683d!important;border-color:#12683d!important;color:#fff!important
@@ -698,7 +703,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin
       }
       div[class*="st-key-revamp_route_scroll"] {max-height:420px;overflow-y:auto}
-      div[class*="st-key-revamp_route_"] button {min-height:3.8rem}
+      div[class*="st-key-revamp_route_"] button {min-height:3.35rem}
     }
     </style>
     """, unsafe_allow_html=True)
