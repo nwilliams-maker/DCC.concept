@@ -1170,11 +1170,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             except Exception as exc:
                 st.error(f"Could not build Field Nation CSV: {exc}")
         with st.container(key="revamp_fn_toolbar"):
-            sel_col, csv_col, posted_col, link_col, clear_col = st.columns(
-                [1.25, 1.55, 1.35, 1.15, .8], vertical_alignment="center"
+            sel_col, select_col, csv_col, posted_col, link_col, clear_col = st.columns(
+                [1.05, .95, 1.45, 1.25, 1.05, .7], vertical_alignment="center"
             )
             with sel_col:
                 st.caption(f"{len(fn_selected)} selected · {stop_count} stops")
+            with select_col:
+                st.button("Select all", key="revamp_fn_select_all",
+                          on_click=select_visible, disabled=not visible_keys,
+                          use_container_width=True)
             with csv_col:
                 st.download_button(f"Download CSV ({len(csv_routes)})",
                                    data=csv_data.getvalue() if csv_data else b"",
