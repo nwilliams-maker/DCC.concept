@@ -642,10 +642,17 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
       transform:translateY(-1px);border-color:#aeb5c0!important;background:#fff!important;
       box-shadow:0 4px 10px rgba(16,24,40,.08)!important
     }
-    /* Selected route = strong neutral selection, not purple */
-    div[class*="st-key-revamp_route_"] button[kind="primary"] {
-      background:#eef2f6!important;color:#172033!important;border:1px solid #7d8998!important;
-      box-shadow:0 0 0 2px rgba(71,84,103,.08)!important
+    /* Selected route: subtle operational highlight. Never use the global dark-primary treatment. */
+    div[class*="st-key-revamp_route_"] button[kind="primary"],
+    div[class*="st-key-revamp_route_"] button[kind="primary"]:hover,
+    div[class*="st-key-revamp_route_"] button[kind="primary"]:focus,
+    div[class*="st-key-revamp_route_"] button[kind="primary"]:active {
+      background:#f0f8f4!important;
+      color:#172033!important;
+      border:1px solid #88b89f!important;
+      border-left:4px solid var(--rv-green)!important;
+      box-shadow:0 1px 3px rgba(16,24,40,.05)!important;
+      transform:none!important;
     }
 
     /* Meaningful route colors only */
@@ -1090,6 +1097,22 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         if state in ("Ready", "Flagged"):
             # Reuse the existing contractor, compensation, routing, FN,
             # bundling and link-generation logic for the selected live route.
+            #
+            # IMPORTANT: DCC's per-route "Assign to Field Nation" control reads
+            # _fn_team_id/_fn_worker_id from session state. Revamp previously
+            # populated those only in the separate bulk-FN action, which meant
+            # the route-card toggle could move tasks to the FN team but then
+            # skipped worker assignment + route-plan creation.
+            if not st.session_state.get("_fn_team_id") or not st.session_state.get("_fn_worker_id"):
+                try:
+                    _fn_conn = _fetch_fn_assignment_ids()
+                    st.session_state["_fn_team_id"] = _fn_conn.get("fn_team_id")
+                    st.session_state["_fn_worker_id"] = _fn_conn.get("fn_worker_id")
+                except Exception as _fn_exc:
+                    # Do not block normal dispatch rendering; the FN control will
+                    # surface its own failure if the OnFleet placeholder is unavailable.
+                    st.session_state["_fn_assignment_lookup_error"] = str(_fn_exc)
+
             dispatch_route = dict(route)
             if nearest and nearest[1] > 50:
                 dispatch_route["status"] = "Flagged"
