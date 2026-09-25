@@ -9,6 +9,7 @@ import hashlib
 import html
 import base64
 import os
+import re
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
