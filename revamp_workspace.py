@@ -105,6 +105,90 @@ def _nearest_ic(route, eligible_ics, haversine):
     return min(distances, key=lambda row: row[1]) if distances else None
 
 
+def _saved_route_fields(route, ghost=None):
+    """Read the same persisted values used by DCC's Sent/Accepted cards."""
+    ghost = ghost or route.get("_ghost_record") or {}
+    tasks = route.get("data") or []
+    return {
+        "contractor": ghost.get("contractor_name") or route.get("contractor_name") or "Unknown",
+        "wo": ghost.get("wo") or route.get("wo") or "",
+        "pay": ghost.get("pay", route.get("comp", 0)),
+        "due": ghost.get("due") or route.get("due") or "N/A",
+        "stops": ghost.get("stops", route.get("stops", 0)),
+        "tasks": ghost.get("tasks", len(tasks)),
+        "kiosks": ghost.get("kCnt", sum(
+            "install" in str(task.get("task_type", "")).lower() for task in tasks)),
+        "ghost": ghost,
+    }
+
+
+def _render_saved_route_card(route, state, route_hash, pod, ghost,
+                             make_venue_details, make_venue_details_ghost,
+                             venue_section, render_finalization_checklist,
+                             move_to_dispatch, is_dispatch_associate):
+    """Render the DCC route summary and actions only for the selected route."""
+    fields = _saved_route_fields(route, ghost)
+    ghost = fields["ghost"]
+    is_ghost = bool(route.get("_is_ghost"))
+    if is_ghost:
+        raw_locs = [part.strip() for part in str(ghost.get("locs") or "").split("|") if part.strip()]
+        locs = raw_locs[1:-1] if len(raw_locs) >= 3 else raw_locs
+        locs = list(dict.fromkeys(locs))
+        if not locs:
+            locs = list(dict.fromkeys(str(stop.get("addr") or "").strip()
+                                      for stop in (ghost.get("stop_data") or [])
+                                      if stop.get("addr")))
+        venues = make_venue_details_ghost(locs, stop_data=ghost.get("stop_data") or []) if locs else ""
+    else:
+        venues = make_venue_details(route.get("data") or [])
+    venues_html = venue_section(venues) if venues else ""
+    esc = lambda value: html.escape(str(value))
+    st.markdown(f"""<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:10px;">
+    <div style="background:#f8fafc;border-bottom:1px solid #e2e8f0;padding:8px 12px;">
+      <span style="font-size:9px;font-weight:900;color:#94a3b8;text-transform:uppercase;letter-spacing:0.1em;">Route Summary</span>
+    </div>
+    <div style="padding:12px 14px;display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #f1f5f9;gap:12px;">
+      <div><div style="font-size:9px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;">Contractor</div>
+      <div style="font-size:14px;font-weight:800;color:#0f172a;">{esc(fields['contractor'])}</div></div>
+      <div style="text-align:right;"><div style="font-size:9px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;">Stops / Tasks</div>
+      <div style="font-size:14px;font-weight:800;color:#0f172a;">{esc(fields['stops'])} <span style="color:#94a3b8;font-size:11px;font-weight:500;">Stops / {esc(fields['tasks'])} Tasks</span></div></div>
+    </div>
+    <div style="padding:10px 14px;display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #f1f5f9;gap:12px;">
+      <div><div style="font-size:9px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;">Due Date</div>
+      <div style="font-size:13px;font-weight:700;color:#0f172a;">{esc(fields['due'])}</div></div>
+      <div style="text-align:right;"><div style="font-size:9px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;">Total Compensation</div>
+      <div style="font-size:18px;font-weight:900;color:#16a34a;">${esc(fields['pay'])}</div></div>
+    </div>{venues_html}</div>""", unsafe_allow_html=True)
+
+    st.session_state[f"wo_{route_hash}"] = fields["wo"]
+    if state == "Accepted" or (state == "Sent" and not is_ghost):
+        render_finalization_checklist(
+            route_hash, pod, "g_chk" if is_ghost else "sent_chk" if state == "Sent" else "chk",
+            is_fn=fields["contractor"] == "Field Nation",
+            has_kiosks=bool(fields["kiosks"]),
+        )
+    if state == "Accepted" and fields["kiosks"]:
+        st.link_button("Order Kiosks on Shopify",
+                       "https://admin.shopify.com/store/terraboost/draft_orders/new",
+                       use_container_width=True)
+    if is_dispatch_associate():
+        return
+    with st.popover("Re-route" if state == "Sent" else "Remove route"):
+        st.write(f"Remove this route from {fields['contractor']}?")
+        if st.button("Confirm re-route" if state == "Sent" else "Confirm removal",
+                     key=f"revamp_revoke_{state}_{pod}_{route_hash}", type="primary"):
+            hashes = (ghost.get("_merged_hashes") or [route_hash]) if is_ghost else [route_hash]
+            for saved_hash in hashes:
+                move_to_dispatch(
+                    saved_hash, fields["contractor"], pod,
+                    action_label=("Ghost Archived" if is_ghost and state == "Accepted" else
+                                  "Re-Routed" if state == "Sent" else "Revoked"),
+                    check_onfleet=True, cluster_data=ghost if is_ghost else route,
+                    check_completed=state == "Accepted",
+                )
+            st.rerun()
+
+
 def _select_visible(keys):
     for key in keys:
         st.session_state[f"revamp_bulk_{key}"] = True
@@ -247,7 +331,8 @@ def _fetch_fn_assignment_ids():
 def render_workspace(can_access_tab, process_pod, render_dispatch,
                      haversine, db_engine, assign_tasks_to_fn_team,
                      fetch_sent_records_from_sheet, default_due_days=14,
-                     fn_ghost_to_cluster=None):
+                     fn_ghost_to_cluster=None, saved_route_helpers=None,
+                     merge_same_wo_ghosts=None):
     """Render one selected route while retaining the existing dispatch actions."""
     st.markdown("""
     <style>
@@ -365,6 +450,16 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     eligible_ics = _eligible_ics(st.session_state.get("ic_df"))
     all_routes = []
     seen_hashes = set()
+    ghosts_by_pod = {
+        pod: (merge_same_wo_ghosts((ghost_db or {}).get(pod, []))
+              if merge_same_wo_ghosts else (ghost_db or {}).get(pod, []))
+        for pod in loaded
+    }
+    saved_by_hash = {
+        (pod, str(ghost.get("hash") or "")): ghost
+        for pod, ghosts in ghosts_by_pod.items() for ghost in ghosts
+        if ghost.get("hash")
+    }
     for pod in loaded:
         for route in st.session_state.get(f"clusters_{pod}", []):
             if route.get("is_digital"):
@@ -372,15 +467,37 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             nearest = _nearest_ic(route, eligible_ics, haversine)
             route_hash = _route_hash(route)
             seen_hashes.add(route_hash)
-            all_routes.append((pod, route,
-                               _route_status(route, sent_db, nearest[1] if nearest else None),
+            display_route = dict(route)
+            route_state = _route_status(route, sent_db, nearest[1] if nearest else None)
+            saved = saved_by_hash.get((pod, route_hash))
+            if saved:
+                display_route["_ghost_record"] = saved
+                live_ids = {str(task.get("id") or "").strip() for task in route.get("data", [])}
+                saved_ids = {str(task_id).strip() for task_id in saved.get("task_ids", [])}
+                if saved_ids and saved_ids != live_ids and route_state in ("Sent", "Accepted"):
+                    # A bundled WO can persist several route rows while the
+                    # live feed exposes only one fragment. Show the full saved
+                    # card and its stop data, like DCC's unified ghost view.
+                    display_route["_is_ghost"] = True
+                    display_route["data"] = []
+            elif route_state in ("Sent", "Accepted"):
+                record = next((sent_db.get(str(task.get("id") or "").strip())
+                               for task in route.get("data", [])
+                               if str(task.get("id") or "").strip() in sent_db), None)
+                if record:
+                    display_route.update(contractor_name=record.get("name") or "Unknown",
+                                         wo=record.get("wo") or "",
+                                         comp=record.get("comp", 0),
+                                         due=record.get("due") or "N/A")
+            all_routes.append((pod, display_route, route_state,
                                route_hash, nearest))
     # Accepted routes often leave Onfleet's unassigned feed; include the
     # persisted ghost records so they remain visible in this workspace.
     for pod in loaded:
-        for ghost in (ghost_db or {}).get(pod, []):
+        for ghost in ghosts_by_pod[pod]:
             route_hash = str(ghost.get("hash") or "")
-            if not route_hash or route_hash in seen_hashes:
+            if (not route_hash or route_hash in seen_hashes or
+                    st.session_state.get(f"reverted_{route_hash}", False)):
                 continue
             seen_hashes.add(route_hash)
             ghost_status = str(ghost.get("status", "")).lower()
@@ -405,7 +522,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     counts["Selected"] = sum(1 for entry in all_routes
                              if st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))
     counts["All"] = len(all_routes)
-    total_tasks = sum(len(route.get("data", [])) for _, route, _, _, _ in all_routes)
+    total_tasks = sum(len(route.get("data", [])) or
+                      len((route.get("_ghost_record") or {}).get("task_ids") or [])
+                      for _, route, _, _, _ in all_routes)
     last_sync = st.session_state.get("_last_sync_ts")
     sync_age = "Sync available"
     if isinstance(last_sync, datetime):
@@ -591,9 +710,17 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             return
         pod, route, state, route_hash, nearest = current
         title = f"{route.get('city', 'Route')}, {route.get('state', '')}"
-        st.markdown(f"### {html.escape(title)}  ·  {html.escape(state)}")
-        st.caption(f"{pod} pod · {route.get('stops', 0)} stops · "
-                   f"{len(route.get('data', []))} tasks")
+        saved_fields = _saved_route_fields(route) if state in ("Sent", "Accepted") else None
+        if saved_fields:
+            st.markdown(f"### {html.escape(str(saved_fields['wo'] or title))} | "
+                        f"${html.escape(str(saved_fields['pay']))} | Due: "
+                        f"{html.escape(str(saved_fields['due']))}")
+            st.caption(f"{title} · {state} · {pod} pod · {saved_fields['stops']} stops · "
+                       f"{saved_fields['tasks']} tasks")
+        else:
+            st.markdown(f"### {html.escape(title)}  ·  {html.escape(state)}")
+            st.caption(f"{pod} pod · {route.get('stops', 0)} stops · "
+                       f"{len(route.get('data', []))} tasks")
         if nearest:
             st.caption(f"Closest eligible IC: {nearest[0]} · {nearest[1]:.1f} mi")
         if state in ("Ready", "Flagged"):
@@ -648,5 +775,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             st.rerun()
                         except Exception as exc:
                             st.error(f"Could not assign Field Nation rep: {exc}")
+        elif state in ("Sent", "Accepted"):
+            if not saved_route_helpers:
+                st.error("Saved route details are unavailable. Refresh the page.")
+            else:
+                _render_saved_route_card(
+                    route, state, route_hash, pod, route.get("_ghost_record"),
+                    **saved_route_helpers,
+                )
         else:
             st.caption(f"Route {route.get('wo') or route_hash}")
