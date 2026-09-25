@@ -69,6 +69,36 @@ def _payload(route, pod, due, work_order, route_hash):
     }
 
 
+def _next_dcc_work_order(engine, route):
+    """Match DCC's FN{MMDDYYYY}-{City} {ST}-{N} work-order sequence."""
+    tag = datetime.now().strftime("%m%d%Y")
+    city = str(route.get("city") or "Unknown").strip()
+    state = str(route.get("state") or "").strip().upper()
+    prefix = f"FN{tag}-{city} {state}-"
+    next_n = 1
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sa.text("""
+                SELECT work_order
+                FROM field_nation_orders
+                WHERE work_order LIKE :prefix
+            """), {"prefix": prefix + "%"}).scalars().all()
+        nums = []
+        for value in rows:
+            value = str(value or "")
+            if value.startswith(prefix):
+                try:
+                    nums.append(int(value[len(prefix):]))
+                except (TypeError, ValueError):
+                    pass
+        if nums:
+            next_n = max(nums) + 1
+    except Exception:
+        # Keep DCC's safe fallback behavior: first route uses suffix 1.
+        pass
+    return f"{prefix}{next_n}"
+
+
 def bulk_assign(engine, selected_routes, due, assign_tasks_to_fn_team,
                 fn_team_id=None, fn_worker_id=None):
     """Return (saved, skipped, errors); each result identifies a route hash.
@@ -95,12 +125,10 @@ def bulk_assign(engine, selected_routes, due, assign_tasks_to_fn_team,
             if existing:
                 skipped.append((route_hash, existing))
                 continue
-            # A stable suffix keeps retries on the same WO and avoids a race
-            # between multiple selected routes in the same city.
-            tag = datetime.now().strftime("%m%d%Y")
-            city = str(route.get("city") or "Unknown").strip()
-            state = str(route.get("state") or "").strip().upper()
-            work_order = f"FN{tag}-{city} {state}-{route_hash[:10]}"
+            # Match the existing DCC checkbox flow exactly: FN{MMDDYYYY}-{City} {ST}-{N}.
+            # The same WO is then passed into assign_tasks_to_fn_team, which creates
+            # the yellow OnFleet route plan with this exact name.
+            work_order = _next_dcc_work_order(engine, route)
             payload = _payload(route, pod, due, work_order, route_hash)
             result = data_access.save_to_field_nation(engine, work_order, payload)
             if not result.get("success"):
