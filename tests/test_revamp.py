@@ -25,6 +25,37 @@ def load_functions(filename, names, extra=None):
 
 
 class RevampTests(unittest.TestCase):
+    def test_login_loads_one_pod_and_check_new_tasks_refreshes(self):
+        from streamlit.testing.v1 import AppTest
+        source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import pandas as pd
+from revamp_workspace import render_workspace
+st.session_state.setdefault("ic_df", pd.DataFrame())
+def process(pod, refresh_tasks=False):
+    st.session_state.setdefault("load_calls", []).append((pod, refresh_tasks))
+    st.session_state["clusters_" + pod] = [{{"city":"Chicago","state":"IL","stops":1,
+        "data":[{{"id":"task-" + pod,"full":"101 Main St"}}]}}]
+def records():
+    return {{}}, {{}}, set(), {{}}
+records.clear = lambda: None
+render_workspace(lambda pod: pod in ("Blue", "Green"), process,
+    lambda *args: None, lambda *args: 0, object(), lambda *args: None, records)
+'''
+        app = AppTest.from_string(source).run()
+        self.assertEqual(app.session_state["load_calls"], [("Blue", False)])
+        self.assertFalse(app.exception)
+        app.run()
+        self.assertEqual(app.session_state["load_calls"], [("Blue", False)])
+        app.selectbox(key="revamp_pod").set_value("Green").run()
+        self.assertEqual(app.session_state["load_calls"], [("Blue", False), ("Green", False)])
+        app.button(key="revamp_sync").click().run()
+        self.assertEqual(app.session_state["load_calls"][-1], ("Green", True))
+        self.assertEqual(app.button(key="revamp_sync").label, "Check new tasks")
+        self.assertFalse(app.exception)
+
     def test_nearest_active_contractor_and_over_50_miles(self):
         scope = load_functions("revamp_workspace.py", ["_eligible_ics", "_nearest_ic"])
         contractors = pd.DataFrame([
