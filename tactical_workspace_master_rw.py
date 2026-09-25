@@ -3684,7 +3684,7 @@ def _mapbox_geocode_cache():
     return {}
 
 
-def _mapbox_geocode(address):
+def _mapbox_geocode(address, cache=None):
     """Resolve an address to (lng, lat) via Mapbox Geocoding API. Returns
     None on miss. Cached forever for the address — kiosks don't move.
 
@@ -3702,7 +3702,7 @@ def _mapbox_geocode(address):
     addr_key = str(address).strip()
     if not addr_key:
         return None
-    cache = _mapbox_geocode_cache()
+    cache = _mapbox_geocode_cache() if cache is None else cache
     if addr_key in cache:
         return cache[addr_key]
     # Coordinate-pair short-circuit. Strict "lat,lng" form so we don't
@@ -3779,7 +3779,19 @@ def get_gmaps(home, waypoints):
     home_ll = _mapbox_geocode(home)
     if not home_ll:
         return 0, 0, "0h 0m", []
-    wp_lls = [_mapbox_geocode(w) for w in waypoints]
+    # First-time routes can contain 20 uncached addresses. Geocoding them
+    # serially holds the entire dispatch screen for many request timeouts.
+    # Resolve distinct misses concurrently while retaining the same Mapbox
+    # results and shared address cache. Worker threads do not call Streamlit.
+    geocode_cache = _mapbox_geocode_cache()
+    uncached = list(dict.fromkeys(w for w in waypoints if str(w).strip() not in geocode_cache))
+    if len(uncached) > 1:
+        with ThreadPoolExecutor(max_workers=min(8, len(uncached))) as executor:
+            resolved = dict(zip(uncached, executor.map(
+                lambda address: _mapbox_geocode(address, cache=geocode_cache), uncached)))
+    else:
+        resolved = {w: _mapbox_geocode(w, cache=geocode_cache) for w in uncached}
+    wp_lls = [geocode_cache.get(str(w).strip()) or resolved.get(w) for w in waypoints]
     if any(c is None for c in wp_lls):
         return 0, 0, "0h 0m", []
 
@@ -4341,6 +4353,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
     def update_prog(rel_val, msg):
         if warm_only: return  # headless startup warm-up: no progress UI
         if os.environ.get("DCC_REVAMP_UI") == "1":
+            msg = msg.replace("📥 ", "").replace("📡 ", "").replace("🗺️ ", "")
             _now_log = time.monotonic()
             if rel_val in (0.0, 0.4) or _now_log - _revamp_last_progress_log[0] >= 30:
                 print(f"[revamp/sync] {pod_name}: {msg}", flush=True)
