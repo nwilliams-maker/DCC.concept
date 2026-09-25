@@ -37,7 +37,7 @@ class RevampTests(unittest.TestCase):
 
         def process(pod, warm_only=False, refresh_tasks=False,
                     _task_download_progress=None, _build_progress=None):
-            calls.append((pod, warm_only))
+            calls.append((pod, warm_only, refresh_tasks))
             started.set()
             _task_download_progress(120, 2)
             release.wait(3)
@@ -67,10 +67,14 @@ class RevampTests(unittest.TestCase):
         self.assertGreater(value, 0)
         self.assertIn("120 received", label)
         self.assertIs(scope["_background_pod_build"]("Orange", process, lambda: cache), future)
+        refresh = scope["_background_pod_build"]("Orange", process, lambda: cache, refresh=True)
+        self.assertIsNot(refresh, future)
+        self.assertIs(scope["_background_pod_build"]("Orange", process, lambda: cache, refresh=True), refresh)
         release.set()
         self.assertTrue(future.result(timeout=2))
+        self.assertTrue(refresh.result(timeout=2))
         self.assertIn("120 OnFleet tasks downloaded", scope["_build_progress_display"]("Orange")[1])
-        self.assertEqual(calls, [("Orange", True)])
+        self.assertEqual(calls, [("Orange", True, False), ("Orange", True, True)])
         scope["_pod_build_jobs"]()["executor"].shutdown(wait=True)
 
     def test_outlook_button_restores_saved_draft_or_rebuilds_route_link(self):
