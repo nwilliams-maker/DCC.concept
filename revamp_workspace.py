@@ -246,6 +246,31 @@ def _outlook_route_url(route_hash, fields, ic_df=None, portal_base_url=None):
     })
 
 
+def _extract_kiosk_ids(route, is_ghost):
+    """Return a deduplicated list of non-empty kiosk IDs for a route."""
+    route = route or {}
+    kiosk_ids = []
+    if is_ghost:
+        entries = route.get("stop_data", []) or []
+        key = "kioskId"
+    else:
+        entries = route.get("data", []) or []
+        key = "kiosk_id"
+    for entry in entries:
+        value = str((entry or {}).get(key) or "").strip()
+        if value:
+            kiosk_ids.append(value)
+    return list(dict.fromkeys(kiosk_ids))
+
+
+def _shopify_kiosk_url(kiosk_ids):
+    """Build the Shopify draft order URL, optionally pre-filled with kiosk IDs."""
+    base_url = "https://admin.shopify.com/store/terraboost/draft_orders/new"
+    if not kiosk_ids:
+        return base_url
+    return base_url + "?" + urlencode({"kiosks": ",".join(kiosk_ids)})
+
+
 def _render_saved_route_card(route, state, route_hash, pod, ghost,
                              make_venue_details, make_venue_details_ghost,
                              venue_section, render_finalization_checklist,
@@ -254,6 +279,7 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
     fields = _saved_route_fields(route, ghost)
     ghost = fields["ghost"]
     is_ghost = bool(route.get("_is_ghost"))
+    kiosk_ids = _extract_kiosk_ids(route if not is_ghost else ghost, is_ghost)
     if is_ghost:
         raw_locs = [part.strip() for part in str(ghost.get("locs") or "").split("|") if part.strip()]
         locs = raw_locs[1:-1] if len(raw_locs) >= 3 else raw_locs
@@ -298,7 +324,7 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
         )
     if state == "Accepted" and fields["kiosks"]:
         st.link_button("Order Kiosks on Shopify",
-                       "https://admin.shopify.com/store/terraboost/draft_orders/new",
+                       _shopify_kiosk_url(kiosk_ids),
                        use_container_width=True)
     if is_dispatch_associate():
         return
