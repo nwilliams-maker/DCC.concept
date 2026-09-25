@@ -670,6 +670,46 @@ def _fetch_fn_assignment_ids():
     )
 
 
+def _return_fn_route_to_regular(route, route_hash, pod, db_engine,
+                                move_to_dispatch, fetch_sent_records_from_sheet):
+    """Remove FN tracking and push its OnFleet tasks back to normal dispatch."""
+    if db_engine is None:
+        raise RuntimeError("Railway database is unavailable")
+
+    from migration import data_access as _fn_data
+
+    # Remove the Field Nation tracking row first so the next refresh cannot
+    # immediately classify the route back into the FN bucket.
+    result = _fn_data.mirror_remove_field_nation_by_cluster_hash(db_engine, route_hash)
+    if not result.get("success"):
+        raise RuntimeError(result.get("skipped") or result.get("error") or "Field Nation order not found")
+
+    ghost = route.get("_ghost_record") or {}
+    cluster_data = ghost if ghost else route
+
+    # Existing DCC re-route logic already handles the critical OnFleet side:
+    # FN tasks are state=1 under the FN placeholder, so check_completed=True
+    # causes them to be PUT back to worker=None and flow into the open pool.
+    move_to_dispatch(
+        route_hash,
+        "Field Nation",
+        pod,
+        action_label="Field Nation Revoked",
+        check_onfleet=True,
+        cluster_data=cluster_data,
+        check_completed=True,
+    )
+
+    try:
+        fetch_sent_records_from_sheet.clear()
+    except Exception:
+        pass
+
+    st.session_state.pop(f"revamp_fn_{pod}:{route_hash}", None)
+    st.session_state.pop(f"route_state_{route_hash}", None)
+    return True
+
+
 def render_workspace(can_access_tab, process_pod, render_dispatch,
                      haversine, db_engine, assign_tasks_to_fn_team,
                      fetch_sent_records_from_sheet, default_due_days=14,
@@ -1225,14 +1265,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         csv_routes = [route for route in csv_routes if route]
         csv_data = None
         stop_count = 0
+        bulk_return_clicked = False
         if csv_routes:
             try:
                 csv_data, stop_count, _ = generate_combined_fn_upload(csv_routes)
             except Exception as exc:
                 st.error(f"Could not build Field Nation CSV: {exc}")
         with st.container(key="revamp_fn_toolbar"):
-            sel_col, select_col, csv_col, posted_col, link_col, clear_col = st.columns(
-                [1.05, .95, 1.45, 1.25, 1.05, .7], vertical_alignment="center"
+            sel_col, select_col, csv_col, posted_col, return_col, link_col, clear_col = st.columns(
+                [1.0, .85, 1.35, 1.15, 1.25, 1.0, .65], vertical_alignment="center"
             )
             with sel_col:
                 st.caption(f"{len(fn_selected)} selected · {stop_count} stops")
@@ -1250,6 +1291,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 posted_clicked = st.button(f"Mark Posted ({len(pending)})",
                                            disabled=not pending or db_engine is None,
                                            use_container_width=True, key="revamp_fn_posted")
+            with return_col:
+                bulk_return_clicked = st.button(
+                    f"Return selected ({len(fn_selected)})",
+                    key="revamp_fn_return_selected",
+                    disabled=not fn_selected or db_engine is None,
+                    use_container_width=True,
+                )
             with link_col:
                 st.link_button("Open Field Nation", "https://app.fieldnation.com/projects",
                                use_container_width=True)
@@ -1258,6 +1306,59 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                           disabled=not visible_keys, use_container_width=True)
         if fn_selected and not csv_routes:
             st.warning("Selected routes have no task addresses available for a CSV.")
+
+        if bulk_return_clicked:
+            st.session_state["_revamp_fn_bulk_return_confirm"] = True
+
+        if st.session_state.get("_revamp_fn_bulk_return_confirm"):
+            with st.container(border=True):
+                st.warning(
+                    f"Return {len(fn_selected)} selected Field Nation route"
+                    f"{'s' if len(fn_selected) != 1 else ''} to regular dispatch?"
+                )
+                confirm_col, cancel_col = st.columns([1, 1])
+                with confirm_col:
+                    if st.button(
+                        "Confirm return",
+                        key="revamp_fn_bulk_return_confirm_btn",
+                        type="primary",
+                        disabled=not fn_selected,
+                        use_container_width=True,
+                    ):
+                        failures = []
+                        returned = 0
+                        for pod, route, _, route_hash, _ in list(fn_selected):
+                            try:
+                                _return_fn_route_to_regular(
+                                    route, route_hash, pod, db_engine,
+                                    move_to_dispatch, fetch_sent_records_from_sheet,
+                                )
+                                returned += 1
+                            except Exception as exc:
+                                failures.append(f"{route.get('city', 'Route')}: {exc}")
+                        st.session_state["_revamp_fn_bulk_return_confirm"] = False
+                        fetch_sent_records_from_sheet.clear()
+                        if failures:
+                            st.session_state["_revamp_notice"] = (
+                                "warning",
+                                f"Returned {returned} route(s). "
+                                f"{len(failures)} could not be returned: " + "; ".join(failures[:3]),
+                            )
+                        else:
+                            st.session_state["_revamp_notice"] = (
+                                "success",
+                                f"Returned {returned} Field Nation route(s) to regular dispatch.",
+                            )
+                        st.rerun()
+                with cancel_col:
+                    if st.button(
+                        "Cancel",
+                        key="revamp_fn_bulk_return_cancel_btn",
+                        use_container_width=True,
+                    ):
+                        st.session_state["_revamp_fn_bulk_return_confirm"] = False
+                        st.rerun()
+
         if posted_clicked:
             failures = []
             for pod, route, _, route_hash, _ in pending:
@@ -1430,6 +1531,31 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                     )
                 if len(stop_data) > 12:
                     st.caption(f"+ {len(stop_data) - 12} more stops")
+
+            with st.popover("Return to regular routes", use_container_width=True):
+                st.warning(
+                    "This will remove the route from Field Nation tracking and "
+                    "unassign its OnFleet tasks so they return to normal dispatch."
+                )
+                if st.button(
+                    "Confirm return to regular routes",
+                    key=f"revamp_fn_return_one_{pod}_{route_hash}",
+                    type="primary",
+                    disabled=db_engine is None,
+                    use_container_width=True,
+                ):
+                    try:
+                        _return_fn_route_to_regular(
+                            route, route_hash, pod, db_engine,
+                            move_to_dispatch, fetch_sent_records_from_sheet,
+                        )
+                        st.session_state["_revamp_notice"] = (
+                            "success",
+                            f"{title} returned to regular dispatch.",
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not return route: {exc}")
 
             if stage == "Pending":
                 st.info("Select this route on the left, download the FN CSV, post it in Field Nation, then click Mark Posted.")
