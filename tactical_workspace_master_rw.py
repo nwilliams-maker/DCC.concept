@@ -391,51 +391,105 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
         except Exception:
             break
 
-    all_tasks_raw = []
-    time_window = int(time.time() * 1000) - (45 * 24 * 3600 * 1000)
-    url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}"
-
-    _MAX_PAGES = 200
-    _page = 0
-    _seen_last_ids = set()
-    _retry_429 = 0
+    # Fetch the same authoritative 45-day state=0 population, but split the
+    # creation-time range into smaller independent windows and paginate those
+    # windows concurrently. OnFleet applies from/to to creation time for
+    # non-completed tasks, so the union is equivalent to the old single serial
+    # query while avoiding ~126 sequential network round trips.
+    #
+    # IMPORTANT: do not replace this with a containers filter. OnFleet ignores
+    # containers when state is supplied, and dropping state would pull assigned
+    # and completed tasks too. We also intentionally retain ORG-container
+    # unassigned tasks because dispatch relies on them.
     _fetch_started = time.monotonic()
-    while url and _page < _MAX_PAGES:
-        _page += 1
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 429:
-            # Security audit M9 - exponential backoff for rate limits so a
-            # transient 429 does not burn pages at full speed. Capped at 6
-            # retries (~63s worst case) then raises so the cache discards.
-            _retry_429 += 1
-            print(f"[onfleet/tasks] rate limited at page {_page}, retry {_retry_429}; {len(all_tasks_raw)} tasks received", flush=True)
-            if _progress_callback:
-                _progress_callback(len(all_tasks_raw), _page - 1, rate_limited=True)
-            if _retry_429 > 6 or time.monotonic() - _fetch_started > 150:
-                raise RuntimeError("Onfleet task extraction rate limited; retry Check new tasks shortly")
-            time.sleep(min(60, 2 ** _retry_429))
-            _page -= 1
-            continue
-        _retry_429 = 0
-        if response.status_code != 200:
-            # Raise so st.cache_data discards this attempt — the next caller
-            # will retry instead of inheriting a half-populated list.
-            raise RuntimeError(f"Onfleet API error {response.status_code}: {response.text[:200]}")
-        res_json = response.json()
-        all_tasks_raw.extend(res_json.get('tasks', []))
-        if _progress_callback:
-            _progress_callback(len(all_tasks_raw), _page)
-        if _page % 20 == 0:
-            print(f"[onfleet/tasks] page {_page}: {len(all_tasks_raw)} tasks in {time.monotonic() - _fetch_started:.1f}s", flush=True)
-        _next_id = res_json.get('lastId')
-        if _next_id and _next_id in _seen_last_ids:
-            break
-        if _next_id:
-            _seen_last_ids.add(_next_id)
-        url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
+    _now_ms = int(time.time() * 1000)
+    time_window = _now_ms - (45 * 24 * 3600 * 1000)
+    _WINDOW_COUNT = 4
+    _window_span = max(1, (_now_ms - time_window) // _WINDOW_COUNT)
 
-    unique_tasks = list({t['id']: t for t in all_tasks_raw}.values())
-    print(f"[onfleet/tasks] fetched {_page} pages, {len(unique_tasks)} unique tasks in {time.monotonic() - _fetch_started:.1f}s", flush=True)
+    _progress_lock = threading.Lock()
+    _progress_tasks = 0
+    _progress_pages = 0
+
+    def _fetch_task_window(window_idx):
+        nonlocal _progress_tasks, _progress_pages
+        window_from = time_window + (window_idx * _window_span)
+        window_to = (_now_ms if window_idx == _WINDOW_COUNT - 1
+                     else time_window + ((window_idx + 1) * _window_span))
+        # OnFleet's `to` bound is exclusive for practical pagination safety;
+        # adjacent windows may still overlap at a millisecond boundary, and the
+        # final ID-based dedupe below makes that harmless.
+        base = (
+            f"https://onfleet.com/api/v2/tasks/all?state=0"
+            f"&from={window_from}&to={window_to}"
+        )
+        url = base
+        window_tasks = []
+        seen_last_ids = set()
+        retry_429 = 0
+        page = 0
+        max_pages = 100
+
+        while url and page < max_pages:
+            page += 1
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code == 429:
+                retry_429 += 1
+                if _progress_callback:
+                    with _progress_lock:
+                        _progress_callback(_progress_tasks, _progress_pages, rate_limited=True)
+                if retry_429 > 6 or time.monotonic() - _fetch_started > 150:
+                    raise RuntimeError(
+                        f"Onfleet task extraction rate limited in window {window_idx + 1}; "
+                        "retry Check new tasks shortly"
+                    )
+                time.sleep(min(30, 2 ** retry_429))
+                page -= 1
+                continue
+            retry_429 = 0
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Onfleet API error {response.status_code} in task window "
+                    f"{window_idx + 1}: {response.text[:200]}"
+                )
+            res_json = response.json()
+            batch = res_json.get("tasks", []) if isinstance(res_json, dict) else []
+            window_tasks.extend(batch)
+            with _progress_lock:
+                _progress_tasks += len(batch)
+                _progress_pages += 1
+                if _progress_callback:
+                    _progress_callback(_progress_tasks, _progress_pages)
+            next_id = res_json.get("lastId") if isinstance(res_json, dict) else None
+            if next_id and next_id in seen_last_ids:
+                break
+            if next_id:
+                seen_last_ids.add(next_id)
+                url = base + f"&lastId={next_id}"
+            else:
+                url = None
+
+        return window_tasks, page, page >= max_pages
+
+    all_tasks_raw = []
+    _page = 0
+    _hit_cap = False
+    # Four workers keeps the request rate modest while removing most of the
+    # serial latency. Each window independently backs off on 429.
+    with ThreadPoolExecutor(max_workers=_WINDOW_COUNT) as _ex:
+        futures = [_ex.submit(_fetch_task_window, idx) for idx in range(_WINDOW_COUNT)]
+        for future in futures:
+            tasks_part, pages_part, hit_cap_part = future.result()
+            all_tasks_raw.extend(tasks_part)
+            _page += pages_part
+            _hit_cap = _hit_cap or hit_cap_part
+
+    unique_tasks = list({t['id']: t for t in all_tasks_raw if t.get('id')}.values())
+    print(
+        f"[onfleet/tasks] parallel fetch {_WINDOW_COUNT} windows / {_page} pages, "
+        f"{len(unique_tasks)} unique tasks in {time.monotonic() - _fetch_started:.1f}s",
+        flush=True,
+    )
     # ROUTE-PLAN EXCLUSION (May 30 2026, Nick): any OnFleet route plan whose
     # name contains 'hold' or 'pause' is treated as a parking lot -- tasks
     # inside it never enter the dispatchable pool. Case-insensitive substring.
@@ -496,7 +550,7 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
         'fn_worker_id': fn_worker_id,
         '_fn_worker_lookup_failed': bool(_fn_worker_lookup_failed and fn_worker_id is None),
         '_page_count': _page,
-        '_hit_cap': _page >= _MAX_PAGES,
+        '_hit_cap': _hit_cap,
     }
 
 
