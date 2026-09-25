@@ -36,24 +36,76 @@ def _pod_build_jobs():
             "executor": ThreadPoolExecutor(max_workers=2, thread_name_prefix="pod-build")}
 
 
-def _background_pod_build(pod, process_pod, cluster_store):
+def _background_pod_build(pod, process_pod, cluster_store, refresh=False):
     jobs = _pod_build_jobs()
     with jobs["lock"]:
         current = jobs["jobs"].get(pod)
-        if current is not None and (not current.done() or pod in cluster_store()):
+        if current is not None and (not current.done() or (not refresh and pod in cluster_store())):
             return current
+
+        progress = {"phase": "connecting", "downloaded": 0, "pages": 0,
+                    "value": 0.02, "message": "Connecting to OnFleet"}
+        jobs.setdefault("progress", {})[pod] = progress
+
+        def report_download(count, page, done=False, rate_limited=False):
+            with jobs["lock"]:
+                progress["downloaded"] = count
+                progress["pages"] = page
+                if done:
+                    progress["phase"] = "routing"
+                    progress["value"] = 0.4
+                else:
+                    progress["phase"] = "rate_limited" if rate_limited else "downloading"
+                    # OnFleet does not provide a total page count. Move the
+                    # bar gradually through the download portion without
+                    # presenting this estimate as an exact percentage.
+                    progress["value"] = max(progress["value"], min(0.38, 0.4 * page / (page + 10)))
+
+        def report_build(value, message):
+            with jobs["lock"]:
+                if value >= 0.4:
+                    progress["phase"] = "routing"
+                    progress["value"] = max(progress["value"], min(value, 0.99))
+                    progress["message"] = message
 
         def build():
             with _pod_load_locks()[pod]:
                 print(f"[revamp/sync] background build starting {pod}", flush=True)
-                process_pod(pod, warm_only=True)
-                ready = pod in cluster_store()
+                result = process_pod(pod, warm_only=True, refresh_tasks=refresh,
+                                     _task_download_progress=report_download,
+                                     _build_progress=report_build)
+                ready = result is True and pod in cluster_store()
+                with jobs["lock"]:
+                    progress["phase"] = "complete" if ready else "failed"
+                    progress["value"] = 1.0 if ready else progress["value"]
                 print(f"[revamp/sync] background build {pod}: {'ready' if ready else 'failed'}", flush=True)
                 return ready
 
         current = jobs["executor"].submit(build)
         jobs["jobs"][pod] = current
         return current
+
+
+def _build_progress_display(pod):
+    jobs = _pod_build_jobs()
+    with jobs["lock"]:
+        status = dict(jobs.get("progress", {}).get(pod) or {})
+    count = status.get("downloaded", 0)
+    page = status.get("pages", 0)
+    phase = status.get("phase", "connecting")
+    if phase == "rate_limited":
+        label = f"OnFleet is limiting requests. {count:,} tasks downloaded; retrying page {page + 1}."
+    elif phase == "downloading":
+        label = f"Downloading OnFleet tasks: {count:,} received (page {page}; all pods)."
+    elif phase in ("routing", "complete"):
+        message = str(status.get("message", ""))
+        message = message.replace("📡 ", "").replace("🗺️ ", "")
+        label = f"{count:,} OnFleet tasks downloaded. {message or 'Building routes...'}"
+    elif phase == "failed":
+        label = "Task extraction failed. Check new tasks to retry."
+    else:
+        label = "Connecting to OnFleet; waiting for the first task page..."
+    return max(0.0, min(float(status.get("value", 0.02)), 1.0)), label
 
 
 def _route_hash(route):
@@ -491,26 +543,42 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             st.session_state[f"_revamp_load_attempted_{pod}"] = True
             started = time.monotonic()
             print(f"[revamp/sync] waiting for {pod} load", flush=True)
-            with st.spinner(f"Loading {pod} routes from Onfleet..."):
-                # Auto builds run beyond the browser connection. A dropped
-                # WebSocket can rejoin this future instead of restarting an
-                # 8,000-task Onfleet pull and consuming more API quota.
-                if not refresh_clicked and cluster_store is not None:
-                    try:
-                        ready = _background_pod_build(pod, process_pod, cluster_store).result(timeout=240)
-                    except FutureTimeout:
-                        st.session_state[f"_revamp_load_attempted_{pod}"] = False
-                        st.info("Onfleet extraction continues in the background. Reload to see the completed routes.")
-                        return
-                    except Exception as exc:
-                        print(f"[revamp/sync] background build failed for {pod}: {type(exc).__name__}: {exc}", flush=True)
-                        ready = False
-                    if not ready:
-                        st.error("Onfleet task extraction failed. Click Check new tasks to retry.")
-                        continue
+            if cluster_store is not None:
+                # The server builds routes independently of the browser.
+                # Poll its task-page counter so mobile users see real counts
+                # and can reconnect without restarting the download.
+                future = _background_pod_build(
+                    pod, process_pod, cluster_store,
+                    refresh=refresh_clicked and index == 0,
+                )
+                indicator = st.progress(0.02, text="Connecting to OnFleet...")
+                last_display = None
+                try:
+                    while True:
+                        try:
+                            ready = future.result(timeout=1)
+                            break
+                        except FutureTimeout:
+                            display = _build_progress_display(pod)
+                            if display != last_display:
+                                indicator.progress(display[0], text=display[1])
+                                last_display = display
+                            if time.monotonic() - started > 240:
+                                st.session_state[f"_revamp_load_attempted_{pod}"] = False
+                                st.info("OnFleet extraction continues in the background. Reload to see the completed routes.")
+                                return
+                except Exception as exc:
+                    print(f"[revamp/sync] background build failed for {pod}: {type(exc).__name__}: {exc}", flush=True)
+                    ready = False
+                finally:
+                    indicator.empty()
+                if not ready:
+                    st.error("OnFleet task extraction failed. Click Check new tasks to retry.")
+                    continue
+            with st.spinner(f"Finishing {pod} routes..."):
                 with _pod_load_locks()[pod]:
                     print(f"[revamp/sync] starting {pod}", flush=True)
-                    if refresh_clicked and index == 0:
+                    if cluster_store is None and refresh_clicked and index == 0:
                         process_pod(pod, refresh_tasks=True)
                     else:
                         process_pod(pod)
