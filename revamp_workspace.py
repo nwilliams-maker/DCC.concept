@@ -295,18 +295,29 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     remembered_pod = st.query_params.get("pod")
     if st.session_state.get("revamp_pod") not in pod_options:
         st.session_state["revamp_pod"] = remembered_pod if remembered_pod in accessible else accessible[0]
-    filter_col, _, refresh_col = st.columns([1.4, 4.5, 1], vertical_alignment="bottom")
+    filter_col, _, refresh_col = st.columns([1.4, 4.5, 1.5], vertical_alignment="bottom")
     with filter_col:
         pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod", on_change=_remember_pod)
     selected_pods = accessible if pod_choice == "All my pods" else [pod_choice]
     with refresh_col:
-        sync_clicked = st.button("Sync routes", key="revamp_sync", use_container_width=True)
-    if sync_clicked:
+        refresh_clicked = st.button("Check new tasks", key="revamp_sync", use_container_width=True)
+    # A new signed-in session loads its selected pod automatically. Switching
+    # pods loads only pods this session has not yet built; the refresh button
+    # explicitly rebuilds the selected pod(s) against fresh Onfleet data.
+    pending_pods = [pod for pod in selected_pods if
+                    f"clusters_{pod}" not in st.session_state and
+                    not st.session_state.get(f"_revamp_load_attempted_{pod}")]
+    if refresh_clicked or pending_pods:
         fetch_sent_records_from_sheet.clear()
-        for pod in selected_pods:
+        for index, pod in enumerate(selected_pods if refresh_clicked else pending_pods):
+            st.session_state[f"_revamp_load_attempted_{pod}"] = True
             started = time.monotonic()
             print(f"[revamp/sync] starting {pod}", flush=True)
-            process_pod(pod)
+            with st.spinner(f"Loading {pod} routes from Onfleet..."):
+                if refresh_clicked and index == 0:
+                    process_pod(pod, refresh_tasks=True)
+                else:
+                    process_pod(pod)
             loaded_count = len(st.session_state.get(f"clusters_{pod}", []))
             print(f"[revamp/sync] finished {pod}: {loaded_count} routes in {time.monotonic() - started:.1f}s", flush=True)
         st.session_state["_last_sync_ts"] = datetime.now()
@@ -322,11 +333,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     loaded = [pod for pod in selected_pods if f"clusters_{pod}" in st.session_state]
     if not loaded:
-        st.info("Routes are not loaded yet. Click Sync routes to fetch this pod's tasks.")
+        st.error("Routes could not be loaded. Click Check new tasks to retry.")
         return
     missing = [pod for pod in selected_pods if pod not in loaded]
     if missing:
-        st.caption("Not loaded yet: " + ", ".join(missing) + ". Sync routes to add them.")
+        st.caption("Could not load: " + ", ".join(missing) + ". Click Check new tasks to retry.")
 
     eligible_ics = _eligible_ics(st.session_state.get("ic_df"))
     all_routes = []
