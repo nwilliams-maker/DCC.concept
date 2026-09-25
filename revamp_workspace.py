@@ -12,6 +12,7 @@ import os
 import time
 import threading
 from datetime import date, datetime, timedelta
+from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
 import requests
 import streamlit as st
@@ -122,6 +123,40 @@ def _saved_route_fields(route, ghost=None):
     }
 
 
+def _outlook_route_url(route_hash, fields, ic_df=None, portal_base_url=None):
+    """Use DCC's exact draft when available; rebuild a draft after sign-in."""
+    saved_draft = st.session_state.get(f"_persisted_outlook_{route_hash}")
+    if saved_draft:
+        return saved_draft
+    wo = str(fields.get("wo") or "").strip()
+    if not wo:
+        return None
+    ghost = fields.get("ghost") or {}
+    recipient = str(ghost.get("contractor_email") or "").strip()
+    if not recipient and ic_df is not None and not ic_df.empty:
+        cols = {str(col).strip().lower(): col for col in ic_df.columns}
+        if "name" in cols and "email" in cols:
+            matching = ic_df[ic_df[cols["name"]].astype(str).str.strip().str.casefold() ==
+                             str(fields["contractor"]).strip().casefold()]
+            if not matching.empty:
+                value = str(matching.iloc[0][cols["email"]] or "").strip()
+                recipient = "" if value.lower() in ("nan", "none") else value
+    base = portal_base_url or os.environ.get("PORTAL_BASE_URL") or (
+        "https://nwilliams-maker.github.io/DCC/TerraboostRouteRequest.html")
+    parts = urlsplit(base)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update({"route": wo, "v2": "true"})
+    route_link = urlunsplit((parts.scheme, parts.netloc, parts.path,
+                            urlencode(query), parts.fragment))
+    body = (f"Hello {fields['contractor']},\n\n"
+            f"Here is your Terraboost route request for {wo}.\n"
+            f"Due date: {fields['due']}\n\n"
+            f"Open the route and respond using this link:\n{route_link}")
+    return "https://outlook.office.com/mail/deeplink/compose?" + urlencode({
+        "to": recipient, "subject": f"Route Request | {wo}", "body": body,
+    })
+
+
 def _render_saved_route_card(route, state, route_hash, pod, ghost,
                              make_venue_details, make_venue_details_ghost,
                              venue_section, render_finalization_checklist,
@@ -160,6 +195,11 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
       <div style="font-size:18px;font-weight:900;color:#16a34a;">${esc(fields['pay'])}</div></div>
     </div>{venues_html}</div>""", unsafe_allow_html=True)
 
+    outlook_url = _outlook_route_url(route_hash, fields, st.session_state.get("ic_df"))
+    if outlook_url:
+        with st.container(key="revamp_outlook_action"):
+            st.link_button("Open Outlook", outlook_url, use_container_width=True,
+                           help="Open an Outlook draft for this route.")
     st.session_state[f"wo_{route_hash}"] = fields["wo"]
     if state == "Accepted" or (state == "Sent" and not is_ghost):
         render_finalization_checklist(
@@ -348,6 +388,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     div[class*="st-key-revamp_sync"] button {background:#fff;border:1px solid #6841b0;
         color:#563193;border-radius:9px;min-height:39px!important}
     div[class*="st-key-revamp_sync"] button:hover {background:#f6f1fc;border-color:#563193}
+    div[class*="st-key-revamp_outlook_action"] a {min-height:46px!important;
+        display:flex;align-items:center;justify-content:center;
+        background:#633094!important;color:#fff!important;border:1px solid #633094!important;
+        border-radius:9px;font-size:.93rem!important;font-weight:700!important}
     div[class*="st-key-revamp_status"] div[role="radiogroup"] {border:1px solid #dfe4ef;
         border-radius:11px;padding:8px 10px;gap:6px;background:#fff;flex-wrap:wrap}
     div[class*="st-key-revamp_status"] label {border-radius:9px;padding:7px 10px;
