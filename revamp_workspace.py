@@ -335,6 +335,22 @@ def _fn_stage(route_hash, posted, providers):
     return "Posted" if route_hash in posted else "Pending"
 
 
+def _fn_dates(route, route_hash, fn_posted):
+    """Human-readable FN workflow dates from persisted route data."""
+    ghost = route.get("_ghost_record") or {}
+    wo = str(ghost.get("wo") or route.get("wo") or "")
+    due = str(ghost.get("due") or "").strip()
+    posted = str(fn_posted.get(route_hash) or "").strip()
+    created = ""
+    m = re.match(r"^FN(\d{2})(\d{2})(\d{4})-", wo)
+    if m:
+        created = f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
+    raw = ghost.get("route_ts") or ""
+    if not created and raw:
+        created = str(raw)
+    return created or "—", posted or "—", due or "—"
+
+
 def _fn_ghost_tasks(ghost):
     """Rebuild enough route task detail from persisted FN stop_data to keep
     Field Nation cards/CSV usable after OnFleet tasks leave the open feed."""
@@ -495,6 +511,14 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                     label = (f"{city}, {route.get('state', '')}    {status_text}\n"
                              f"{pod} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
                              f"{tasks} {'task' if tasks == 1 else 'tasks'}")
+                    if status == "Field Nation":
+                        _created, _posted, _due = _fn_dates(route, route_hash, fn_posted)
+                        _date_bits = [f"Due {_due}"]
+                        if card_state == "Pending":
+                            _date_bits.insert(0, f"Sent {_created}")
+                        elif card_state in ("Posted", "Assigned"):
+                            _date_bits.insert(0, f"Posted {_posted}")
+                        label += "\n" + "  ·  ".join(_date_bits)
                     if nearest:
                         label += f"\nClosest IC  ·  {nearest[0]}  ·  {nearest[1]:.1f} mi"
                     selected = st.session_state.get("revamp_selected_route") == key
@@ -843,6 +867,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
       padding:8px 10px;margin:5px 0;font-size:.75rem;color:#344054
     }
     .fn-stop b {color:#1d2939}
+    .fn-date-row {display:flex;gap:8px;margin:8px 0 12px}
+    .fn-date {flex:1;background:#f8fafc;border:1px solid #e5e9ef;border-radius:8px;padding:7px 9px}
+    .fn-date .k {font-size:.62rem;text-transform:uppercase;letter-spacing:.05em;color:#7a8493;font-weight:750}
+    .fn-date .v {font-size:.78rem;color:#1d2939;font-weight:720;margin-top:2px}
     div[class*="st-key-revamp_fn_"] [data-testid="stCheckbox"] {
       transform:scale(.9);transform-origin:center
     }
@@ -1299,7 +1327,16 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 '<div class="fn-detail">'
                 f'<div class="fn-detail-title">{html.escape(wo)}</div>'
                 f'<div class="fn-detail-sub">{html.escape(title)} · {html.escape(stage)} · '
-                f'{route.get("stops", 0)} stops · {fn_tasks} tasks · Due {html.escape(due)}</div>'
+                f'{route.get("stops", 0)} stops · {fn_tasks} tasks</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            created_date, posted_date, due_date = _fn_dates(route, route_hash, fn_posted)
+            st.markdown(
+                '<div class="fn-date-row">'
+                f'<div class="fn-date"><div class="k">Sent to FN</div><div class="v">{html.escape(created_date)}</div></div>'
+                f'<div class="fn-date"><div class="k">Posted</div><div class="v">{html.escape(posted_date)}</div></div>'
+                f'<div class="fn-date"><div class="k">Due</div><div class="v">{html.escape(due_date)}</div></div>'
                 '</div>',
                 unsafe_allow_html=True,
             )
