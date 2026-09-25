@@ -855,6 +855,7 @@ def _ingest_sent_record(
 
             ghost_routes.setdefault(pod_name, []).append({
                 "contractor_name": c_name,
+                "contractor_email": str(p.get("ice") or "").strip(),
                 "route_ts": ts_display,
                 "city": city_guess,
                 "state": norm_state,
