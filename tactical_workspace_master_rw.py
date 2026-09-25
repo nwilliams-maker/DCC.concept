@@ -4326,7 +4326,8 @@ def _pod_cluster_store():
     return {}
 
 
-def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=False):
+def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=False,
+                refresh_tasks=False):
     config = POD_CONFIGS[pod_name]
     
     # Logic to handle if we are doing a single pod or a global pull
@@ -4385,6 +4386,11 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
         # main fix for "Bandwidth quota exceeded" errors when multiple dispatchers
         # are using the app concurrently.
         try:
+            # The manual Check new tasks action must bypass the 60-second
+            # process-wide Onfleet cache. Clear once before a multi-pod run;
+            # subsequent pods reuse this fresh result.
+            if refresh_tasks:
+                _fetch_onfleet_open_tasks_cached.clear()
             _onfleet_data = _fetch_onfleet_open_tasks_cached()
         except Exception as _e:
             if not warm_only: st.error(f"Onfleet API Error: {_e}")
