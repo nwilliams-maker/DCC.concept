@@ -812,6 +812,41 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
       background:#12683d!important;border-color:#12683d!important;color:#fff!important
     }
 
+    /* Field Nation workspace */
+    .fn-stage-row {display:flex;gap:8px;margin:4px 0 10px}
+    .fn-stage-card {
+      flex:1;background:#fff;border:1px solid var(--rv-border);border-radius:9px;
+      padding:8px 10px;min-height:52px;box-shadow:0 1px 2px rgba(16,24,40,.03)
+    }
+    .fn-stage-card .k {font-size:.68rem;text-transform:uppercase;letter-spacing:.055em;
+      color:#7a8493;font-weight:760}
+    .fn-stage-card .v {font-size:1.02rem;line-height:1.15;color:#1d2939;font-weight:790;margin-top:3px}
+    .fn-stage-card.pending {border-left:3px solid #d59b22}
+    .fn-stage-card.posted {border-left:3px solid #3b82f6}
+    .fn-stage-card.assigned {border-left:3px solid #16804a}
+    div[class*="st-key-revamp_fn_toolbar"] {
+      background:#fff;border:1px solid var(--rv-border);border-radius:10px;
+      padding:6px 8px;margin-bottom:10px;box-shadow:0 1px 3px rgba(16,24,40,.035)
+    }
+    div[class*="st-key-revamp_fn_toolbar"] button,
+    div[class*="st-key-revamp_fn_toolbar"] a {
+      min-height:30px!important;font-size:.74rem!important
+    }
+    .fn-detail {
+      background:#fff;border:1px solid var(--rv-border);border-radius:11px;
+      padding:14px 16px;margin-bottom:10px;box-shadow:0 1px 3px rgba(16,24,40,.04)
+    }
+    .fn-detail-title {font-size:1.08rem;font-weight:790;color:#172033;margin-bottom:2px}
+    .fn-detail-sub {font-size:.76rem;color:#667085}
+    .fn-stop {
+      background:#f8fafc;border:1px solid #e5e9ef;border-radius:8px;
+      padding:8px 10px;margin:5px 0;font-size:.75rem;color:#344054
+    }
+    .fn-stop b {color:#1d2939}
+    div[class*="st-key-revamp_fn_"] [data-testid="stCheckbox"] {
+      transform:scale(.9);transform-origin:center
+    }
+
     /* Mobile */
     @media (max-width: 800px) {
       .revamp-heading {font-size:1.45rem;margin-top:8px}
@@ -1065,47 +1100,65 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     def clear_visible():
         for key in visible_keys:
             st.session_state[f"{selection_prefix}{key}"] = False
-    with st.container(key="revamp_action_bar"):
-        count_col, select_col, clear_col = st.columns([3.2, 1.35, 1.15], vertical_alignment="center")
-        with count_col:
-            st.caption(
-                f"{len(matching)} route{'s' if len(matching) != 1 else ''} shown"
-                + (f" · {len(chosen) if 'chosen' in locals() else counts.get('Selected', 0)} selected"
-                   if status != "Field Nation" else "")
-            )
-        with select_col:
-            st.button("Select visible", key="revamp_select_visible",
-                      on_click=select_visible, disabled=not visible_keys,
-                      use_container_width=True)
-        with clear_col:
-            st.button("Clear", key="revamp_clear_selection", on_click=clear_visible,
-                      disabled=not visible_keys, use_container_width=True)
+    if status != "Field Nation":
+        with st.container(key="revamp_action_bar"):
+            count_col, select_col, clear_col = st.columns([3.2, 1.35, 1.15], vertical_alignment="center")
+            with count_col:
+                st.caption(f"{len(matching)} route{'s' if len(matching) != 1 else ''} shown")
+            with select_col:
+                st.button("Select visible", key="revamp_select_visible",
+                          on_click=select_visible, disabled=not visible_keys,
+                          use_container_width=True)
+            with clear_col:
+                st.button("Clear", key="revamp_clear_selection", on_click=clear_visible,
+                          disabled=not visible_keys, use_container_width=True)
     if status == "Field Nation":
         from fn_utils import generate_combined_fn_upload
         from migration import data_access as fn_data
         fn_selected = [entry for entry in all_routes if entry[2] == "Field Nation"
                        and st.session_state.get(f"revamp_fn_{entry[0]}:{entry[3]}")]
         pending = [entry for entry in fn_selected if _fn_stage(entry[3], fn_posted, fn_providers) == "Pending"]
+        stage_counts = {stage: sum(_fn_stage(e[3], fn_posted, fn_providers) == stage
+                                   for e in matching) for stage in ("Pending", "Posted", "Assigned")}
+        st.markdown(
+            '<div class="fn-stage-row">'
+            f'<div class="fn-stage-card pending"><div class="k">Pending</div><div class="v">{stage_counts["Pending"]}</div></div>'
+            f'<div class="fn-stage-card posted"><div class="k">Posted</div><div class="v">{stage_counts["Posted"]}</div></div>'
+            f'<div class="fn-stage-card assigned"><div class="k">Assigned</div><div class="v">{stage_counts["Assigned"]}</div></div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
         csv_routes = [_fn_csv_route(entry[1], entry[3], fn_ghost_to_cluster) for entry in fn_selected]
         csv_routes = [route for route in csv_routes if route]
         csv_data = None
+        stop_count = 0
         if csv_routes:
             try:
                 csv_data, stop_count, _ = generate_combined_fn_upload(csv_routes)
             except Exception as exc:
                 st.error(f"Could not build Field Nation CSV: {exc}")
-        csv_col, posted_col, link_col = st.columns([2, 1.5, 1], vertical_alignment="bottom")
-        with csv_col:
-            st.download_button(f"Download bulk CSV ({len(csv_routes)} routes)",
-                               data=csv_data.getvalue() if csv_data else b"",
-                               file_name=f"FN_Combined_{date.today():%Y%m%d}.csv",
-                               mime="text/csv", disabled=csv_data is None,
-                               use_container_width=True, key="revamp_fn_csv")
-        with posted_col:
-            posted_clicked = st.button(f"Mark {len(pending)} Posted", disabled=not pending or db_engine is None,
-                                       use_container_width=True, key="revamp_fn_posted")
-        with link_col:
-            st.link_button("Open Field Nation", "https://app.fieldnation.com/projects", use_container_width=True)
+        with st.container(key="revamp_fn_toolbar"):
+            sel_col, csv_col, posted_col, link_col, clear_col = st.columns(
+                [1.25, 1.55, 1.35, 1.15, .8], vertical_alignment="center"
+            )
+            with sel_col:
+                st.caption(f"{len(fn_selected)} selected · {stop_count} stops")
+            with csv_col:
+                st.download_button(f"Download CSV ({len(csv_routes)})",
+                                   data=csv_data.getvalue() if csv_data else b"",
+                                   file_name=f"FN_Combined_{date.today():%Y%m%d}.csv",
+                                   mime="text/csv", disabled=csv_data is None,
+                                   use_container_width=True, key="revamp_fn_csv")
+            with posted_col:
+                posted_clicked = st.button(f"Mark Posted ({len(pending)})",
+                                           disabled=not pending or db_engine is None,
+                                           use_container_width=True, key="revamp_fn_posted")
+            with link_col:
+                st.link_button("Open Field Nation", "https://app.fieldnation.com/projects",
+                               use_container_width=True)
+            with clear_col:
+                st.button("Clear", key="revamp_clear_selection", on_click=clear_visible,
+                          disabled=not visible_keys, use_container_width=True)
         if fn_selected and not csv_routes:
             st.warning("Selected routes have no task addresses available for a CSV.")
         if posted_clicked:
@@ -1123,9 +1176,6 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             else:
                 fetch_sent_records_from_sheet.clear()
                 st.rerun()
-        stage_counts = {stage: sum(_fn_stage(e[3], fn_posted, fn_providers) == stage
-                                   for e in matching) for stage in ("Pending", "Posted", "Assigned")}
-        st.caption("  |  ".join(f"{stage}: {count}" for stage, count in stage_counts.items()))
     chosen = [entry for entry in all_routes if entry[2] in ("Ready", "Flagged")
               and st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False)]
     fn_team_id = st.session_state.get("_fn_team_id")
@@ -1239,17 +1289,54 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         elif state == "Field Nation":
             from migration import data_access as fn_data
             stage = _fn_stage(route_hash, fn_posted, fn_providers)
-            st.caption(f"Field Nation: {stage}")
+            ghost = route.get("_ghost_record") or {}
+            wo = str(ghost.get("wo") or route.get("wo") or "Field Nation route")
+            due = str(ghost.get("due") or "Not set")
+            fn_tasks = (len(route.get("data", []))
+                        or len(ghost.get("task_ids") or [])
+                        or int(ghost.get("tasks") or 0))
+            st.markdown(
+                '<div class="fn-detail">'
+                f'<div class="fn-detail-title">{html.escape(wo)}</div>'
+                f'<div class="fn-detail-sub">{html.escape(title)} · {html.escape(stage)} · '
+                f'{route.get("stops", 0)} stops · {fn_tasks} tasks · Due {html.escape(due)}</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            stop_data = ghost.get("stop_data") or []
+            if isinstance(stop_data, str):
+                try:
+                    stop_data = json.loads(stop_data)
+                except Exception:
+                    stop_data = []
+            if stop_data:
+                st.caption("Stops")
+                for idx, stop in enumerate(stop_data[:12], 1):
+                    addr = str(stop.get("addr") or "").strip()
+                    venue = str(stop.get("venue") or "").strip()
+                    count = int(stop.get("t_count") or 0)
+                    st.markdown(
+                        f'<div class="fn-stop"><b>{idx}. {html.escape(venue or "Location")}</b>'
+                        f' · {count} task{"s" if count != 1 else ""}<br>'
+                        f'{html.escape(addr)}</div>',
+                        unsafe_allow_html=True,
+                    )
+                if len(stop_data) > 12:
+                    st.caption(f"+ {len(stop_data) - 12} more stops")
+
             if stage == "Pending":
-                st.info("Select this route for the bulk CSV. After posting the CSV to Field Nation, mark it Posted above.")
+                st.info("Select this route on the left, download the FN CSV, post it in Field Nation, then click Mark Posted.")
             else:
-                provider = st.text_input("Field Nation rep", value=str(fn_providers.get(route_hash) or ""),
+                provider = st.text_input("Assigned Field Nation rep",
+                                         value=str(fn_providers.get(route_hash) or ""),
                                          key=f"revamp_provider_{pod}_{route_hash}",
-                                         placeholder="Enter the rep's name")
-                save_col, assigned_col = st.columns(2)
+                                         placeholder="Type the rep's name")
+                save_col, assigned_col = st.columns([1, 1])
                 with save_col:
-                    if st.button("Save rep", key=f"revamp_save_rep_{pod}_{route_hash}",
-                                 disabled=db_engine is None, use_container_width=True):
+                    if st.button("Save name", key=f"revamp_save_rep_{pod}_{route_hash}",
+                                 disabled=db_engine is None or not provider.strip(),
+                                 use_container_width=True):
                         try:
                             result = fn_data.mirror_set_fn_provider_by_cluster_hash(db_engine, route_hash, provider.strip())
                             if not result.get("success"):
@@ -1260,9 +1347,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             st.error(f"Could not save Field Nation rep: {exc}")
                 with assigned_col:
                     if st.button("Assigned", key=f"revamp_mark_assigned_{pod}_{route_hash}",
-                                 disabled=db_engine is None or not provider.strip(), use_container_width=True):
+                                 type="primary",
+                                 disabled=db_engine is None or not provider.strip(),
+                                 use_container_width=True):
                         try:
-                            # Persist the current input before promoting the order to Accepted.
                             saved = fn_data.mirror_set_fn_provider_by_cluster_hash(db_engine, route_hash, provider.strip())
                             if not saved.get("success"):
                                 raise RuntimeError(saved.get("skipped") or saved.get("error") or "Order not found")
