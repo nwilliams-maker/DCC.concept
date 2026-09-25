@@ -10,6 +10,7 @@ import html
 import base64
 import os
 import time
+import threading
 from datetime import date, datetime, timedelta
 
 import requests
@@ -18,6 +19,12 @@ import streamlit as st
 
 STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Routed")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red")
+
+
+@st.cache_resource(show_spinner=False)
+def _pod_load_locks():
+    """Do not build the same pod twice when dispatchers log in together."""
+    return {pod: threading.Lock() for pod in PODS}
 
 
 def _route_hash(route):
@@ -146,7 +153,7 @@ def _remember_pod():
 def _render_route_list(matching, status, fn_posted, fn_providers):
     """State toggles rerun only this list; route clicks refresh the detail pane."""
     st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
-    with st.container(height=650, border=False):
+    with st.container(height=560, border=False, key="revamp_route_scroll"):
         if not matching:
             st.info("No matching routes.")
         grouped = {}
@@ -250,6 +257,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                   font-size:.78rem;color:#43506c;background:#fff;display:inline-block;margin:0 6px 8px 0}
     .revamp-pill b {color:#253454}
     .revamp-panel-title {font-weight:700;color:#2a3040;margin:8px 0}
+    div[class*="st-key-revamp_route_scroll"] {border:1px solid #e1e6f0;
+        border-radius:12px;background:#fff;box-shadow:0 1px 4px #22325a0b}
+    div[class*="st-key-revamp_route_scroll"] [data-testid="stVerticalBlock"] {gap:.22rem}
+    div[class*="st-key-revamp_sync"] button {background:#fff;border:1px solid #6841b0;
+        color:#563193;border-radius:9px;min-height:39px!important}
+    div[class*="st-key-revamp_sync"] button:hover {background:#f6f1fc;border-color:#563193}
     div[class*="st-key-revamp_status"] div[role="radiogroup"] {border:1px solid #dfe4ef;
         border-radius:11px;padding:8px 10px;gap:6px;background:#fff;flex-wrap:wrap}
     div[class*="st-key-revamp_status"] label {border-radius:9px;padding:7px 10px;
@@ -273,6 +286,14 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     div[class*="st-key-revamp_bulk_"] label p, div[class*="st-key-revamp_fn_"] label p
         {white-space:normal;overflow-wrap:anywhere;
         line-height:1.35;font-weight:650;color:#243047}
+    @media (max-width: 800px) {
+      .revamp-heading {font-size:1.45rem;margin-top:8px}
+      .revamp-pill {padding:5px 8px;font-size:.73rem;margin:0 4px 6px 0}
+      div[class*="st-key-revamp_status"] div[role="radiogroup"] {
+          flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin}
+      div[class*="st-key-revamp_route_scroll"] {max-height:350px;overflow-y:auto}
+      div[class*="st-key-revamp_route_"] button {min-height:3.5rem}
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -312,12 +333,14 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         for index, pod in enumerate(selected_pods if refresh_clicked else pending_pods):
             st.session_state[f"_revamp_load_attempted_{pod}"] = True
             started = time.monotonic()
-            print(f"[revamp/sync] starting {pod}", flush=True)
+            print(f"[revamp/sync] waiting for {pod} load", flush=True)
             with st.spinner(f"Loading {pod} routes from Onfleet..."):
-                if refresh_clicked and index == 0:
-                    process_pod(pod, refresh_tasks=True)
-                else:
-                    process_pod(pod)
+                with _pod_load_locks()[pod]:
+                    print(f"[revamp/sync] starting {pod}", flush=True)
+                    if refresh_clicked and index == 0:
+                        process_pod(pod, refresh_tasks=True)
+                    else:
+                        process_pod(pod)
             loaded_count = len(st.session_state.get(f"clusters_{pod}", []))
             print(f"[revamp/sync] finished {pod}: {loaded_count} routes in {time.monotonic() - started:.1f}s", flush=True)
         st.session_state["_last_sync_ts"] = datetime.now()
@@ -554,7 +577,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 st.session_state["_revamp_show_fn_next"] = True
                 st.rerun()
 
-    left, right = st.columns([2.1, 3], gap="medium")
+    left, right = st.columns([1.3, 3.7], gap="medium")
     with left:
         _render_route_list(matching, status, fn_posted, fn_providers)
 
