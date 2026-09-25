@@ -119,25 +119,46 @@ def bulk_assign(engine, selected_routes, due, assign_tasks_to_fn_team,
         try:
             with engine.connect() as conn:
                 existing = conn.execute(sa.text("""
-                    SELECT work_order FROM field_nation_orders
+                    SELECT work_order, route_plan_id FROM field_nation_orders
                     WHERE payload->>'cluster_hash' = :route_hash LIMIT 1
-                """), {"route_hash": route_hash}).scalar()
+                """), {"route_hash": route_hash}).mappings().first()
+
             if existing:
-                skipped.append((route_hash, existing))
+                work_order = str(existing["work_order"])
+                # A previous click may have saved Postgres successfully while
+                # OnFleet failed. Do not strand that route forever as
+                # "already assigned" — retry the missing handoff.
+                if existing.get("route_plan_id"):
+                    skipped.append((route_hash, work_order))
+                    continue
+            else:
+                # Match the existing DCC checkbox flow exactly: FN{MMDDYYYY}-{City} {ST}-{N}.
+                work_order = _next_dcc_work_order(engine, route)
+                payload = _payload(route, pod, due, work_order, route_hash)
+                result = data_access.save_to_field_nation(engine, work_order, payload)
+                if not result.get("success"):
+                    raise RuntimeError(str(result))
+
+            # Complete (or retry) the OnFleet handoff.
+            assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=fn_worker_id,
+                                    wo_name=work_order, due_date=str(due),
+                                    cluster_hash=route_hash)
+
+            # The shared helper persists route_plan_id only after OnFleet
+            # actually creates the yellow route plan. Verify that side effect
+            # before telling the dispatcher the assignment succeeded.
+            with engine.connect() as conn:
+                route_plan_id = conn.execute(sa.text("""
+                    SELECT route_plan_id FROM field_nation_orders
+                    WHERE work_order = :work_order LIMIT 1
+                """), {"work_order": work_order}).scalar()
+            if not route_plan_id:
+                errors.append((route_hash,
+                    "Field Nation was saved, but the OnFleet Route Plan was not created. "
+                    "The route is safe to retry."))
                 continue
-            # Match the existing DCC checkbox flow exactly: FN{MMDDYYYY}-{City} {ST}-{N}.
-            # The same WO is then passed into assign_tasks_to_fn_team, which creates
-            # the yellow OnFleet route plan with this exact name.
-            work_order = _next_dcc_work_order(engine, route)
-            payload = _payload(route, pod, due, work_order, route_hash)
-            result = data_access.save_to_field_nation(engine, work_order, payload)
-            if not result.get("success"):
-                raise RuntimeError(str(result))
+
             saved.append((route_hash, work_order))
-            if fn_team_id or fn_worker_id:
-                assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=fn_worker_id,
-                                        wo_name=work_order, due_date=str(due),
-                                        cluster_hash=route_hash)
         except Exception as exc:
             errors.append((route_hash, str(exc)))
     return saved, skipped, errors
