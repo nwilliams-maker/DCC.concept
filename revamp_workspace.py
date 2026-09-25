@@ -267,8 +267,8 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
         venues = make_venue_details(route.get("data") or [])
     venues_html = venue_section(venues) if venues else ""
     esc = lambda value: html.escape(str(value))
-    st.markdown(f"""<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:10px;">
-    <div style="background:#f8fafc;border-bottom:1px solid #e2e8f0;padding:8px 12px;">
+    st.markdown(f"""<div class="revamp-route-summary">
+    <div style="background:#f7f8fa;border-bottom:1px solid #e4e7ec;padding:9px 12px;">
       <span style="font-size:9px;font-weight:900;color:#94a3b8;text-transform:uppercase;letter-spacing:0.1em;">Route Summary</span>
     </div>
     <div style="padding:12px 14px;display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #f1f5f9;gap:12px;">
@@ -297,9 +297,10 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
             has_kiosks=bool(fields["kiosks"]),
         )
     if state == "Accepted" and fields["kiosks"]:
-        st.link_button("Order Kiosks on Shopify",
-                       "https://admin.shopify.com/store/terraboost/draft_orders/new",
-                       use_container_width=True)
+        with st.container(key="revamp_shopify_action"):
+            st.link_button("Order Kiosks on Shopify",
+                           "https://admin.shopify.com/store/terraboost/draft_orders/new",
+                           use_container_width=True)
     if is_dispatch_associate():
         return
     with st.popover("Re-route" if state == "Sent" else "Remove route"):
@@ -478,71 +479,226 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     """Render one selected route while retaining the existing dispatch actions."""
     st.markdown("""
     <style>
-    .revamp-heading {font-size:1.65rem;font-weight:750;color:#243047;margin:0 0 6px}
-    .revamp-meta {font-size:.82rem;color:#52617c;margin:0 0 12px}
-    .revamp-pill {border:1px solid #dfe4ef;border-radius:7px;padding:6px 10px;
-                  font-size:.78rem;color:#43506c;background:#fff;display:inline-block;margin:0 6px 8px 0}
-    .revamp-pill b {color:#253454}
-    .revamp-panel-title {font-weight:800;color:#1f2937;margin:8px 0 6px;font-size:.9rem}
-    div[class*="st-key-revamp_route_scroll"] {border:1px solid #dde3ee;
-        border-radius:14px;background:#f7f8fb;box-shadow:0 6px 20px #26364f0d;
-        padding:4px 6px 8px}
-    div[class*="st-key-revamp_route_scroll"] [data-testid="stVerticalBlock"] {gap:.12rem}
-    div[class*="st-key-revamp_sync"] button {background:#fff;border:1px solid #6841b0;
-        color:#563193;border-radius:9px;min-height:39px!important}
-    div[class*="st-key-revamp_sync"] button:hover {background:#f6f1fc;border-color:#563193}
-    div[class*="st-key-revamp_outlook_action"] a {min-height:46px!important;
-        display:flex;align-items:center;justify-content:center;
-        background:#633094!important;color:#fff!important;border:1px solid #633094!important;
-        border-radius:10px;font-size:.93rem!important;font-weight:750!important;
-        box-shadow:0 4px 12px #63309422}
-    div[class*="st-key-revamp_status"] div[role="radiogroup"] {border:1px solid #dfe4ef;
-        border-radius:12px;padding:6px;gap:4px;background:#f8fafc;flex-wrap:wrap}
-    div[class*="st-key-revamp_status"] label {border-radius:8px;padding:7px 10px;
-        cursor:pointer;white-space:nowrap;color:#52617c;font-weight:650}
+    /* ── DCC Revamp visual system ─────────────────────────────────────────
+       Neutral workspace first. Purple is a brand accent, not the UI color.
+       ─────────────────────────────────────────────────────────────────── */
+    :root {
+      --rv-ink:#172033;
+      --rv-text:#344054;
+      --rv-muted:#667085;
+      --rv-faint:#98a2b3;
+      --rv-border:#e4e7ec;
+      --rv-border-strong:#d0d5dd;
+      --rv-surface:#ffffff;
+      --rv-soft:#f7f8fa;
+      --rv-soft-2:#f2f4f7;
+      --rv-brand:#633094;
+      --rv-brand-soft:#f5f1f8;
+      --rv-green:#16804a;
+      --rv-green-soft:#ecf8f1;
+      --rv-blue:#2563eb;
+      --rv-blue-soft:#eff6ff;
+      --rv-amber:#b7791f;
+      --rv-amber-soft:#fff8e7;
+      --rv-red:#c43232;
+      --rv-red-soft:#fff1f1;
+      --rv-shadow:0 1px 2px rgba(16,24,40,.04),0 4px 14px rgba(16,24,40,.05);
+    }
+
+    html, body, [class*="css"], .stApp {
+      font-family: Inter, "Segoe UI", Arial, sans-serif !important;
+      color:var(--rv-text);
+    }
+    .stApp {background:#f5f6f8}
+    [data-testid="stAppViewContainer"] > .main {background:#f5f6f8}
+    [data-testid="stMainBlockContainer"] {padding-top:1.25rem}
+
+    /* Typography */
+    h1,h2,h3,h4,h5,h6 {font-family:Inter,"Segoe UI",Arial,sans-serif!important;color:var(--rv-ink)!important;letter-spacing:-.018em}
+    .revamp-heading {font-size:1.72rem;font-weight:780;color:var(--rv-ink);margin:0 0 5px;letter-spacing:-.025em}
+    .revamp-meta {font-size:.82rem;color:var(--rv-muted);margin:0 0 12px}
+    .revamp-panel-title {font-weight:760;color:var(--rv-ink);margin:8px 0 7px;font-size:.88rem;letter-spacing:-.01em}
+
+    /* Search, selects, date and text inputs */
+    [data-testid="stTextInput"] input,
+    [data-testid="stDateInput"] input,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+      background:var(--rv-surface)!important;
+      border-color:var(--rv-border-strong)!important;
+      color:var(--rv-ink)!important;
+      border-radius:9px!important;
+      box-shadow:none!important;
+    }
+    [data-testid="stTextInput"] input:focus,
+    [data-testid="stDateInput"] input:focus {
+      border-color:#8a93a3!important;
+      box-shadow:0 0 0 3px rgba(71,84,103,.08)!important;
+    }
+    [data-testid="stWidgetLabel"] p {color:var(--rv-muted)!important;font-weight:650!important;font-size:.78rem!important}
+
+    /* Summary chips — quiet, not purple */
+    .revamp-pill {
+      border:1px solid var(--rv-border);border-radius:999px;padding:5px 9px;
+      font-size:.75rem;color:#667085;background:#fff;display:inline-block;
+      margin:0 5px 7px 0;box-shadow:0 1px 1px rgba(16,24,40,.02)
+    }
+    .revamp-pill b {color:#344054;font-weight:750}
+
+    /* Status nav is a quiet segmented control */
+    div[class*="st-key-revamp_status"] div[role="radiogroup"] {
+      border:1px solid var(--rv-border);border-radius:10px;padding:4px;gap:2px;
+      background:#eef1f4;flex-wrap:wrap
+    }
+    div[class*="st-key-revamp_status"] label {
+      border-radius:7px;padding:6px 9px;cursor:pointer;white-space:nowrap;
+      color:#667085;font-weight:650;border:1px solid transparent!important
+    }
     div[class*="st-key-revamp_status"] label:has(input:checked) {
-        background:#ffffff;color:#5730a3;box-shadow:0 1px 5px #25345418;border:1px solid #ded5ee}
-    div[class*="st-key-revamp_route_"] button {height:auto!important;min-height:4.6rem;
-        border-radius:11px;border:1px solid #e2e7ef;background:#fff;color:#26344d;
-        padding:10px 12px;text-align:left;justify-content:flex-start;white-space:normal;
-        box-shadow:0 1px 3px #1f2d3d0a;margin:2px 0 5px;transition:all .14s ease}
-    div[class*="st-key-revamp_route_"] button p {white-space:pre-line!important;
-        overflow-wrap:break-word;line-height:1.38;margin:0;text-align:left;font-size:.80rem;font-weight:600}
-    div[class*="st-key-revamp_route_"] button:hover {
-        transform:translateY(-1px);border-color:#a792cc;background:#fcfbff;
-        box-shadow:0 5px 14px #41277512}
-    div[class*="st-key-revamp_route_"] button[kind="primary"] {
-        background:#f1ebfb!important;color:#35205f!important;border:1px solid #8b6abd!important;
-        box-shadow:0 4px 12px #63309418!important}
-    div[class*="st-key-revamp_route_Flagged_"] button {border-left:4px solid #ef4444}
-    div[class*="st-key-revamp_route_Ready_"] button {border-left:4px solid #22a06b}
-    div[class*="st-key-revamp_route_Field_Nation_"] button {border-left:4px solid #eab308}
-    div[class*="st-key-revamp_route_Sent_"] button {border-left:4px solid #3b82f6}
-    div[class*="st-key-revamp_route_Accepted_"] button {border-left:4px solid #16a34a}
-    div[class*="st-key-revamp_route_Declined_"] button {border-left:4px solid #94a3b8}
-    div[class*="st-key-revamp_state_toggle_"] button {background:transparent;
-        border:0;border-bottom:1px solid #e4e8f0;border-radius:0;min-height:2.3rem;
-        width:100%;box-shadow:none;text-align:left;justify-content:space-between;
-        color:#475569;font-weight:800;padding:7px 8px;margin:9px 0 4px}
+      background:#fff!important;color:#1d2939!important;
+      border-color:#d8dde5!important;box-shadow:0 1px 3px rgba(16,24,40,.07)!important
+    }
+    div[class*="st-key-revamp_status"] label:hover {background:#f7f8fa!important;color:#344054!important}
+
+    /* Buttons: neutral by default, dark primary. Purple only for branded links. */
+    .stButton > button,
+    .stDownloadButton > button,
+    .stLinkButton > a {
+      border-radius:8px!important;
+      border:1px solid var(--rv-border-strong)!important;
+      background:#fff!important;
+      color:#344054!important;
+      font-weight:680!important;
+      box-shadow:0 1px 2px rgba(16,24,40,.04)!important;
+      transition:background .12s ease,border-color .12s ease,box-shadow .12s ease,transform .12s ease!important;
+    }
+    .stButton > button:hover,
+    .stDownloadButton > button:hover,
+    .stLinkButton > a:hover {
+      background:#f9fafb!important;border-color:#aeb5c0!important;
+      color:#1d2939!important;box-shadow:0 2px 5px rgba(16,24,40,.07)!important
+    }
+    .stButton > button[kind="primary"] {
+      background:#27364a!important;border-color:#27364a!important;color:#fff!important;
+      box-shadow:0 2px 5px rgba(16,24,40,.12)!important
+    }
+    .stButton > button[kind="primary"]:hover {
+      background:#1f2b3c!important;border-color:#1f2b3c!important
+    }
+    .stButton > button:disabled,
+    .stDownloadButton > button:disabled {
+      background:#f2f4f7!important;color:#98a2b3!important;border-color:#eaecf0!important;box-shadow:none!important
+    }
+
+    /* Only Outlook remains a branded Terraboost-purple action */
+    div[class*="st-key-revamp_outlook_action"] a {
+      min-height:44px!important;display:flex;align-items:center;justify-content:center;
+      background:var(--rv-brand)!important;color:#fff!important;border:1px solid var(--rv-brand)!important;
+      border-radius:9px!important;font-size:.9rem!important;font-weight:720!important;
+      box-shadow:0 3px 9px rgba(99,48,148,.16)!important
+    }
+    div[class*="st-key-revamp_outlook_action"] a:hover {background:#52257e!important;border-color:#52257e!important}
+
+    /* Sync action is utilitarian, not purple */
+    div[class*="st-key-revamp_sync"] button {
+      background:#fff!important;border:1px solid var(--rv-border-strong)!important;
+      color:#344054!important;border-radius:8px!important;min-height:39px!important
+    }
+
+    /* Route inbox */
+    div[class*="st-key-revamp_route_scroll"] {
+      border:1px solid var(--rv-border);border-radius:12px;background:#eef1f4;
+      box-shadow:var(--rv-shadow);padding:5px 6px 8px
+    }
+    div[class*="st-key-revamp_route_scroll"] [data-testid="stVerticalBlock"] {gap:.1rem}
+
+    div[class*="st-key-revamp_state_toggle_"] button {
+      background:transparent!important;border:0!important;border-bottom:1px solid #dde2e8!important;
+      border-radius:0!important;min-height:2.2rem!important;width:100%;box-shadow:none!important;
+      text-align:left;justify-content:space-between;color:#667085!important;font-weight:760!important;
+      padding:7px 7px;margin:9px 0 4px
+    }
     div[class*="st-key-revamp_state_toggle_"] button p {
-        font-size:.75rem!important;text-transform:uppercase;letter-spacing:.055em}
-    div[class*="st-key-revamp_state_toggle_"] button:hover {background:#f0f2f7;border-radius:7px}
-    div[class*="st-key-revamp_bulk_"] label, div[class*="st-key-revamp_fn_"] label
-        {width:100%;cursor:pointer;align-items:center;justify-content:center;padding-top:4px}
-    div[class*="st-key-revamp_bulk_"] label p, div[class*="st-key-revamp_fn_"] label p
-        {white-space:normal;overflow-wrap:anywhere;line-height:1.2;font-weight:650;color:#243047}
-    div[class*="st-key-revamp_action_bar"] {border:1px solid #e0e5ee;border-radius:12px;
-        background:#fff;padding:9px 11px;margin:8px 0 10px;box-shadow:0 2px 8px #1f2d3d0a}
-    div[class*="st-key-revamp_action_bar"] button {border-radius:8px!important;min-height:36px!important}
-    div[class*="st-key-revamp_detail_panel"] {border:1px solid #e0e5ee;border-radius:14px;
-        background:#fff;padding:14px 16px;box-shadow:0 6px 20px #26364f0b;min-height:560px}
+      font-size:.72rem!important;text-transform:uppercase;letter-spacing:.065em
+    }
+    div[class*="st-key-revamp_state_toggle_"] button:hover {background:#e8ebef!important;border-radius:6px!important}
+
+    div[class*="st-key-revamp_route_"] button {
+      height:auto!important;min-height:4.45rem;border-radius:9px!important;
+      border:1px solid #dfe3e8!important;background:#fff!important;color:#27364a!important;
+      padding:10px 12px!important;text-align:left!important;justify-content:flex-start!important;
+      white-space:normal!important;box-shadow:0 1px 2px rgba(16,24,40,.035)!important;
+      margin:2px 0 5px!important;transition:all .12s ease!important
+    }
+    div[class*="st-key-revamp_route_"] button p {
+      white-space:pre-line!important;overflow-wrap:break-word;line-height:1.38!important;
+      margin:0;text-align:left!important;font-size:.79rem!important;font-weight:620!important
+    }
+    div[class*="st-key-revamp_route_"] button:hover {
+      transform:translateY(-1px);border-color:#aeb5c0!important;background:#fff!important;
+      box-shadow:0 4px 10px rgba(16,24,40,.08)!important
+    }
+    /* Selected route = strong neutral selection, not purple */
+    div[class*="st-key-revamp_route_"] button[kind="primary"] {
+      background:#eef2f6!important;color:#172033!important;border:1px solid #7d8998!important;
+      box-shadow:0 0 0 2px rgba(71,84,103,.08)!important
+    }
+
+    /* Meaningful route colors only */
+    div[class*="st-key-revamp_route_Ready_"] button {border-left:4px solid var(--rv-green)!important}
+    div[class*="st-key-revamp_route_Flagged_"] button {border-left:4px solid var(--rv-red)!important;background:#fffafa!important}
+    div[class*="st-key-revamp_route_Field_Nation_"] button {border-left:4px solid var(--rv-amber)!important;background:#fffdf8!important}
+    div[class*="st-key-revamp_route_Sent_"] button {border-left:4px solid var(--rv-blue)!important}
+    div[class*="st-key-revamp_route_Accepted_"] button {border-left:4px solid var(--rv-green)!important;background:#fbfefc!important}
+    div[class*="st-key-revamp_route_Declined_"] button {border-left:4px solid #98a2b3!important}
+    div[class*="st-key-revamp_route_Routed_"] button {border-left:4px solid #667085!important}
+
+    /* Selection checkboxes: remove giant purple emphasis */
+    div[class*="st-key-revamp_bulk_"] label,
+    div[class*="st-key-revamp_fn_"] label {
+      width:100%;cursor:pointer;align-items:center;justify-content:center;padding-top:4px
+    }
+    div[class*="st-key-revamp_bulk_"] [data-baseweb="checkbox"] > div,
+    div[class*="st-key-revamp_fn_"] [data-baseweb="checkbox"] > div {
+      border-color:#98a2b3!important
+    }
+
+    /* Bulk/action toolbar */
+    div[class*="st-key-revamp_action_bar"] {
+      border:1px solid var(--rv-border);border-radius:10px;background:#fff;
+      padding:8px 10px;margin:8px 0 10px;box-shadow:0 1px 3px rgba(16,24,40,.035)
+    }
+    div[class*="st-key-revamp_action_bar"] button {min-height:34px!important}
+
+    /* Alerts */
+    [data-testid="stAlert"] {border-radius:9px!important;border-width:1px!important}
+    [data-testid="stNotification"] {border-radius:9px!important}
+
+    /* Popovers */
+    [data-testid="stPopover"] button {background:#fff!important;color:#475467!important;border-color:#d0d5dd!important}
+
+    /* Saved route detail surface */
+    .revamp-route-summary {
+      background:#fff;border:1px solid var(--rv-border);border-radius:11px;
+      overflow:hidden;margin-bottom:10px;box-shadow:0 1px 3px rgba(16,24,40,.04)
+    }
+
+    div[class*="st-key-revamp_shopify_action"] a {
+      background:var(--rv-green)!important;color:#fff!important;border-color:var(--rv-green)!important;
+      min-height:42px!important;font-weight:720!important
+    }
+    div[class*="st-key-revamp_shopify_action"] a:hover {
+      background:#12683d!important;border-color:#12683d!important;color:#fff!important
+    }
+
+    /* Mobile */
     @media (max-width: 800px) {
       .revamp-heading {font-size:1.45rem;margin-top:8px}
-      .revamp-pill {padding:5px 8px;font-size:.73rem;margin:0 4px 6px 0}
+      .revamp-pill {padding:4px 7px;font-size:.7rem;margin:0 3px 5px 0}
       div[class*="st-key-revamp_status"] div[role="radiogroup"] {
-          flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin}
-      div[class*="st-key-revamp_route_scroll"] {max-height:350px;overflow-y:auto}
-      div[class*="st-key-revamp_route_"] button {min-height:3.5rem}
+        flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin
+      }
+      div[class*="st-key-revamp_route_scroll"] {max-height:420px;overflow-y:auto}
+      div[class*="st-key-revamp_route_"] button {min-height:3.8rem}
     }
     </style>
     """, unsafe_allow_html=True)
