@@ -4335,9 +4335,15 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
     
     # Use the master bar if provided, otherwise create a local one
     prog_bar = None if warm_only else (master_bar if master_bar else st.progress(0))
+    _revamp_last_progress_log = [0.0]
     
     def update_prog(rel_val, msg):
         if warm_only: return  # headless startup warm-up: no progress UI
+        if os.environ.get("DCC_REVAMP_UI") == "1":
+            _now_log = time.monotonic()
+            if rel_val in (0.0, 0.4) or _now_log - _revamp_last_progress_log[0] >= 30:
+                print(f"[revamp/sync] {pod_name}: {msg}", flush=True)
+                _revamp_last_progress_log[0] = _now_log
         global_val = min(start_pct + (rel_val * pod_weight), 0.99)
         prog_bar.progress(global_val, text=f"[{pod_name}] {msg}")
         # 🌟 Tick the loading overlay timer if it exists
