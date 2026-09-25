@@ -10607,7 +10607,16 @@ if os.environ.get("DCC_REVAMP_UI") == "1":
     render_workspace(_can_access_tab, process_pod, render_dispatch,
                      haversine, DB_ENGINE, assign_tasks_to_fn_team,
                      fetch_sent_records_from_sheet, DEFAULT_DUE_DAYS,
-                     _fn_ghost_to_cluster)
+                     _fn_ghost_to_cluster,
+                     saved_route_helpers={
+                         "make_venue_details": make_venue_details,
+                         "make_venue_details_ghost": make_venue_details_ghost,
+                         "venue_section": venue_section,
+                         "render_finalization_checklist": render_finalization_checklist,
+                         "move_to_dispatch": move_to_dispatch,
+                         "is_dispatch_associate": _is_dispatch_associate,
+                     },
+                     merge_same_wo_ghosts=_merge_same_wo_ghosts)
     st.stop()
 
 # Updated Main Tabs
