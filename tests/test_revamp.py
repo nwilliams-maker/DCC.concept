@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import parse_qs, urlparse, urlencode, urlsplit, urlunsplit, parse_qsl
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,24 @@ def load_functions(filename, names, extra=None):
 
 
 class RevampTests(unittest.TestCase):
+    def test_outlook_button_restores_saved_draft_or_rebuilds_route_link(self):
+        scope = load_functions("revamp_workspace.py", ["_outlook_route_url"], {
+            "st": SimpleNamespace(session_state={}), "os": SimpleNamespace(environ={}),
+            "urlencode": urlencode, "urlsplit": urlsplit, "urlunsplit": urlunsplit,
+            "parse_qsl": parse_qsl,
+        })
+        fields = {"wo": "WO 24&5", "contractor": "Morgan", "due": "2026-10-10",
+                  "ghost": {"contractor_email": "morgan@example.com"}}
+        draft = scope["_outlook_route_url"](
+            "saved-hash", fields, portal_base_url="https://example.com/request?auth=valid")
+        query = parse_qs(urlparse(draft).query)
+        self.assertEqual(query["to"], ["morgan@example.com"])
+        self.assertIn("route=WO+24%265&v2=true", query["body"][0])
+        self.assertIn("auth=valid", query["body"][0])
+        scope["st"].session_state["_persisted_outlook_saved-hash"] = "https://outlook.example/exact-draft"
+        self.assertEqual(scope["_outlook_route_url"]("saved-hash", fields),
+                         "https://outlook.example/exact-draft")
+
     def test_saved_route_fields_use_persisted_dcc_values(self):
         scope = load_functions("revamp_workspace.py", ["_saved_route_fields"])
         route = {"stops": 1, "data": [{"id": "one"}], "comp": 25}
@@ -68,6 +87,7 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
         self.assertIn("$40", output)
         self.assertIn("2026-10-11", output)
         self.assertIn("Live venue", output)
+        self.assertTrue(any(item.label == "Open Outlook" for item in app.get("link_button")))
         self.assertFalse(app.exception)
 
     def test_sent_and_accepted_render_dcc_saved_card_for_selected_route(self):
@@ -105,12 +125,14 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
         app.radio(key="revamp_status").set_value("Sent").run()
         self.assertIn("WO-SENT", " ".join(markdown.value for markdown in app.markdown))
         self.assertIn("Site A", " ".join(markdown.value for markdown in app.markdown))
+        self.assertTrue(any(item.label == "Open Outlook" for item in app.get("link_button")))
         app.radio(key="revamp_status").set_value("Accepted").run()
         html_output = " ".join(markdown.value for markdown in app.markdown)
         self.assertIn("WO-ACCEPTED", html_output)
         self.assertIn("Site B", html_output)
         self.assertIn("Total Compensation", html_output)
         self.assertTrue(any("DCC checklist accepted-hash" in item.value for item in app.markdown))
+        self.assertTrue(any(item.label == "Open Outlook" for item in app.get("link_button")))
         self.assertFalse(app.exception)
 
     def test_route_geocodes_first_load_in_parallel_without_changing_result(self):
