@@ -35,11 +35,16 @@ class RevampTests(unittest.TestCase):
         started, release = threading.Event(), threading.Event()
         calls = []
 
-        def process(pod, warm_only=False):
+        def process(pod, warm_only=False, refresh_tasks=False,
+                    _task_download_progress=None, _build_progress=None):
             calls.append((pod, warm_only))
             started.set()
+            _task_download_progress(120, 2)
             release.wait(3)
+            _task_download_progress(120, 2, done=True)
+            _build_progress(.7, "Routing 20 remaining tasks")
             cache[pod] = {"clusters": []}
+            return True
 
         class Cached:
             def __init__(self): self.value = None
@@ -49,7 +54,7 @@ class RevampTests(unittest.TestCase):
                     return self.value
                 return get
 
-        scope = load_functions("revamp_workspace.py", ["_pod_load_locks", "_pod_build_jobs", "_background_pod_build"], {
+        scope = load_functions("revamp_workspace.py", ["_pod_load_locks", "_pod_build_jobs", "_background_pod_build", "_build_progress_display"], {
             "st": SimpleNamespace(cache_resource=lambda **kwargs: Cached()),
             "threading": threading, "ThreadPoolExecutor": ThreadPoolExecutor,
             "PODS": ("Orange",), "print": lambda *args, **kwargs: None,
@@ -58,9 +63,13 @@ class RevampTests(unittest.TestCase):
         self.assertTrue(started.wait(2))
         with self.assertRaises(FutureTimeout):
             future.result(timeout=.01)
+        value, label = scope["_build_progress_display"]("Orange")
+        self.assertGreater(value, 0)
+        self.assertIn("120 received", label)
         self.assertIs(scope["_background_pod_build"]("Orange", process, lambda: cache), future)
         release.set()
         self.assertTrue(future.result(timeout=2))
+        self.assertIn("120 OnFleet tasks downloaded", scope["_build_progress_display"]("Orange")[1])
         self.assertEqual(calls, [("Orange", True)])
         scope["_pod_build_jobs"]()["executor"].shutdown(wait=True)
 
