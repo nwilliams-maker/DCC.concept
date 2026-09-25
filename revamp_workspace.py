@@ -519,6 +519,9 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                         elif card_state in ("Posted", "Assigned"):
                             _date_bits.insert(0, f"Posted {_posted}")
                         label += "\n" + "  ·  ".join(_date_bits)
+                    elif card_state == "Accepted":
+                        _accepted_due = _saved_route_fields(route, _ghost).get("due") or "N/A"
+                        label += f"\nDue {_accepted_due}"
                     if nearest:
                         label += f"\nClosest IC  ·  {nearest[0]}  ·  {nearest[1]:.1f} mi"
                     selected = st.session_state.get("revamp_selected_route") == key
