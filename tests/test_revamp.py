@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from urllib.parse import parse_qs, urlparse, urlencode, urlsplit, urlunsplit, parse_qsl
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,40 @@ def load_functions(filename, names, extra=None):
 
 
 class RevampTests(unittest.TestCase):
+    def test_background_build_survives_waiter_timeout_and_deduplicates(self):
+        cache = {}
+        started, release = threading.Event(), threading.Event()
+        calls = []
+
+        def process(pod, warm_only=False):
+            calls.append((pod, warm_only))
+            started.set()
+            release.wait(3)
+            cache[pod] = {"clusters": []}
+
+        class Cached:
+            def __init__(self): self.value = None
+            def __call__(self, fn):
+                def get():
+                    if self.value is None: self.value = fn()
+                    return self.value
+                return get
+
+        scope = load_functions("revamp_workspace.py", ["_pod_load_locks", "_pod_build_jobs", "_background_pod_build"], {
+            "st": SimpleNamespace(cache_resource=lambda **kwargs: Cached()),
+            "threading": threading, "ThreadPoolExecutor": ThreadPoolExecutor,
+            "PODS": ("Orange",), "print": lambda *args, **kwargs: None,
+        })
+        future = scope["_background_pod_build"]("Orange", process, lambda: cache)
+        self.assertTrue(started.wait(2))
+        with self.assertRaises(FutureTimeout):
+            future.result(timeout=.01)
+        self.assertIs(scope["_background_pod_build"]("Orange", process, lambda: cache), future)
+        release.set()
+        self.assertTrue(future.result(timeout=2))
+        self.assertEqual(calls, [("Orange", True)])
+        scope["_pod_build_jobs"]()["executor"].shutdown(wait=True)
+
     def test_outlook_button_restores_saved_draft_or_rebuilds_route_link(self):
         scope = load_functions("revamp_workspace.py", ["_outlook_route_url"], {
             "st": SimpleNamespace(session_state={}), "os": SimpleNamespace(environ={}),
