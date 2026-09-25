@@ -294,7 +294,7 @@ headers = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()
 # old they can hit Sync Routes; if it's less, the cached result is fresh
 # enough for dispatching decisions.
 @st.cache_data(ttl=300, show_spinner=False)
-def _fetch_onfleet_open_tasks_cached():
+def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
     """Returns dict with 'tasks' (deduped list of task dicts), 'target_team_ids',
     'esc_team_ids', 'cvs_remov_team_ids', '_page_count', '_hit_cap'.
     Raises on hard error so the failure isn't cached."""
@@ -409,6 +409,8 @@ def _fetch_onfleet_open_tasks_cached():
             # retries (~63s worst case) then raises so the cache discards.
             _retry_429 += 1
             print(f"[onfleet/tasks] rate limited at page {_page}, retry {_retry_429}; {len(all_tasks_raw)} tasks received", flush=True)
+            if _progress_callback:
+                _progress_callback(len(all_tasks_raw), _page - 1, rate_limited=True)
             if _retry_429 > 6 or time.monotonic() - _fetch_started > 150:
                 raise RuntimeError("Onfleet task extraction rate limited; retry Check new tasks shortly")
             time.sleep(min(60, 2 ** _retry_429))
@@ -421,6 +423,8 @@ def _fetch_onfleet_open_tasks_cached():
             raise RuntimeError(f"Onfleet API error {response.status_code}: {response.text[:200]}")
         res_json = response.json()
         all_tasks_raw.extend(res_json.get('tasks', []))
+        if _progress_callback:
+            _progress_callback(len(all_tasks_raw), _page)
         if _page % 20 == 0:
             print(f"[onfleet/tasks] page {_page}: {len(all_tasks_raw)} tasks in {time.monotonic() - _fetch_started:.1f}s", flush=True)
         _next_id = res_json.get('lastId')
@@ -4344,7 +4348,7 @@ def _pod_cluster_store():
 
 
 def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=False,
-                refresh_tasks=False):
+                refresh_tasks=False, _task_download_progress=None, _build_progress=None):
     config = POD_CONFIGS[pod_name]
     
     # Logic to handle if we are doing a single pod or a global pull
@@ -4356,7 +4360,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
     _revamp_last_progress_log = [0.0]
     
     def update_prog(rel_val, msg):
-        if warm_only: return  # headless startup warm-up: no progress UI
+        if _build_progress:
+            _build_progress(rel_val, msg)
+        if warm_only: return  # background progress is reported via callback
         if os.environ.get("DCC_REVAMP_UI") == "1":
             msg = msg.replace("📥 ", "").replace("📡 ", "").replace("🗺️ ", "")
             _now_log = time.monotonic()
@@ -4409,11 +4415,13 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             # subsequent pods reuse this fresh result.
             if refresh_tasks:
                 _fetch_onfleet_open_tasks_cached.clear()
-            _onfleet_data = _fetch_onfleet_open_tasks_cached()
+            _onfleet_data = _fetch_onfleet_open_tasks_cached(
+                _progress_callback=_task_download_progress
+            )
         except Exception as _e:
             if not warm_only: st.error(f"Onfleet API Error: {_e}")
             _log_err("process_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
-            return
+            return False
         target_team_ids    = _onfleet_data['target_team_ids']
         esc_team_ids       = _onfleet_data['esc_team_ids']
         cvs_remov_team_ids = _onfleet_data['cvs_remov_team_ids']
@@ -4431,6 +4439,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             except Exception:
                 pass
         all_tasks          = _onfleet_data['tasks']
+        if _task_download_progress:
+            _task_download_progress(len(all_tasks), _onfleet_data.get('_page_count', 0), done=True)
         # Stash fresh state=0 IDs for STATE=0 IS AUTHORITATIVE reclaim in run_pod_tab.
         if not warm_only:
             st.session_state[f'_state0_ids_{pod_name}'] = {str(_t.get('id', '')).strip() for _t in all_tasks}
@@ -4940,7 +4950,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
         except Exception as _wt_e:
             _log_err("warm_route_gmaps/setup", _wt_e)
         if warm_only:
-            return  # headless startup warm-up: cluster + gmaps caches populated; skip session-scoped writes below
+            return True  # shared clusters are ready for session hydration
         # Re-apply any bundles the dispatcher previously confirmed for this pod, so a
         # full re-init via Initialize Data doesn\'t silently undo them.
         _replay_bundles(pod_name)
@@ -4973,10 +4983,12 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
         # additional paginated Onfleet request.
         if os.environ.get("DCC_REVAMP_UI") != "1":
             st.session_state['_worker_counts'] = fetch_worker_task_counts()
+        return True
 
     except Exception as e:
         if not warm_only: st.error(f"Error initializing {pod_name}: {str(e)}")
         else: _log_err(f"process_pod/warm/{pod_name}", e)
+        return False
 
 # 🌅 SELF-WARM ON STARTUP — fires once per process (cold start). A background
 # thread runs process_pod(warm_only=True) for all 5 colored pods, populating the
