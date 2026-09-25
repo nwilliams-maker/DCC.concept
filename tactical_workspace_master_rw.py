@@ -4874,13 +4874,14 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
         # — degrades gracefully: if it fails, render_dispatch just computes live.
         try:
             _warm_pairs = []
-            for _wc in clusters:
-                _wloc = _wc.get('_default_ic_loc')
-                if not _wloc:
-                    continue
-                _wstops = tuple(dict.fromkeys(_t['full'] for _t in _wc.get('data', []) if _t.get('full')))
-                if _wstops:
-                    _warm_pairs.append((_wloc, _wstops))
+            if os.environ.get("DCC_REVAMP_UI") != "1":
+                for _wc in clusters:
+                    _wloc = _wc.get('_default_ic_loc')
+                    if not _wloc:
+                        continue
+                    _wstops = tuple(dict.fromkeys(_t['full'] for _t in _wc.get('data', []) if _t.get('full')))
+                    if _wstops:
+                        _warm_pairs.append((_wloc, _wstops))
             def _warm_route_gmaps(_pairs):
                 for _wloc, _wstops in _pairs:
                     try:
@@ -4890,7 +4891,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             # Security audit M12 - skip the warm spawn if a warm pass for
             # this pod is already running, so re-initializing a pod does not
             # stack threads each making ~50 Mapbox calls.
-            if pod_name not in _GMAPS_WARM_INFLIGHT:
+            if _warm_pairs and pod_name not in _GMAPS_WARM_INFLIGHT:
                 _GMAPS_WARM_INFLIGHT.add(pod_name)
                 def _warm_route_gmaps_guarded(_pairs, _pn):
                     try:
@@ -4932,7 +4933,11 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
         if not master_bar: 
             prog_bar.empty()
 
-        st.session_state['_worker_counts'] = fetch_worker_task_counts()
+        # The revamp fetches worker counts only when a route detail is opened.
+        # Doing this after extraction kept the entire route list behind one
+        # additional paginated Onfleet request.
+        if os.environ.get("DCC_REVAMP_UI") != "1":
+            st.session_state['_worker_counts'] = fetch_worker_task_counts()
 
     except Exception as e:
         if not warm_only: st.error(f"Error initializing {pod_name}: {str(e)}")
@@ -4962,7 +4967,8 @@ def _startup_warm_guard():
         _log_err("startup_warm/thread-start", _sw_e)
     return True
 
-_startup_warm_guard()
+if os.environ.get("DCC_REVAMP_UI") != "1":
+    _startup_warm_guard()
 
 # 🌟 NEW HELPER: Standardized Digital Badges
 def get_digi_badges(cluster_data):
@@ -10240,7 +10246,7 @@ if DB_ENGINE is not None:
 # previous in-render_dispatch placement only fired when a pod tab was active with at least
 # one cluster — so dispatchers landing on the Global tab never saw real counts. The cached
 # fetch (@st.cache_data ttl=120) means this is one shared API call per worker session.
-if '_worker_counts' not in st.session_state:
+if os.environ.get("DCC_REVAMP_UI") != "1" and '_worker_counts' not in st.session_state:
     st.session_state['_worker_counts'] = fetch_worker_task_counts()
 
 # --- HEADER ROW ---
