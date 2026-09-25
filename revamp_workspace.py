@@ -294,7 +294,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     pod_options = accessible + (["All my pods"] if len(accessible) > 1 else [])
     remembered_pod = st.query_params.get("pod")
     if st.session_state.get("revamp_pod") not in pod_options:
-        st.session_state["revamp_pod"] = remembered_pod if remembered_pod in pod_options else pod_options[0]
+        st.session_state["revamp_pod"] = remembered_pod if remembered_pod in accessible else accessible[0]
     filter_col, _, refresh_col = st.columns([1.4, 4.5, 1], vertical_alignment="bottom")
     with filter_col:
         pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod", on_change=_remember_pod)
