@@ -293,7 +293,7 @@ headers = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()
 # TTL is the staleness ceiling — if a Dispatcher's view is more than a minute
 # old they can hit Sync Routes; if it's less, the cached result is fresh
 # enough for dispatching decisions.
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _fetch_onfleet_open_tasks_cached():
     """Returns dict with 'tasks' (deduped list of task dicts), 'target_team_ids',
     'esc_team_ids', 'cvs_remov_team_ids', '_page_count', '_hit_cap'.
@@ -399,6 +399,7 @@ def _fetch_onfleet_open_tasks_cached():
     _page = 0
     _seen_last_ids = set()
     _retry_429 = 0
+    _fetch_started = time.monotonic()
     while url and _page < _MAX_PAGES:
         _page += 1
         response = requests.get(url, headers=headers, timeout=15)
@@ -407,8 +408,9 @@ def _fetch_onfleet_open_tasks_cached():
             # transient 429 does not burn pages at full speed. Capped at 6
             # retries (~63s worst case) then raises so the cache discards.
             _retry_429 += 1
-            if _retry_429 > 6:
-                raise RuntimeError("Onfleet 429 rate-limit persisted after 6 backoff retries")
+            print(f"[onfleet/tasks] rate limited at page {_page}, retry {_retry_429}; {len(all_tasks_raw)} tasks received", flush=True)
+            if _retry_429 > 6 or time.monotonic() - _fetch_started > 150:
+                raise RuntimeError("Onfleet task extraction rate limited; retry Check new tasks shortly")
             time.sleep(min(60, 2 ** _retry_429))
             _page -= 1
             continue
@@ -419,6 +421,8 @@ def _fetch_onfleet_open_tasks_cached():
             raise RuntimeError(f"Onfleet API error {response.status_code}: {response.text[:200]}")
         res_json = response.json()
         all_tasks_raw.extend(res_json.get('tasks', []))
+        if _page % 20 == 0:
+            print(f"[onfleet/tasks] page {_page}: {len(all_tasks_raw)} tasks in {time.monotonic() - _fetch_started:.1f}s", flush=True)
         _next_id = res_json.get('lastId')
         if _next_id and _next_id in _seen_last_ids:
             break
@@ -427,6 +431,7 @@ def _fetch_onfleet_open_tasks_cached():
         url = f"https://onfleet.com/api/v2/tasks/all?state=0&from={time_window}&lastId={_next_id}" if _next_id else None
 
     unique_tasks = list({t['id']: t for t in all_tasks_raw}.values())
+    print(f"[onfleet/tasks] fetched {_page} pages, {len(unique_tasks)} unique tasks in {time.monotonic() - _fetch_started:.1f}s", flush=True)
     # ROUTE-PLAN EXCLUSION (May 30 2026, Nick): any OnFleet route plan whose
     # name contains 'hold' or 'pause' is treated as a parking lot -- tasks
     # inside it never enter the dispatchable pool. Case-insensitive substring.
@@ -4434,8 +4439,13 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             if not warm_only: st.warning(f"\u26a0\ufe0f Hit pagination cap of 200 pages while fetching Onfleet tasks for {pod_name}. Some tasks may be missing.")
         update_prog(0.4, f"📡 Got {len(all_tasks)} tasks — routing...")
 
-        # PERFORMANCE FIX: Fetch Google Sheets data once before the loop
-        fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
+        # Background route builds have no Streamlit session. Read the same
+        # Postgres snapshot directly so a lost browser connection does not
+        # terminate the build before it reaches the shared cluster cache.
+        fresh_sent_db, _, _archived_wos, _history_db = (
+            _cached_fetch_sent_records_from_db() if warm_only
+            else fetch_sent_records_from_sheet()
+        )
         if not warm_only: st.session_state['_history_db'] = _history_db
         if not warm_only: st.session_state.sent_db = fresh_sent_db
         if not warm_only: st.session_state['archived_wos'] = _archived_wos
@@ -10616,7 +10626,8 @@ if os.environ.get("DCC_REVAMP_UI") == "1":
                          "move_to_dispatch": move_to_dispatch,
                          "is_dispatch_associate": _is_dispatch_associate,
                      },
-                     merge_same_wo_ghosts=_merge_same_wo_ghosts)
+                     merge_same_wo_ghosts=_merge_same_wo_ghosts,
+                     cluster_store=_pod_cluster_store)
     st.stop()
 
 # Updated Main Tabs
