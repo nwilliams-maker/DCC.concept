@@ -1138,7 +1138,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             with count_col:
                 st.caption(f"{len(matching)} route{'s' if len(matching) != 1 else ''} shown")
             with select_col:
-                st.button("Select visible", key="revamp_select_visible",
+                st.button("Select all", key="revamp_select_visible",
                           on_click=select_visible, disabled=not visible_keys,
                           use_container_width=True)
             with clear_col:
