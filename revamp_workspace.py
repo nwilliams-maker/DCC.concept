@@ -447,6 +447,18 @@ def _fetch_fn_assignment_ids():
                  and "field nation" in str(t.get("name", "")).lower()), None)
     if not team:
         raise RuntimeError("Field Nation team is missing from this Onfleet account")
+
+    # Prefer the worker explicitly attached to the Field Nation team. This
+    # avoids coupling route creation to one placeholder phone number forever.
+    team_workers = team.get("workers") or []
+    if len(team_workers) == 1:
+        only_worker = team_workers[0]
+        worker_id = only_worker.get("id") if isinstance(only_worker, dict) else only_worker
+        if worker_id:
+            return {"fn_team_id": team.get("id"), "fn_worker_id": worker_id}
+
+    # Backward-compatible fallback for accounts where team membership is not
+    # returned on the team object or where the team has multiple workers.
     seen = set()
     last_id = None
     for _ in range(100):
@@ -1109,9 +1121,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                     st.session_state["_fn_team_id"] = _fn_conn.get("fn_team_id")
                     st.session_state["_fn_worker_id"] = _fn_conn.get("fn_worker_id")
                 except Exception as _fn_exc:
-                    # Do not block normal dispatch rendering; the FN control will
-                    # surface its own failure if the OnFleet placeholder is unavailable.
+                    # Do not block normal dispatch rendering, but make the
+                    # failure visible so the dispatcher does not assume FN
+                    # route creation is available.
                     st.session_state["_fn_assignment_lookup_error"] = str(_fn_exc)
+            if st.session_state.get("_fn_assignment_lookup_error") and not st.session_state.get("_fn_worker_id"):
+                st.warning("Field Nation OnFleet worker could not be resolved. "
+                           "FN assignment will not create a Route Plan until this is fixed.")
 
             dispatch_route = dict(route)
             if nearest and nearest[1] > 50:
