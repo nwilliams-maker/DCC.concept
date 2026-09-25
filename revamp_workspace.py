@@ -453,6 +453,64 @@ def _remember_pod():
         st.query_params["pod"] = pod
 
 
+def _important_route_badges(route):
+    """Mirror DCC's important route identifiers in compact Revamp cards."""
+    badges = []
+    data = route.get("data") or []
+    ghost = route.get("_ghost_record") or {}
+
+    # Live route-level counters are already calculated by DCC's clustering.
+    inst_count = int(route.get("inst_count") or 0)
+    esc_count = int(route.get("esc_count") or 0)
+    boosted_tag = str(route.get("boosted_tag") or "").strip().lower()
+
+    # Persisted ghost/FN rows may no longer have live task objects. Recover
+    # important flags from stop_data/campaign payloads.
+    stop_data = ghost.get("stop_data") or []
+    if isinstance(stop_data, str):
+        try:
+            stop_data = json.loads(stop_data)
+        except Exception:
+            stop_data = []
+
+    if not inst_count:
+        inst_count = int(ghost.get("kCnt") or 0)
+        if not inst_count:
+            inst_count = sum(int(stop.get("inst") or 0) for stop in stop_data if isinstance(stop, dict))
+
+    if not esc_count:
+        esc_count = sum(
+            1 for t in data if t.get("escalated")
+        ) or sum(
+            int(bool(stop.get("esc"))) for stop in stop_data if isinstance(stop, dict)
+        )
+
+    # Detect Boosted / Local Plus from either live task values or persisted
+    # campaign bs fields.
+    tier_text = " ".join([
+        boosted_tag,
+        *[
+            str(t.get("boosted_standard") or t.get("boosted_tag") or "").lower()
+            for t in data
+        ],
+        *[
+            str(c.get("bs") or "").lower()
+            for stop in stop_data if isinstance(stop, dict)
+            for c in (stop.get("campaigns") or []) if isinstance(c, dict)
+        ],
+    ])
+
+    if inst_count > 0:
+        badges.append(f"🛠 KIOSK INSTALL" + (f" ×{inst_count}" if inst_count > 1 else ""))
+    if "local plus" in tier_text:
+        badges.append("⭐ LOCAL PLUS")
+    if "boosted" in tier_text:
+        badges.append("🔥 BOOSTED")
+    if esc_count > 0:
+        badges.append(f"❗ ESCALATION" + (f" ×{esc_count}" if esc_count > 1 else ""))
+    return badges
+
+
 @st.fragment
 def _render_route_list(matching, status, fn_posted, fn_providers):
     """State toggles rerun only this list; route clicks refresh the detail pane."""
@@ -512,6 +570,9 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                     label = (f"{city}, {route.get('state', '')}    {status_text}\n"
                              f"{pod} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
                              f"{tasks} {'task' if tasks == 1 else 'tasks'}")
+                    _important = _important_route_badges(route)
+                    if _important:
+                        label += "\n" + "  ·  ".join(_important)
                     if status == "Field Nation":
                         _created, _posted, _due = _fn_dates(route, route_hash, fn_posted)
                         _date_bits = [f"Due {_due}"]
