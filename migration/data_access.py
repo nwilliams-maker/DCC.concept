@@ -94,6 +94,9 @@ def save_route(engine: sa.Engine, wo: str, contractor_name: str, payload: dict[s
     """Replaces the `saveRoute` GAS action. Upsert on `wo` gives the same
     dedupe behavior GAS's 10-minute cluster_hash cache gave -- a retry with
     the same WO is a no-op update, not a duplicate insert."""
+    payload = dict(payload or {})
+    # Permanent historical timestamp: first time the route is sent.
+    payload.setdefault("sent_at", datetime.now(timezone.utc).isoformat())
     with engine.begin() as conn:
         conn.execute(
             sa.text(
@@ -216,7 +219,19 @@ def process_decision(
         "decision": decision, "signature": signature, "notes": notes, "phone": phone,
         "onfleet": onfleet_result,
     }
-    _set_route_status(engine, wo, target_status, "processDecision", event_payload)
+
+    # Permanent historical timestamp: preserve the first successful acceptance.
+    if decision == "accept":
+        route_payload = dict(route_payload or {})
+        route_payload.setdefault("accepted_at", datetime.now(timezone.utc).isoformat())
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text("UPDATE routes SET payload = :payload WHERE wo = :wo"),
+                {"wo": wo, "payload": json.dumps(route_payload)},
+            )
+            _set_route_status(conn, wo, target_status, "processDecision", event_payload)
+    else:
+        _set_route_status(engine, wo, target_status, "processDecision", event_payload)
 
     return {"success": True, **onfleet_result}
 
@@ -414,6 +429,8 @@ def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | No
         payload = dict(payload)
         payload["assigned_to_fn"] = True
         payload["fn_assigned_ts"] = _dt.utcnow().isoformat() + "Z"
+        # FN assignment promotes the route directly into Accepted.
+        payload.setdefault("accepted_at", datetime.now(timezone.utc).isoformat())
         payload["wo"] = new_wo
         # 2026-09-22 (read-side rewrite prep): stamp fn_provider onto the
         # payload that lands in `routes`, not just the field_nation_orders
