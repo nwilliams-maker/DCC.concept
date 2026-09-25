@@ -366,7 +366,7 @@ def _remember_pod():
 def _render_route_list(matching, status, fn_posted, fn_providers):
     """State toggles rerun only this list; route clicks refresh the detail pane."""
     st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
-    with st.container(height=560, border=False, key="revamp_route_scroll"):
+    with st.container(height=680, border=False, key="revamp_route_scroll"):
         if not matching:
             st.info("No matching routes.")
         grouped = {}
@@ -406,12 +406,25 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                     provider_label = f" · FN: {provider}" if provider else ""
                     stops = route.get("stops", 0)
                     tasks = len(route.get("data", [])) or len((route.get("_ghost_record") or {}).get("task_ids") or [])
-                    label = (f"{city}, {route.get('state', '')} · {card_state}{provider_label}{removal}\n"
-                             f"{pod} · {stops} {'stop' if stops == 1 else 'stops'} · "
+                    state_icon = {
+                        "Ready": "●", "Flagged": "!", "Field Nation": "FN",
+                        "Sent": "→", "Accepted": "✓", "Declined": "×", "Routed": "◆"
+                    }.get(card_state, "•")
+                    status_text = f"{state_icon} {card_state}"
+                    if provider:
+                        status_text += f" · {provider}"
+                    if removal:
+                        status_text += " · CVS Removal"
+                    label = (f"{city}, {route.get('state', '')}    {status_text}\n"
+                             f"{pod} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
                              f"{tasks} {'task' if tasks == 1 else 'tasks'}")
                     if nearest:
-                        label += f"\nClosest IC: {nearest[0]} · {nearest[1]:.1f} mi"
-                    if st.button(label, key=f"revamp_route_{key}", use_container_width=True):
+                        label += f"\nClosest IC  ·  {nearest[0]}  ·  {nearest[1]:.1f} mi"
+                    selected = st.session_state.get("revamp_selected_route") == key
+                    state_key = str(card_state).replace(" ", "_")
+                    if st.button(label, key=f"revamp_route_{state_key}_{key}",
+                                 type="primary" if selected else "secondary",
+                                 use_container_width=True):
                         st.session_state["revamp_selected_route"] = key
                         st.rerun(scope="app")
     if st.session_state.pop("_revamp_refresh_bulk_actions", False):
@@ -470,40 +483,59 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     .revamp-pill {border:1px solid #dfe4ef;border-radius:7px;padding:6px 10px;
                   font-size:.78rem;color:#43506c;background:#fff;display:inline-block;margin:0 6px 8px 0}
     .revamp-pill b {color:#253454}
-    .revamp-panel-title {font-weight:700;color:#2a3040;margin:8px 0}
-    div[class*="st-key-revamp_route_scroll"] {border:1px solid #e1e6f0;
-        border-radius:12px;background:#fff;box-shadow:0 1px 4px #22325a0b}
-    div[class*="st-key-revamp_route_scroll"] [data-testid="stVerticalBlock"] {gap:.22rem}
+    .revamp-panel-title {font-weight:800;color:#1f2937;margin:8px 0 6px;font-size:.9rem}
+    div[class*="st-key-revamp_route_scroll"] {border:1px solid #dde3ee;
+        border-radius:14px;background:#f7f8fb;box-shadow:0 6px 20px #26364f0d;
+        padding:4px 6px 8px}
+    div[class*="st-key-revamp_route_scroll"] [data-testid="stVerticalBlock"] {gap:.12rem}
     div[class*="st-key-revamp_sync"] button {background:#fff;border:1px solid #6841b0;
         color:#563193;border-radius:9px;min-height:39px!important}
     div[class*="st-key-revamp_sync"] button:hover {background:#f6f1fc;border-color:#563193}
     div[class*="st-key-revamp_outlook_action"] a {min-height:46px!important;
         display:flex;align-items:center;justify-content:center;
         background:#633094!important;color:#fff!important;border:1px solid #633094!important;
-        border-radius:9px;font-size:.93rem!important;font-weight:700!important}
+        border-radius:10px;font-size:.93rem!important;font-weight:750!important;
+        box-shadow:0 4px 12px #63309422}
     div[class*="st-key-revamp_status"] div[role="radiogroup"] {border:1px solid #dfe4ef;
-        border-radius:11px;padding:8px 10px;gap:6px;background:#fff;flex-wrap:wrap}
-    div[class*="st-key-revamp_status"] label {border-radius:9px;padding:7px 10px;
-        cursor:pointer;white-space:nowrap}
-    div[class*="st-key-revamp_status"] label:has(input:checked) {background:#f1eaff;color:#5730a3}
-    div[class*="st-key-revamp_route_"] button {height:auto!important;min-height:4rem;
-        border-radius:9px;border:1px solid #e9e5f1;background:#fff;color:#35405b;
-        padding:9px 12px;text-align:left;justify-content:flex-start;white-space:normal;
-        box-shadow:none;margin:2px 0 4px}
+        border-radius:12px;padding:6px;gap:4px;background:#f8fafc;flex-wrap:wrap}
+    div[class*="st-key-revamp_status"] label {border-radius:8px;padding:7px 10px;
+        cursor:pointer;white-space:nowrap;color:#52617c;font-weight:650}
+    div[class*="st-key-revamp_status"] label:has(input:checked) {
+        background:#ffffff;color:#5730a3;box-shadow:0 1px 5px #25345418;border:1px solid #ded5ee}
+    div[class*="st-key-revamp_route_"] button {height:auto!important;min-height:4.6rem;
+        border-radius:11px;border:1px solid #e2e7ef;background:#fff;color:#26344d;
+        padding:10px 12px;text-align:left;justify-content:flex-start;white-space:normal;
+        box-shadow:0 1px 3px #1f2d3d0a;margin:2px 0 5px;transition:all .14s ease}
     div[class*="st-key-revamp_route_"] button p {white-space:pre-line!important;
-        overflow-wrap:break-word;line-height:1.4;margin:0;text-align:left;font-size:.82rem}
-    div[class*="st-key-revamp_route_"] button:hover {border-color:#6841b0;background:#f8f4ff}
-    div[class*="st-key-revamp_state_toggle_"] button {background:#f6f3fc;
-        border:1px solid #e5dcf3;border-radius:9px;min-height:2.55rem;
+        overflow-wrap:break-word;line-height:1.38;margin:0;text-align:left;font-size:.80rem;font-weight:600}
+    div[class*="st-key-revamp_route_"] button:hover {
+        transform:translateY(-1px);border-color:#a792cc;background:#fcfbff;
+        box-shadow:0 5px 14px #41277512}
+    div[class*="st-key-revamp_route_"] button[kind="primary"] {
+        background:#f1ebfb!important;color:#35205f!important;border:1px solid #8b6abd!important;
+        box-shadow:0 4px 12px #63309418!important}
+    div[class*="st-key-revamp_route_Flagged_"] button {border-left:4px solid #ef4444}
+    div[class*="st-key-revamp_route_Ready_"] button {border-left:4px solid #22a06b}
+    div[class*="st-key-revamp_route_Field_Nation_"] button {border-left:4px solid #eab308}
+    div[class*="st-key-revamp_route_Sent_"] button {border-left:4px solid #3b82f6}
+    div[class*="st-key-revamp_route_Accepted_"] button {border-left:4px solid #16a34a}
+    div[class*="st-key-revamp_route_Declined_"] button {border-left:4px solid #94a3b8}
+    div[class*="st-key-revamp_state_toggle_"] button {background:transparent;
+        border:0;border-bottom:1px solid #e4e8f0;border-radius:0;min-height:2.3rem;
         width:100%;box-shadow:none;text-align:left;justify-content:space-between;
-        color:#493278;font-weight:700;padding:6px 13px;margin:8px 0 5px}
-    div[class*="st-key-revamp_state_toggle_"] button:hover {background:#eee7fa;
-        border-color:#c7b2e7}
+        color:#475569;font-weight:800;padding:7px 8px;margin:9px 0 4px}
+    div[class*="st-key-revamp_state_toggle_"] button p {
+        font-size:.75rem!important;text-transform:uppercase;letter-spacing:.055em}
+    div[class*="st-key-revamp_state_toggle_"] button:hover {background:#f0f2f7;border-radius:7px}
     div[class*="st-key-revamp_bulk_"] label, div[class*="st-key-revamp_fn_"] label
-        {width:100%;cursor:pointer;align-items:flex-start}
+        {width:100%;cursor:pointer;align-items:center;justify-content:center;padding-top:4px}
     div[class*="st-key-revamp_bulk_"] label p, div[class*="st-key-revamp_fn_"] label p
-        {white-space:normal;overflow-wrap:anywhere;
-        line-height:1.35;font-weight:650;color:#243047}
+        {white-space:normal;overflow-wrap:anywhere;line-height:1.2;font-weight:650;color:#243047}
+    div[class*="st-key-revamp_action_bar"] {border:1px solid #e0e5ee;border-radius:12px;
+        background:#fff;padding:9px 11px;margin:8px 0 10px;box-shadow:0 2px 8px #1f2d3d0a}
+    div[class*="st-key-revamp_action_bar"] button {border-radius:8px!important;min-height:36px!important}
+    div[class*="st-key-revamp_detail_panel"] {border:1px solid #e0e5ee;border-radius:14px;
+        background:#fff;padding:14px 16px;box-shadow:0 6px 20px #26364f0b;min-height:560px}
     @media (max-width: 800px) {
       .revamp-heading {font-size:1.45rem;margin-top:8px}
       .revamp-pill {padding:5px 8px;font-size:.73rem;margin:0 4px 6px 0}
@@ -754,15 +786,21 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     def clear_visible():
         for key in visible_keys:
             st.session_state[f"{selection_prefix}{key}"] = False
-    select_col, clear_col = st.columns([5, 1], vertical_alignment="bottom")
-    with select_col:
-        st.button(f"Select all {len(visible_keys)} matching on this tab", key="revamp_select_visible",
-                  on_click=select_visible,
-                  disabled=not visible_keys, use_container_width=True)
-    with clear_col:
-        st.button("Clear selection", key="revamp_clear_selection", on_click=clear_visible,
-                  use_container_width=True)
-    st.caption(f"Showing {len(matching)} matching route{'s' if len(matching) != 1 else ''}")
+    with st.container(key="revamp_action_bar"):
+        count_col, select_col, clear_col = st.columns([3.2, 1.35, 1.15], vertical_alignment="center")
+        with count_col:
+            st.caption(
+                f"{len(matching)} route{'s' if len(matching) != 1 else ''} shown"
+                + (f" · {len(chosen) if 'chosen' in locals() else counts.get('Selected', 0)} selected"
+                   if status != "Field Nation" else "")
+            )
+        with select_col:
+            st.button("Select visible", key="revamp_select_visible",
+                      on_click=select_visible, disabled=not visible_keys,
+                      use_container_width=True)
+        with clear_col:
+            st.button("Clear", key="revamp_clear_selection", on_click=clear_visible,
+                      disabled=not visible_keys, use_container_width=True)
     if status == "Field Nation":
         from fn_utils import generate_combined_fn_upload
         from migration import data_access as fn_data
@@ -861,7 +899,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 st.session_state["_revamp_show_fn_next"] = True
                 st.rerun()
 
-    left, right = st.columns([1.3, 3.7], gap="medium")
+    left, right = st.columns([1.75, 3.25], gap="large")
     with left:
         _render_route_list(matching, status, fn_posted, fn_providers)
 
