@@ -11,6 +11,7 @@ import base64
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
@@ -26,6 +27,33 @@ PODS = ("Blue", "Green", "Orange", "Purple", "Red")
 def _pod_load_locks():
     """Do not build the same pod twice when dispatchers log in together."""
     return {pod: threading.Lock() for pod in PODS}
+
+
+@st.cache_resource(show_spinner=False)
+def _pod_build_jobs():
+    """Keep first loads alive when a mobile browser drops its connection."""
+    return {"lock": threading.Lock(), "jobs": {},
+            "executor": ThreadPoolExecutor(max_workers=2, thread_name_prefix="pod-build")}
+
+
+def _background_pod_build(pod, process_pod, cluster_store):
+    jobs = _pod_build_jobs()
+    with jobs["lock"]:
+        current = jobs["jobs"].get(pod)
+        if current is not None and (not current.done() or pod in cluster_store()):
+            return current
+
+        def build():
+            with _pod_load_locks()[pod]:
+                print(f"[revamp/sync] background build starting {pod}", flush=True)
+                process_pod(pod, warm_only=True)
+                ready = pod in cluster_store()
+                print(f"[revamp/sync] background build {pod}: {'ready' if ready else 'failed'}", flush=True)
+                return ready
+
+        current = jobs["executor"].submit(build)
+        jobs["jobs"][pod] = current
+        return current
 
 
 def _route_hash(route):
@@ -372,7 +400,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      haversine, db_engine, assign_tasks_to_fn_team,
                      fetch_sent_records_from_sheet, default_due_days=14,
                      fn_ghost_to_cluster=None, saved_route_helpers=None,
-                     merge_same_wo_ghosts=None):
+                     merge_same_wo_ghosts=None, cluster_store=None):
     """Render one selected route while retaining the existing dispatch actions."""
     st.markdown("""
     <style>
@@ -464,6 +492,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             started = time.monotonic()
             print(f"[revamp/sync] waiting for {pod} load", flush=True)
             with st.spinner(f"Loading {pod} routes from Onfleet..."):
+                # Auto builds run beyond the browser connection. A dropped
+                # WebSocket can rejoin this future instead of restarting an
+                # 8,000-task Onfleet pull and consuming more API quota.
+                if not refresh_clicked and cluster_store is not None:
+                    if not _background_pod_build(pod, process_pod, cluster_store).result(timeout=240):
+                        st.error("Onfleet task extraction failed. Click Check new tasks to retry.")
+                        continue
                 with _pod_load_locks()[pod]:
                     print(f"[revamp/sync] starting {pod}", flush=True)
                     if refresh_clicked and index == 0:
