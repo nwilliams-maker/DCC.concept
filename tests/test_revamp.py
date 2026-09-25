@@ -28,6 +28,91 @@ def load_functions(filename, names, extra=None):
 
 
 class RevampTests(unittest.TestCase):
+    def test_saved_route_fields_use_persisted_dcc_values(self):
+        scope = load_functions("revamp_workspace.py", ["_saved_route_fields"])
+        route = {"stops": 1, "data": [{"id": "one"}], "comp": 25}
+        ghost = {"contractor_name": "Pat Contractor", "wo": "WO-1", "pay": 75,
+                 "due": "2026-10-10", "stops": 3, "tasks": 4, "kCnt": 2}
+        fields = scope["_saved_route_fields"](route, ghost)
+        self.assertEqual((fields["contractor"], fields["wo"], fields["pay"],
+                          fields["due"], fields["stops"], fields["tasks"], fields["kiosks"]),
+                         ("Pat Contractor", "WO-1", 75, "2026-10-10", 3, 4, 2))
+
+    def test_live_sent_card_uses_saved_wo_pay_and_due(self):
+        from streamlit.testing.v1 import AppTest
+        source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import pandas as pd
+from revamp_workspace import render_workspace
+st.session_state.setdefault("ic_df", pd.DataFrame())
+st.session_state.setdefault("clusters_Blue", [{{"city":"Chicago", "state":"IL",
+    "stops":1, "data":[{{"id":"live-one", "full":"123 Main, Chicago, IL"}}]}}])
+def records():
+    return {{"live-one":{{"status":"sent", "name":"Jordan", "wo":"WO-LIVE",
+        "comp":40, "due":"2026-10-11"}}}}, {{"Blue":[]}}, set(), {{}}
+records.clear = lambda: None
+helpers = dict(make_venue_details=lambda tasks: "<p>Live venue</p>",
+    make_venue_details_ghost=lambda *args, **kwargs: "", venue_section=lambda content: content,
+    render_finalization_checklist=lambda *args, **kwargs: None,
+    move_to_dispatch=lambda *args, **kwargs: None, is_dispatch_associate=lambda: True)
+render_workspace(lambda pod: pod == "Blue", lambda pod: None,
+    lambda *args: None, lambda *args: 0, object(), lambda *args: None, records,
+    saved_route_helpers=helpers)
+'''
+        app = AppTest.from_string(source).run()
+        app.radio(key="revamp_status").set_value("Sent").run()
+        output = " ".join(item.value for item in app.markdown)
+        self.assertIn("WO-LIVE", output)
+        self.assertIn("$40", output)
+        self.assertIn("2026-10-11", output)
+        self.assertIn("Live venue", output)
+        self.assertFalse(app.exception)
+
+    def test_sent_and_accepted_render_dcc_saved_card_for_selected_route(self):
+        from streamlit.testing.v1 import AppTest
+        source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import pandas as pd
+from revamp_workspace import render_workspace
+st.session_state.setdefault("ic_df", pd.DataFrame())
+st.session_state.setdefault("clusters_Blue", [])
+ghosts = [
+    {{"hash":"sent-hash", "status":"sent", "city":"Chicago", "state":"IL",
+      "contractor_name":"Morgan", "wo":"WO-SENT", "pay":65, "due":"2026-10-10",
+      "stops":1, "tasks":2, "locs":"Home | 100 Main, Chicago, IL | Home",
+      "stop_data":[{{"addr":"100 Main, Chicago, IL", "venue":"Site A"}}], "task_ids":["one", "two"]}},
+    {{"hash":"accepted-hash", "status":"accepted", "city":"Madison", "state":"WI",
+      "contractor_name":"Taylor", "wo":"WO-ACCEPTED", "pay":90, "due":"2026-10-12",
+      "stops":1, "tasks":1, "kCnt":1, "locs":"Home | 200 Main, Madison, WI | Home",
+      "stop_data":[{{"addr":"200 Main, Madison, WI", "venue":"Site B"}}], "task_ids":["three"]}}
+]
+def records(): return {{}}, {{"Blue":ghosts}}, set(), {{}}
+records.clear = lambda: None
+def detail(locs, stop_data=None): return "<p>" + stop_data[0]["venue"] + "</p>"
+def checklist(*args, **kwargs): st.write("DCC checklist " + args[0])
+helpers = dict(make_venue_details=lambda tasks: "", make_venue_details_ghost=detail,
+    venue_section=lambda content: content, render_finalization_checklist=checklist,
+    move_to_dispatch=lambda *args, **kwargs: None, is_dispatch_associate=lambda: True)
+render_workspace(lambda pod: pod == "Blue", lambda pod: None,
+    lambda *args: None, lambda *args: 0, object(), lambda *args: None, records,
+    saved_route_helpers=helpers)
+'''
+        app = AppTest.from_string(source).run()
+        app.radio(key="revamp_status").set_value("Sent").run()
+        self.assertIn("WO-SENT", " ".join(markdown.value for markdown in app.markdown))
+        self.assertIn("Site A", " ".join(markdown.value for markdown in app.markdown))
+        app.radio(key="revamp_status").set_value("Accepted").run()
+        html_output = " ".join(markdown.value for markdown in app.markdown)
+        self.assertIn("WO-ACCEPTED", html_output)
+        self.assertIn("Site B", html_output)
+        self.assertIn("Total Compensation", html_output)
+        self.assertTrue(any("DCC checklist accepted-hash" in item.value for item in app.markdown))
+        self.assertFalse(app.exception)
+
     def test_route_geocodes_first_load_in_parallel_without_changing_result(self):
         cache = {}
         active = [0]
