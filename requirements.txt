@@ -3,7 +3,7 @@
 # Streamlit release shipped between two rebuilds. Every dependency is now
 # pinned to an exact version. If a future rebuild misbehaves, confirm these
 # match a known-good `pip freeze` of the working Railway container and adjust.
-streamlit==1.39.0
+streamlit==1.45.1
 requests==2.32.3
 pandas==2.2.3
 folium==0.18.0
