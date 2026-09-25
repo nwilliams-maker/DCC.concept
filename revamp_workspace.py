@@ -918,7 +918,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                         except Exception as exc:
                             st.error(f"Could not save Field Nation rep: {exc}")
                 with assigned_col:
-                    if st.button("Mark Assigned", key=f"revamp_mark_assigned_{pod}_{route_hash}",
+                    if st.button("Assigned", key=f"revamp_mark_assigned_{pod}_{route_hash}",
                                  disabled=db_engine is None or not provider.strip(), use_container_width=True):
                         try:
                             # Persist the current input before promoting the order to Accepted.
