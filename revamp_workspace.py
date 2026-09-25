@@ -11,7 +11,7 @@ import base64
 import os
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import date, datetime, timedelta
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
@@ -496,7 +496,16 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 # WebSocket can rejoin this future instead of restarting an
                 # 8,000-task Onfleet pull and consuming more API quota.
                 if not refresh_clicked and cluster_store is not None:
-                    if not _background_pod_build(pod, process_pod, cluster_store).result(timeout=240):
+                    try:
+                        ready = _background_pod_build(pod, process_pod, cluster_store).result(timeout=240)
+                    except FutureTimeout:
+                        st.session_state[f"_revamp_load_attempted_{pod}"] = False
+                        st.info("Onfleet extraction continues in the background. Reload to see the completed routes.")
+                        return
+                    except Exception as exc:
+                        print(f"[revamp/sync] background build failed for {pod}: {type(exc).__name__}: {exc}", flush=True)
+                        ready = False
+                    if not ready:
                         st.error("Onfleet task extraction failed. Click Check new tasks to retry.")
                         continue
                 with _pod_load_locks()[pod]:
