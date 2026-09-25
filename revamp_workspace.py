@@ -9,6 +9,7 @@ import hashlib
 import html
 import base64
 import os
+import time
 from datetime import date, datetime, timedelta
 
 import requests
@@ -288,7 +289,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if not accessible:
         st.info("Your account has no pod access. Contact an administrator to update your access.")
         return
-    pod_options = (["All my pods"] if len(accessible) > 1 else []) + accessible
+    # Start with one pod so the first sync cannot queue five full Mapbox
+    # routing passes before any routes appear. Multi-pod remains explicit.
+    pod_options = accessible + (["All my pods"] if len(accessible) > 1 else [])
     remembered_pod = st.query_params.get("pod")
     if st.session_state.get("revamp_pod") not in pod_options:
         st.session_state["revamp_pod"] = remembered_pod if remembered_pod in pod_options else pod_options[0]
@@ -301,7 +304,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if sync_clicked:
         fetch_sent_records_from_sheet.clear()
         for pod in selected_pods:
+            started = time.monotonic()
+            print(f"[revamp/sync] starting {pod}", flush=True)
             process_pod(pod)
+            loaded_count = len(st.session_state.get(f"clusters_{pod}", []))
+            print(f"[revamp/sync] finished {pod}: {loaded_count} routes in {time.monotonic() - started:.1f}s", flush=True)
+        st.session_state["_last_sync_ts"] = datetime.now()
 
     # The original pod tabs populate these session keys during their own
     # render. This workspace runs before those tabs, so hydrate the same
