@@ -335,9 +335,82 @@ def _fn_stage(route_hash, posted, providers):
     return "Posted" if route_hash in posted else "Pending"
 
 
+def _fn_ghost_tasks(ghost):
+    """Rebuild enough route task detail from persisted FN stop_data to keep
+    Field Nation cards/CSV usable after OnFleet tasks leave the open feed."""
+    ghost = ghost or {}
+    stop_data = ghost.get("stop_data") or []
+    if isinstance(stop_data, str):
+        try:
+            stop_data = json.loads(stop_data)
+        except Exception:
+            stop_data = []
+    locs = [x.strip() for x in str(ghost.get("locs") or "").split("|") if x.strip()]
+    # FN locs are [home, stop1, stop2, ..., home]. Prefer those addresses.
+    stop_addresses = locs[1:-1] if len(locs) >= 3 else locs
+    rebuilt = []
+    for idx, stop in enumerate(stop_data or []):
+        if not isinstance(stop, dict):
+            continue
+        addr = str(stop.get("addr") or (stop_addresses[idx] if idx < len(stop_addresses) else "")).strip()
+        if not addr:
+            continue
+        campaigns = stop.get("campaigns") or []
+        if not isinstance(campaigns, list):
+            campaigns = []
+        clients = [
+            str(c.get("name") or "").strip()
+            for c in campaigns if isinstance(c, dict) and str(c.get("name") or "").strip()
+        ]
+        client = clients[0] if clients else "Terraboost Media"
+        venue = str(stop.get("venue") or "Terraboost Media").strip()
+        common = {
+            "full": addr,
+            "venue_name": venue,
+            "venue_id": str(stop.get("venueId") or ""),
+            "kiosk_id": str(stop.get("kioskId") or ""),
+            "location_in_venue": str(stop.get("locationInVenue") or ""),
+            "client_company": client,
+            "customer_type": str(stop.get("customerType") or ""),
+            "boosted_standard": str(stop.get("boostedStandard") or ""),
+            "art_file": str(stop.get("artFile") or ""),
+            "zip": str(stop.get("zip") or ""),
+            "sio": str(stop.get("sio") or ""),
+            "escalated": bool(stop.get("esc")),
+        }
+        category_counts = [
+            ("Kiosk Install", int(stop.get("inst") or 0)),
+            ("Kiosk Removal", int(stop.get("remov") or 0)),
+            ("New Ad", int(stop.get("n_ad") or 0)),
+            ("Continuity", int(stop.get("c_ad") or 0)),
+            ("Default", int(stop.get("d_ad") or 0)),
+        ]
+        created = 0
+        for task_type, count in category_counts:
+            for _ in range(max(0, count)):
+                rebuilt.append({**common, "task_type": task_type})
+                created += 1
+        # Older FN rows may only have t_count. Preserve the displayed/exported
+        # task count instead of showing zero.
+        target = int(stop.get("t_count") or stop.get("tCnt") or 0)
+        while created < target:
+            rebuilt.append({**common, "task_type": "Kiosk Install"})
+            created += 1
+        if created == 0:
+            rebuilt.append({**common, "task_type": "Kiosk Install"})
+    return rebuilt
+
+
 def _fn_csv_route(route, route_hash, ghost_to_cluster):
     if route.get("_is_ghost"):
-        route = ghost_to_cluster(route.get("_ghost_record") or {}, skip_geocode=True) if ghost_to_cluster else None
+        ghost = route.get("_ghost_record") or {}
+        rebuilt = ghost_to_cluster(ghost, skip_geocode=True) if ghost_to_cluster else None
+        if rebuilt and rebuilt.get("data"):
+            route = rebuilt
+        else:
+            route = dict(route)
+            route["data"] = _fn_ghost_tasks(ghost)
+            route["stops"] = int(ghost.get("stops") or ghost.get("lCnt") or route.get("stops") or 0)
     if not route or not route.get("data"):
         return None
     return {**route, "_cluster_hash": route_hash}
@@ -406,7 +479,10 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                     provider = str(fn_providers.get(route_hash) or "").strip()
                     provider_label = f" · FN: {provider}" if provider else ""
                     stops = route.get("stops", 0)
-                    tasks = len(route.get("data", [])) or len((route.get("_ghost_record") or {}).get("task_ids") or [])
+                    _ghost = route.get("_ghost_record") or {}
+                    tasks = (len(route.get("data", []))
+                             or len(_ghost.get("task_ids") or [])
+                             or int(_ghost.get("tasks") or _ghost.get("tCnt") or 0))
                     state_icon = {
                         "Ready": "●", "Flagged": "!", "Field Nation": "FN",
                         "Sent": "→", "Accepted": "✓", "Declined": "×", "Routed": "◆"
@@ -448,19 +524,23 @@ def _fetch_fn_assignment_ids():
     if not team:
         raise RuntimeError("Field Nation team is missing from this Onfleet account")
 
-    # Prefer the worker explicitly attached to the Field Nation team. This
-    # avoids coupling route creation to one placeholder phone number forever.
+    team_id = team.get("id")
     team_workers = team.get("workers") or []
-    if len(team_workers) == 1:
-        only_worker = team_workers[0]
-        worker_id = only_worker.get("id") if isinstance(only_worker, dict) else only_worker
-        if worker_id:
-            return {"fn_team_id": team.get("id"), "fn_worker_id": worker_id}
+    team_worker_ids = {
+        str(w.get("id") if isinstance(w, dict) else w).strip()
+        for w in team_workers
+        if str(w.get("id") if isinstance(w, dict) else w).strip()
+    }
+    if len(team_worker_ids) == 1:
+        return {"fn_team_id": team_id, "fn_worker_id": next(iter(team_worker_ids))}
 
-    # Backward-compatible fallback for accounts where team membership is not
-    # returned on the team object or where the team has multiple workers.
+    # Resolve from the full worker feed when the team response contains
+    # multiple workers or only IDs. Prefer an explicitly named FN placeholder,
+    # then the legacy known placeholder phone, then a single team member.
     seen = set()
     last_id = None
+    candidates = []
+    legacy_phone_match = None
     for _ in range(100):
         url = "https://onfleet.com/api/v2/workers" + (f"?lastId={last_id}" if last_id else "")
         response = requests.get(url, headers=auth, timeout=15)
@@ -472,15 +552,33 @@ def _fetch_fn_assignment_ids():
         for worker in workers:
             if not isinstance(worker, dict):
                 continue
+            wid = str(worker.get("id") or "").strip()
+            worker_teams = {str(x).strip() for x in (worker.get("teams") or [])}
+            on_fn_team = (wid in team_worker_ids) or (team_id and str(team_id) in worker_teams)
+            if not on_fn_team:
+                continue
+            candidates.append(worker)
+            name = str(worker.get("name") or "").strip().lower()
+            if "field nation" in name or "fieldnation" in name or "fn placeholder" in name:
+                return {"fn_team_id": team_id, "fn_worker_id": wid}
             phone = "".join(c for c in str(worker.get("phone") or "") if c.isdigit())[-10:]
             if phone == "6302869764":
-                return {"fn_team_id": team.get("id"), "fn_worker_id": worker.get("id")}
+                legacy_phone_match = wid
         next_id = (data.get("lastId") if isinstance(data, dict) else None) or workers[-1].get("id")
         if not next_id or next_id in seen:
             break
         seen.add(next_id)
         last_id = next_id
-    raise RuntimeError("Field Nation placeholder worker (ending 9764) was not found in Onfleet")
+
+    if legacy_phone_match:
+        return {"fn_team_id": team_id, "fn_worker_id": legacy_phone_match}
+    unique_candidate_ids = {str(w.get("id") or "").strip() for w in candidates if w.get("id")}
+    if len(unique_candidate_ids) == 1:
+        return {"fn_team_id": team_id, "fn_worker_id": next(iter(unique_candidate_ids))}
+    raise RuntimeError(
+        f"Could not uniquely resolve the Field Nation placeholder worker "
+        f"from {len(unique_candidate_ids)} Field Nation team worker(s)"
+    )
 
 
 def render_workspace(can_access_tab, process_pod, render_dispatch,
@@ -882,13 +980,14 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      "Field Nation" if ghost_status in ("field_nation", "posted") else
                      "Sent" if ghost_status == "sent" else
                      "Declined" if ghost_status == "declined" else "Routed")
+            rebuilt_fn_data = _fn_ghost_tasks(ghost) if state == "Field Nation" else []
             route = {
                 "_is_ghost": True, "wo": ghost.get("wo", ""),
                 "_ghost_record": ghost,
                 "city": ghost.get("city", "Unknown"),
                 "state": ghost.get("state", ""),
                 "stops": ghost.get("stops", ghost.get("lCnt", 0)),
-                "data": [],
+                "data": rebuilt_fn_data,
             }
             all_routes.append((pod, route, state, route_hash, None))
     counts = {status: sum(1 for entry in all_routes if entry[2] == status)
@@ -1102,8 +1201,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                        f"{saved_fields['tasks']} tasks")
         else:
             st.markdown(f"### {html.escape(title)}  ·  {html.escape(state)}")
+            _ghost = route.get("_ghost_record") or {}
+            _detail_tasks = (len(route.get("data", []))
+                             or len(_ghost.get("task_ids") or [])
+                             or int(_ghost.get("tasks") or _ghost.get("tCnt") or 0))
             st.caption(f"{pod} pod · {route.get('stops', 0)} stops · "
-                       f"{len(route.get('data', []))} tasks")
+                       f"{_detail_tasks} tasks")
         if nearest:
             st.caption(f"Closest eligible IC: {nearest[0]} · {nearest[1]:.1f} mi")
         if state in ("Ready", "Flagged"):
