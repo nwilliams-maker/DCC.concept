@@ -161,6 +161,21 @@ def _route_status(route, sent_db, nearest_miles=None, pod=None):
     return "Ready"
 
 
+def _dedupe_route_entries(entries):
+    """Render each pod/route hash once so its selection widget is unique."""
+    unique = {}
+    for entry in entries:
+        key = (entry[0], entry[3])
+        previous = unique.get(key)
+        if previous is None:
+            unique[key] = entry
+        elif previous[2] == "Ready" and entry[2] == "Flagged":
+            # Identical task sets can arrive as separate live clusters. Keep
+            # the review requirement if either copy was flagged.
+            unique[key] = entry
+    return list(unique.values())
+
+
 def _searchable(route):
     fields = [route.get("city", ""), route.get("state", ""), route.get("wo", "")]
     for task in route.get("data", []):
@@ -1230,6 +1245,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             }
             if state != "Routed":
                 all_routes.append((pod, route, state, route_hash, None))
+    # Multiple live clusters can contain the same task IDs. Their hashes (and
+    # Streamlit widget keys) coincide; keep one route before counts, selection,
+    # bulk actions, and the visible list are derived.
+    all_routes = _dedupe_route_entries(all_routes)
     counts = {status: sum(1 for entry in all_routes if entry[2] == status)
               for status in STATUSES[1:]}
     counts["Over 50 mi"] = sum(1 for entry in all_routes
