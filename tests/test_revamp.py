@@ -296,6 +296,32 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
         session["_route_fa_Orange_" + scope["_route_hash"](route)] = True
         self.assertEqual(scope["_route_status"](route, {}, 10, "Orange"), "Ready")
 
+    def test_duplicate_live_route_has_one_selection_key_and_keeps_flag(self):
+        dedupe = load_functions("revamp_workspace.py", ["_dedupe_route_entries"])["_dedupe_route_entries"]
+        ready = ("Orange", {"city": "Los Angeles"}, "Ready", "same-hash", None)
+        flagged = ("Orange", {"city": "Los Angeles"}, "Flagged", "same-hash", None)
+        other_pod = ("Blue", {"city": "Chicago"}, "Ready", "same-hash", None)
+        routes = dedupe([ready, flagged, ready, other_pod])
+        self.assertEqual([(pod, state, route_hash) for pod, _, state, route_hash, _ in routes],
+                         [("Orange", "Flagged", "same-hash"),
+                          ("Blue", "Ready", "same-hash")])
+
+    def test_remove_stops_updates_live_cluster_not_rendered_copy(self):
+        detach = load_functions("tactical_workspace_master_rw.py", ["_detach_stops_from_cluster"])["_detach_stops_from_cluster"]
+        original = {"data": [
+            {"id": "one", "full": "A"}, {"id": "two", "full": "B"},
+            {"id": "three", "full": "B"}], "stops": 2}
+        store = [original, dict(original)]
+        rendered_copy = dict(original)
+        groups, remaining = detach(store, [t["id"] for t in rendered_copy["data"]], ["B"])
+        self.assertEqual([[t["id"] for t in group] for group in groups], [["two", "three"]])
+        self.assertEqual(remaining, ["one"])
+        self.assertEqual(original["stops"], 1)
+        self.assertEqual([t["id"] for t in original["data"]], ["one"])
+        self.assertEqual(len(store), 1)
+        self.assertEqual(len(rendered_copy["data"]), 3)
+        self.assertEqual(detach(store, ["one", "two", "three"], ["B"]), ([], []))
+
     def test_bulk_fn_retries_skip_existing_and_keep_route_stops(self):
         stored = {}
         moved = []

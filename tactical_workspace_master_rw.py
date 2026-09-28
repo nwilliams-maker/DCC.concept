@@ -5529,6 +5529,32 @@ def unify_and_sort_by_date(live_routes, ghost_routes, live_hashes):
     return unified
     
 # --- DISPATCH RENDERING ---
+def _detach_stops_from_cluster(clusters, source_task_ids, selected_addresses):
+    """Split live route data, even when the rendered card is a shallow copy."""
+    source_ids = sorted(str(tid).strip() for tid in source_task_ids)
+    matching_indexes = [i for i, c in enumerate(clusters)
+                        if sorted(str(t.get('id', '')).strip() for t in c.get('data', [])) == source_ids]
+    if not matching_indexes:
+        return [], []
+    source = clusters[matching_indexes[0]]
+    selected = set(selected_addresses)
+    groups = []
+    for address in dict.fromkeys(selected_addresses):
+        tasks = [t for t in source['data'] if t.get('full') == address]
+        if tasks:
+            groups.append(tasks)
+    if not groups:
+        return [], source_ids
+    for duplicate_index in reversed(matching_indexes[1:]):
+        clusters.pop(duplicate_index)
+    source['data'] = [t for t in source['data'] if t.get('full') not in selected]
+    source['stops'] = len({t.get('full') for t in source['data']})
+    remaining_ids = [str(t['id']).strip() for t in source['data']]
+    if not remaining_ids:
+        clusters.remove(source)
+    return groups, remaining_ids
+
+
 # render_dispatch is a fragment — st.rerun() inside (Streamlit 1.39) defaults
 # to fragment scope, so clicks re-render only this one route card, not the
 # whole pod tab. State changes (session_state, sent_db, etc.) persist across
@@ -6386,9 +6412,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             )
             if _selected:
                 if st.button(f"✂️ Remove {len(_selected)} Stop{'s' if len(_selected) > 1 else ''}", key=f"btn_{_ms_key}"):
-                    for _addr in _selected:
-                        tasks_to_move = [t for t in cluster['data'] if t['full'] == _addr]
-                        if not tasks_to_move: continue
+                    _source_store = st.session_state.get(f"clusters_{pod_name}", [])
+                    _moved_groups, _remaining_ids = _detach_stops_from_cluster(
+                        _source_store, task_ids, _selected)
+                    if not _moved_groups:
+                        st.error("This route changed. Refresh the list and try removing the stops again.")
+                        st.rerun(scope="app")
+                    _first_fragment_key = None
+                    for tasks_to_move in _moved_groups:
                         new_fragment = {
                             "data": tasks_to_move, "center": [tasks_to_move[0]['lat'], tasks_to_move[0]['lon']],
                             "stops": 1, "city": tasks_to_move[0]['city'], "state": tasks_to_move[0]['state'],
@@ -6399,15 +6430,26 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                             "remov_count": sum(1 for x in tasks_to_move if "remove" in str(x.get('task_type','')).lower()),
                             "wo": "none"
                         }
-                        cluster['data'] = [t for t in cluster['data'] if t['full'] != _addr]
-                        target_pod = pod_name if pod_name != "Global_Digital" else next((p for p, cfg in POD_CONFIGS.items() if new_fragment['state'] in cfg['states']), "UNKNOWN")
-                        if target_pod != "UNKNOWN" and f"clusters_{target_pod}" in st.session_state:
-                            st.session_state[f"clusters_{target_pod}"].append(new_fragment)
-                    cluster['stops'] = len(set(t['full'] for t in cluster['data']))
+                        target_pod = pod_name if pod_name != "Global_Digital" else next((p for p, cfg in POD_CONFIGS.items() if new_fragment['state'] in cfg['states']), pod_name)
+                        if f"clusters_{target_pod}" in st.session_state:
+                            _target_store = st.session_state[f"clusters_{target_pod}"]
+                            _new_ids = sorted(str(t['id']).strip() for t in tasks_to_move)
+                            if not any(sorted(str(t.get('id', '')).strip() for t in c.get('data', [])) == _new_ids
+                                       for c in _target_store):
+                                _target_store.append(new_fragment)
+                            if _first_fragment_key is None:
+                                _new_hash = hashlib.md5("".join(_new_ids).encode()).hexdigest()
+                                _first_fragment_key = f"{target_pod}:{_new_hash}"
+                    if st.session_state.get("revamp_selected_route") == f"{pod_name}:{cluster_hash}":
+                        if _remaining_ids:
+                            _remaining_hash = hashlib.md5("".join(sorted(_remaining_ids)).encode()).hexdigest()
+                            st.session_state["revamp_selected_route"] = f"{pod_name}:{_remaining_hash}"
+                        else:
+                            st.session_state["revamp_selected_route"] = _first_fragment_key
                     st.session_state.pop(pay_key, None)
                     st.session_state.pop(rate_key, None)
-                    st.toast(f"✂️ {len(_selected)} stop(s) broken off into standalone routes!")
-                    st.rerun()
+                    st.toast(f"✂️ {len(_moved_groups)} stop(s) broken off into standalone routes!")
+                    st.rerun(scope="app")
 
 
 
