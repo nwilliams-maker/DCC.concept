@@ -300,10 +300,15 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
                                 "HIGH_RATE_FLAG_THRESHOLD": 25.00,
                                 "st": SimpleNamespace(session_state=session)})
         route = {"status": "Ready", "data": [{"id": "rate-task"}]}
-        rate_key = "_rate_master_Orange_" + scope["_route_hash"](route)
-        session[rate_key] = 24.99
+        route_hash = scope["_route_hash"](route)
+        auto_key = "_auto_rate_Orange_" + route_hash
+        manual_key = "_rate_master_Orange_" + route_hash
+        session[auto_key] = 24.99
+        session[manual_key] = 24.99
         self.assertEqual(scope["_route_status"](route, {}, 10, "Orange"), "Ready")
-        session[rate_key] = 25.00
+        session[manual_key] = 35.00
+        self.assertEqual(scope["_route_status"](route, {}, 10, "Orange"), "Ready")
+        session[auto_key] = 25.00
         self.assertEqual(scope["_route_status"](route, {}, 10, "Orange"), "Flagged")
         self.assertEqual(scope["_route_status"](
             route, {"rate-task": {"status": "sent"}}, 10, "Orange"), "Sent")
@@ -318,7 +323,32 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
         routes = dedupe([ready, flagged, ready, other_pod])
         self.assertEqual([(pod, state, route_hash) for pod, _, state, route_hash, _ in routes],
                          [("Orange", "Flagged", "same-hash"),
-                          ("Blue", "Ready", "same-hash")])
+                         ("Blue", "Ready", "same-hash")])
+
+    def test_duplicate_live_routes_render_one_checkbox(self):
+        from streamlit.testing.v1 import AppTest
+        source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import pandas as pd
+from revamp_workspace import render_workspace
+route = {{"city":"Chicago","state":"IL","stops":1,
+         "data":[{{"id":"duplicate-task","full":"101 Main St"}}]}}
+st.session_state.setdefault("clusters_Blue", [route, dict(route)])
+st.session_state.setdefault("ic_df", pd.DataFrame())
+def records():
+    return {{}}, {{"Blue":[]}}, set(), {{}}
+records.clear = lambda: None
+render_workspace(lambda pod: pod == "Blue", lambda pod: None,
+    lambda i, route, pod: st.write("Detail: " + route["city"]),
+    lambda *args: 0, object(), lambda *args: None, records)
+'''
+        app = AppTest.from_string(source).run()
+        app.radio(key="revamp_status").set_value("Ready").run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len([box for box in app.checkbox
+                              if box.key.startswith("revamp_bulk_")]), 1)
 
     def test_remove_stops_updates_live_cluster_not_rendered_copy(self):
         detach = load_functions("tactical_workspace_master_rw.py", ["_detach_stops_from_cluster"])["_detach_stops_from_cluster"]
@@ -344,20 +374,30 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
             def __enter__(self): return self
             def __exit__(self, *args): pass
             def execute(self, query, params):
-                return SimpleNamespace(scalar=lambda: stored.get(params["route_hash"]))
+                if "route_hash" in params:
+                    row = stored.get(params["route_hash"])
+                    return SimpleNamespace(mappings=lambda: SimpleNamespace(
+                        first=lambda: row))
+                if "prefix" in params:
+                    return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+                return SimpleNamespace(scalar=lambda: next(
+                    (row["route_plan_id"] for row in stored.values()
+                     if row["work_order"] == params["work_order"]), None))
 
         class Engine:
             def connect(self): return Conn()
 
         def save(engine, wo, payload):
-            stored[payload["cluster_hash"]] = wo
+            stored[payload["cluster_hash"]] = {"work_order": wo, "route_plan_id": None}
             self.assertEqual(json.loads(payload["stopData"])[0]["venue"], "Example Venue")
             return {"success": True}
 
         def move(ids, team, **kwargs):
             moved.append((ids, team, kwargs["fn_worker_id"]))
+            if len(moved) == 2:
+                stored[kwargs["cluster_hash"]]["route_plan_id"] = "plan-1"
 
-        scope = load_functions("revamp_bulk_fn.py", ["cluster_hash", "_payload", "bulk_assign"],
+        scope = load_functions("revamp_bulk_fn.py", ["cluster_hash", "_payload", "_next_dcc_work_order", "bulk_assign"],
                                {"hashlib": hashlib, "json": json, "datetime": datetime,
                                 "sa": SimpleNamespace(text=lambda s: s),
                                 "data_access": SimpleNamespace(save_to_field_nation=save)})
@@ -367,9 +407,12 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
         selected = [("Blue", route)]
         first = scope["bulk_assign"](Engine(), selected, "2026-10-10", move, "team", "worker")
         second = scope["bulk_assign"](Engine(), selected, "2026-10-10", move, "team", "worker")
-        self.assertEqual(len(first[0]), 1)
-        self.assertEqual(len(second[1]), 1)
-        self.assertEqual(len(moved), 1)
+        third = scope["bulk_assign"](Engine(), selected, "2026-10-10", move, "team", "worker")
+        self.assertEqual(len(first[2]), 1)
+        self.assertIn("safe to retry", first[2][0][1])
+        self.assertEqual(len(second[0]), 1)
+        self.assertEqual(len(third[1]), 1)
+        self.assertEqual(len(moved), 2)
         self.assertEqual(moved[0], (["task-1"], "team", "worker"))
 
     def test_bulk_fn_refuses_missing_worker(self):
@@ -434,7 +477,7 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
 '''
         app = AppTest.from_string(source).run()
         app.radio(key="revamp_status").set_value("Ready").run()
-        app.button(key="revamp_state_toggle_Ready__MI").click().run()
+        app.button(key="revamp_group_toggle_Ready__MI").click().run()
         self.assertEqual(app.radio(key="revamp_status").value, "Ready")
         self.assertEqual(app.query_params["view"], ["Ready"])
         app.button(key="revamp_select_visible").click().run()
@@ -447,7 +490,7 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
         selected = next(checkbox for checkbox in app.checkbox if checkbox.key.startswith("revamp_fn_"))
         selected.check().run()
         self.assertEqual(app.radio(key="revamp_status").value, "Field Nation")
-        self.assertEqual(app.button(key="revamp_fn_posted").label, "Mark 1 Posted")
+        self.assertEqual(app.button(key="revamp_fn_posted").label, "Mark Posted (1)")
         self.assertFalse(app.exception)
 
 
