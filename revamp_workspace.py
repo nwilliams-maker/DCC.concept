@@ -20,7 +20,7 @@ import requests
 import streamlit as st
 
 
-STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Routed")
+STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Routed")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red")
 
 
@@ -1193,6 +1193,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     counts["Over 50 mi"] = sum(1 for entry in all_routes
                                 if entry[4] and entry[4][1] > 50 and
                                 entry[2] in ("Ready", "Flagged"))
+    counts["CVS Removal"] = sum(
+        1 for entry in all_routes
+        if entry[2] in ("Ready", "Flagged") and entry[1].get("is_removal")
+    )
     counts["Selected"] = sum(1 for entry in all_routes
                              if st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))
     counts["All"] = len(all_routes)
@@ -1234,18 +1238,19 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     notice = st.session_state.pop("_revamp_notice", None)
     if notice:
         (st.warning if notice[0] == "warning" else st.success)(notice[1])
-    show_cvs = st.toggle("Show CVS Kiosk Removal routes", value=False,
-                         key="revamp_show_cvs_removal",
-                         help="Show removal routes in Ready and Flagged. Routes already sent or assigned remain visible.")
     matching = [entry for entry in all_routes if
                 (status == "All" or entry[2] == status or
                  (status == "Over 50 mi" and entry[4] and entry[4][1] > 50
                   and entry[2] in ("Ready", "Flagged")) or
+                 (status == "CVS Removal" and entry[2] in ("Ready", "Flagged")
+                  and entry[1].get("is_removal")) or
                  (status == "Selected" and
                   st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))) and
                 (not search or search in _searchable(entry[1])) and
-                (show_cvs or entry[2] not in ("Ready", "Flagged") or
-                 not entry[1].get("is_removal"))]
+                # CVS removals are hidden from the normal Ready/Flagged/All
+                # queues and appear only when the CVS Removal filter is selected.
+                (status == "CVS Removal" or entry[2] not in ("Ready", "Flagged")
+                 or not entry[1].get("is_removal"))]
     fn_posted = (ghost_db or {}).get("_fn_posted", {}) or {}
     fn_providers = (ghost_db or {}).get("_fn_provider", {}) or {}
     matching.sort(key=lambda entry: (({"Pending": 0, "Posted": 1, "Assigned": 2}[
