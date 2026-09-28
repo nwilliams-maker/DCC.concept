@@ -221,17 +221,18 @@ def process_decision(
     }
 
     # Permanent historical timestamp: preserve the first successful acceptance.
+    route_payload = dict(route_payload or {})
     if decision == "accept":
-        route_payload = dict(route_payload or {})
         route_payload.setdefault("accepted_at", datetime.now(timezone.utc).isoformat())
-        with engine.begin() as conn:
-            conn.execute(
-                sa.text("UPDATE routes SET payload = :payload WHERE wo = :wo"),
-                {"wo": wo, "payload": json.dumps(route_payload)},
-            )
-            _set_route_status(conn, wo, target_status, "processDecision", event_payload)
     else:
-        _set_route_status(engine, wo, target_status, "processDecision", event_payload)
+        route_payload.setdefault("declined_at", datetime.now(timezone.utc).isoformat())
+
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text("UPDATE routes SET payload = :payload WHERE wo = :wo"),
+            {"wo": wo, "payload": json.dumps(route_payload)},
+        )
+        _set_route_status(conn, wo, target_status, "processDecision", event_payload)
 
     return {"success": True, **onfleet_result}
 
@@ -469,13 +470,14 @@ def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | No
             sa.text(
                 """
                 INSERT INTO routes (wo, contractor_name, status, comp, due, locs, stop_data, cluster_hash, payload)
-                VALUES (:wo, 'Field Nation', 'accepted', :comp, :due, :locs, :stop_data, :cluster_hash, :payload)
+                VALUES (:wo, :contractor_name, 'accepted', :comp, :due, :locs, :stop_data, :cluster_hash, :payload)
                 ON CONFLICT (wo) DO UPDATE SET
                     status = 'accepted', payload = EXCLUDED.payload, updated_at = now()
                 """
             ),
             {
                 "wo": new_wo,
+                "contractor_name": provider or "Assigned Contractor",
                 "comp": payload.get("comp"),
                 "due": payload.get("due"),
                 "locs": json.dumps(payload.get("locs")) if payload.get("locs") is not None else None,
@@ -923,7 +925,7 @@ def get_sent_records_from_db(
         route_rows = conn.execute(
             sa.text(
                 """
-                SELECT wo, contractor_name, status::text AS status, payload, created_at
+                SELECT wo, contractor_name, status::text AS status, payload, created_at, updated_at
                 FROM routes
                 WHERE created_at >= :cutoff
                 ORDER BY created_at
@@ -970,7 +972,14 @@ def get_sent_records_from_db(
             # SIDE-CHANNEL" comment in _cached_fetch_sent_records_from_sheet).
             continue
         p = _parsed(row["payload"])
-        dt_obj, ts_display = _normalize_ts(row["created_at"])
+        _status = str(row["status"] or "").lower()
+        _status_ts = (
+            p.get("accepted_at") if _status in ("accepted", "finalized") else
+            p.get("declined_at") if _status == "declined" else
+            p.get("sent_at") if _status == "sent" else
+            None
+        )
+        dt_obj, ts_display = _normalize_ts(_status_ts or row.get("updated_at") or row["created_at"])
         _ingest_sent_record(
             p=p, c_name=row["contractor_name"], dt_obj=dt_obj, ts_display=ts_display,
             status_label=row["status"], sent_dict=sent_dict, ghost_routes=ghost_routes,
