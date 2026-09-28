@@ -5952,6 +5952,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         selected_label = st.session_state.get(sel_key)
         if selected_label and selected_label != st.session_state.get(last_sel_key):
             ic_new = ic_opts[selected_label]
+            st.session_state[f"_route_fa_{pod_name}_{cluster_hash}"] = _is_fa_employee(ic_new)
             _, h, _, _ = get_gmaps(_ic_home_loc(ic_new, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
             new_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
             # 🌟 BUGFIX: Apply same $20/stop floor used in init logic. Without this, when
@@ -6034,6 +6035,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # let a rate/comp figure reach the financials card, the contractor
         # email, or the saveRoute payload for them.
         is_fa = _is_fa_employee(ic)
+        st.session_state[f"_route_fa_{pod_name}_{cluster_hash}"] = is_fa
 
         ic_location = ic_location_tmp
         mi, hrs, t_str, _wp_order = get_gmaps(ic_location, tuple(stop_metrics.keys()))
@@ -6042,7 +6044,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         ic_dist = ic.get('d', 0)
         needs_unlock = (curr_rate >= HIGH_RATE_FLAG_THRESHOLD) or (ic_dist > 60) or (cluster['status'] == 'Flagged')
         # The selected contractor can cost more than the closest IC used by
-        # the route builder. Move that card to Flagged on its first render.
+        # the route builder. Revamp reads the calculated rate on this rerun.
         if (curr_rate >= HIGH_RATE_FLAG_THRESHOLD and not is_fa
                 and cluster.get("status") == "Ready" and route_state not in ("email_sent", "field_nation")
                 and not st.session_state.get(f"_high_rate_rerouted_{cluster_hash}", False)):
