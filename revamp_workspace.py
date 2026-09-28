@@ -213,6 +213,31 @@ def _saved_route_fields(route, ghost=None):
     }
 
 
+def _route_status_timestamp(route, state):
+    ghost = route.get("_ghost_record") or {}
+    raw = ghost.get("route_ts") or route.get("route_ts") or ""
+    text = str(raw or "").strip()
+    if not text:
+        return "—"
+    if re.match(r"^\d{2}/\d{2}\s+\d{1,2}:\d{2}\s+[AP]M$", text, re.I):
+        return text
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt.strftime("%m/%d/%Y %I:%M %p")
+    except Exception:
+        return text
+
+
+def _display_contractor_name(route, state):
+    fields = _saved_route_fields(route)
+    name = str(fields.get("contractor") or "").strip()
+    ghost = fields.get("ghost") or {}
+    if state in ("Sent", "Accepted", "Declined") and name.lower() == "field nation":
+        provider = str(ghost.get("fn_provider") or route.get("fn_provider") or "").strip()
+        return provider or "Assigned Contractor"
+    return name or "Unknown"
+
+
 def _outlook_route_url(route_hash, fields, ic_df=None, portal_base_url=None):
     """Use DCC's exact draft when available; rebuild a draft after sign-in."""
     saved_draft = st.session_state.get(f"_persisted_outlook_{route_hash}")
@@ -253,6 +278,7 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
                              move_to_dispatch, is_dispatch_associate):
     """Render the DCC route summary and actions only for the selected route."""
     fields = _saved_route_fields(route, ghost)
+    fields["contractor"] = _display_contractor_name(route, state)
     ghost = fields["ghost"]
     is_ghost = bool(route.get("_is_ghost"))
     if is_ghost:
@@ -274,7 +300,8 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
     </div>
     <div style="padding:12px 14px;display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #f1f5f9;gap:12px;">
       <div><div style="font-size:9px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;">Contractor</div>
-      <div style="font-size:14px;font-weight:800;color:#0f172a;">{esc(fields['contractor'])}</div></div>
+      <div style="font-size:14px;font-weight:800;color:#0f172a;">{esc(fields['contractor'])}</div>
+      <div style="font-size:11px;color:#64748b;margin-top:3px;">{esc(state)}: {esc(_route_status_timestamp(route, state))}</div></div>
       <div style="text-align:right;"><div style="font-size:9px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px;">Stops / Tasks</div>
       <div style="font-size:14px;font-weight:800;color:#0f172a;">{esc(fields['stops'])} <span style="color:#94a3b8;font-size:11px;font-weight:500;">Stops / {esc(fields['tasks'])} Tasks</span></div></div>
     </div>
@@ -285,7 +312,7 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
       <div style="font-size:18px;font-weight:900;color:#16a34a;">${esc(fields['pay'])}</div></div>
     </div>{venues_html}</div>""", unsafe_allow_html=True)
 
-    outlook_url = _outlook_route_url(route_hash, fields, st.session_state.get("ic_df"))
+    outlook_url = _outlook_route_url(route_hash, fields, st.session_state.get("ic_df")) if state != "Declined" else None
     if outlook_url:
         with st.container(key="revamp_outlook_action"):
             st.link_button("Open Outlook", outlook_url, use_container_width=True,
@@ -552,7 +579,6 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                     removal = " · CVS Removal" if route.get("is_removal") else ""
                     card_state = stage if status == "Field Nation" else state
                     provider = str(fn_providers.get(route_hash) or "").strip()
-                    provider_label = f" · FN: {provider}" if provider else ""
                     stops = route.get("stops", 0)
                     _ghost = route.get("_ghost_record") or {}
                     tasks = (len(route.get("data", []))
@@ -563,7 +589,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                         "Sent": "→", "Accepted": "✓", "Declined": "×", "Routed": "◆"
                     }.get(card_state, "•")
                     status_text = f"{state_icon} {card_state}"
-                    if provider:
+                    if status == "Field Nation" and provider:
                         status_text += f" · {provider}"
                     if removal:
                         status_text += " · CVS Removal"
@@ -581,9 +607,13 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                         elif card_state in ("Posted", "Assigned"):
                             _date_bits.insert(0, f"Posted {_posted}")
                         label += "\n" + "  ·  ".join(_date_bits)
-                    elif card_state == "Accepted":
-                        _accepted_due = _saved_route_fields(route, _ghost).get("due") or "N/A"
-                        label += f"\nDue {_accepted_due}"
+                    elif card_state in ("Sent", "Accepted", "Declined"):
+                        _saved = _saved_route_fields(route, _ghost)
+                        _status_ts = _route_status_timestamp(route, card_state)
+                        _date_bits = [f"{card_state} {_status_ts}"]
+                        if card_state in ("Sent", "Accepted"):
+                            _date_bits.append(f"Due {_saved.get('due') or 'N/A'}")
+                        label += "\n" + "  ·  ".join(_date_bits)
                     if nearest:
                         label += f"\nClosest IC  ·  {nearest[0]}  ·  {nearest[1]:.1f} mi"
                     selected = st.session_state.get("revamp_selected_route") == key
@@ -1450,13 +1480,17 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             return
         pod, route, state, route_hash, nearest = current
         title = f"{route.get('city', 'Route')}, {route.get('state', '')}"
-        saved_fields = _saved_route_fields(route) if state in ("Sent", "Accepted") else None
+        saved_fields = _saved_route_fields(route) if state in ("Sent", "Accepted", "Declined") else None
         if saved_fields:
-            st.markdown(f"### {html.escape(str(saved_fields['wo'] or title))} | "
-                        f"${html.escape(str(saved_fields['pay']))} | Due: "
-                        f"{html.escape(str(saved_fields['due']))}")
-            st.caption(f"{title} · {state} · {pod} pod · {saved_fields['stops']} stops · "
-                       f"{saved_fields['tasks']} tasks")
+            _display_name = _display_contractor_name(route, state)
+            _status_time = _route_status_timestamp(route, state)
+            st.markdown(f"### {html.escape(str(saved_fields['wo'] or title))}")
+            _due_part = f" · Due {html.escape(str(saved_fields['due']))}" if state in ("Sent", "Accepted") else ""
+            st.caption(
+                f"{title} · {state} {_status_time} · {pod} pod · "
+                f"{saved_fields['stops']} stops · {saved_fields['tasks']} tasks{_due_part}"
+            )
+            st.caption(f"Assigned to: {_display_name}")
         else:
             st.markdown(f"### {html.escape(title)}  ·  {html.escape(state)}")
             _ghost = route.get("_ghost_record") or {}
@@ -1611,7 +1645,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             st.rerun()
                         except Exception as exc:
                             st.error(f"Could not assign Field Nation rep: {exc}")
-        elif state in ("Sent", "Accepted"):
+        elif state in ("Sent", "Accepted", "Declined"):
             if not saved_route_helpers:
                 st.error("Saved route details are unavailable. Refresh the page.")
             else:
