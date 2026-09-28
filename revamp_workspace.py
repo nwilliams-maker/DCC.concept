@@ -1424,18 +1424,30 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     fn_team_id = st.session_state.get("_fn_team_id")
     fn_worker_id = st.session_state.get("_fn_worker_id")
     assign_clicked = False
-    if status != "Field Nation":
-        _, due_col, action_col = st.columns([2.5, 1.4, 1.7], vertical_alignment="bottom")
-        with due_col:
-            fn_due = st.date_input("Field Nation due", value=date.today() + timedelta(days=default_due_days),
-                                   key="revamp_fn_due")
-        with action_col:
-            assign_clicked = st.button(f"Assign {len(chosen)} to Field Nation",
-                                       key="revamp_assign_fn", type="primary",
-                                       disabled=not chosen or db_engine is None,
-                                       use_container_width=True)
-    if db_engine is None and status != "Field Nation":
-        st.caption("Field Nation assignment needs the new Railway database connection.")
+    fn_due = date.today() + timedelta(days=default_due_days)
+    # Bulk Field Nation controls are contextual: keep them out of the workspace
+    # until the dispatcher has actually selected one or more Ready/Flagged routes.
+    if status != "Field Nation" and chosen:
+        with st.container(key="revamp_bulk_fn_actions"):
+            bulk_label_col, due_col, action_col = st.columns([2.2, 1.25, 1.55], vertical_alignment="bottom")
+            with bulk_label_col:
+                st.caption(f"{len(chosen)} route{'s' if len(chosen) != 1 else ''} selected")
+            with due_col:
+                fn_due = st.date_input(
+                    "Due date",
+                    value=date.today() + timedelta(days=default_due_days),
+                    key="revamp_fn_due",
+                )
+            with action_col:
+                assign_clicked = st.button(
+                    f"Send {len(chosen)} to Field Nation",
+                    key="revamp_assign_fn",
+                    type="primary",
+                    disabled=db_engine is None,
+                    use_container_width=True,
+                )
+            if db_engine is None:
+                st.caption("Field Nation assignment needs the Railway database connection.")
     if assign_clicked:
         if not fn_team_id or not fn_worker_id:
             try:
