@@ -6583,7 +6583,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             f"⚠️ ACTION REQUIRED:\n"
             f"You must confirm by selecting 'Accept' or 'Decline' directly through the portal link.\n\n"
             f"Terraboost Route Request Link:\n"
-            f"{PORTAL_BASE_URL}?route={link_id}&v2=true"
+            # Keep a real CRLF + trailing whitespace AFTER the URL. Outlook Web's
+            # deeplink compose body is plain text and its auto-linker often does
+            # not recognize a URL when it is the final character in the body.
+            # The delimiter makes the portal URL linkify in the compose/sent mail.
+            f"{PORTAL_BASE_URL}?route={link_id}&v2=true\r\n "
         )
     
         # 🌟 UNIQUE KEY
