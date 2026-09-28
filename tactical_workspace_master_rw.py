@@ -4900,12 +4900,12 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 else:
                     status = "Ready" # Default status
                 
-                    # Flag Criteria A: High Rate (> $23/stop)
-                    if gate_avg > 23.00:
+                    # Flag Criteria A: original calculated rate of $25+/stop.
+                    if gate_avg >= HIGH_RATE_FLAG_THRESHOLD:
                         if len(group) > 1:
                             removed = group.pop()
                             new_avg, _ = check_viability(group)
-                            if new_avg <= 23.00:
+                            if new_avg < HIGH_RATE_FLAG_THRESHOLD:
                                 rem.append(removed)
                             else:
                                 group.append(removed)
@@ -5949,6 +5949,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # honors the `value=` parameter from the master.
     _pay_master_key = f"_pay_master_{pod_name}_{cluster_hash}"
     _rate_master_key = f"_rate_master_{pod_name}_{cluster_hash}"
+    _auto_rate_key = f"_auto_rate_{pod_name}_{cluster_hash}"
     _pay_ver_key = f"_pay_ver_{pod_name}_{cluster_hash}"
     _stops_for_sync = cluster['stops'] if cluster['stops'] > 0 else 1
 
@@ -6031,6 +6032,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # stale record can't crash this route's card (see PAY_CAP/RATE_CAP above).
         st.session_state[_pay_master_key] = min(initial_pay, PAY_CAP)
         st.session_state[_rate_master_key] = min(round(initial_pay / cluster['stops'], 2), RATE_CAP) if cluster['stops'] > 0 else 20.0
+    # Freeze the original calculated rate for route placement. Manual pay/rate
+    # edits and contractor changes must not move the card out of its preview.
+    st.session_state.setdefault(_auto_rate_key, st.session_state[_rate_master_key])
     
     # --- 4. UI RENDERING & BUTTON LOGIC ---
     route_state = st.session_state.get(f"route_state_{cluster_hash}")
@@ -6069,9 +6073,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         curr_rate = 0.0 if is_fa else st.session_state.get(_rate_master_key, 0.0)
         ic_dist = ic.get('d', 0)
         needs_unlock = (curr_rate >= HIGH_RATE_FLAG_THRESHOLD) or (ic_dist > 60) or (cluster['status'] == 'Flagged')
-        # The selected contractor can cost more than the closest IC used by
-        # the route builder. Revamp reads the calculated rate on this rerun.
-        if (curr_rate >= HIGH_RATE_FLAG_THRESHOLD and not is_fa
+        # Only the first calculated rate may move the card to Flagged.
+        if (st.session_state[_auto_rate_key] >= HIGH_RATE_FLAG_THRESHOLD and not is_fa
                 and cluster.get("status") == "Ready" and route_state not in ("email_sent", "field_nation")
                 and not st.session_state.get(f"_high_rate_rerouted_{cluster_hash}", False)):
             st.session_state[f"_high_rate_rerouted_{cluster_hash}"] = True
@@ -8838,7 +8841,7 @@ def run_pod_tab(pod_name):
                 continue
             # Fallback to calculated status
             if (c.get('status') == 'Ready'
-                    and float(st.session_state.get(f'_rate_master_{pod_name}_{cluster_hash}', 0) or 0) < HIGH_RATE_FLAG_THRESHOLD):
+                    and float(st.session_state.get(f'_auto_rate_{pod_name}_{cluster_hash}', 0) or 0) < HIGH_RATE_FLAG_THRESHOLD):
                 ready.append(c)
             else:
                 review.append(c)
@@ -11141,7 +11144,7 @@ with tabs[6]:
             else: d_ready.append(c)
         else:
             if (c.get('status') == 'Ready'
-                    and float(st.session_state.get(f'_rate_master_Global_Digital_{cluster_hash}', 0) or 0) < HIGH_RATE_FLAG_THRESHOLD):
+                    and float(st.session_state.get(f'_auto_rate_Global_Digital_{cluster_hash}', 0) or 0) < HIGH_RATE_FLAG_THRESHOLD):
                 d_ready.append(c)
             else:
                 d_flagged.append(c)
