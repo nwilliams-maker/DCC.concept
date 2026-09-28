@@ -539,6 +539,32 @@ def _important_route_badges(route):
 
 
 @st.fragment
+def _saved_status_sort_key(route):
+    ghost = route.get("_ghost_record") or {}
+    raw = ghost.get("route_ts_iso") or ghost.get("route_ts") or route.get("route_ts_iso") or route.get("route_ts") or ""
+    text = str(raw or "").strip()
+    if not text:
+        return datetime.min
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        pass
+    for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d %I:%M %p", "%m/%d/%Y", "%m/%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if "%Y" not in fmt:
+                dt = dt.replace(year=datetime.now().year)
+            return dt
+        except Exception:
+            continue
+    return datetime.min
+
+
+def _saved_status_group_label(route):
+    dt = _saved_status_sort_key(route)
+    return dt.strftime("%m/%d/%Y") if dt != datetime.min else "Unknown date"
+
+
 def _render_route_list(matching, status, fn_posted, fn_providers):
     """State toggles rerun only this list; route clicks refresh the detail pane."""
     st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
@@ -546,20 +572,25 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
         if not matching:
             st.info("No matching routes.")
         grouped = {}
+        saved_date_view = status in ("Sent", "Accepted", "Declined")
         for entry in matching:
             stage = _fn_stage(entry[3], fn_posted, fn_providers) if status == "Field Nation" else ""
-            state_name = str(entry[1].get("state") or "Unknown state").strip().upper()
-            grouped.setdefault((stage, state_name), []).append(entry)
+            if saved_date_view:
+                group_label = _saved_status_group_label(entry[1])
+            else:
+                group_label = str(entry[1].get("state") or "Unknown state").strip().upper()
+            grouped.setdefault((stage, group_label), []).append(entry)
         last_stage = None
-        for group_index, ((stage, state_name), entries) in enumerate(grouped.items()):
+        for group_index, ((stage, group_label), entries) in enumerate(grouped.items()):
             if status == "Field Nation" and stage != last_stage:
                 st.markdown(f"**{stage}**")
                 last_stage = stage
-            group_key = f"_revamp_group_{status}_{stage}_{state_name}"
+            safe_group = re.sub(r"[^A-Za-z0-9_-]+", "_", group_label)
+            group_key = f"_revamp_group_{status}_{stage}_{safe_group}"
             st.session_state.setdefault(group_key, group_index == 0)
             is_open = st.session_state[group_key]
-            st.button(f"{state_name}  ·  {len(entries)} {'route' if len(entries) == 1 else 'routes'}  {'−' if is_open else '+'}",
-                      key=f"revamp_state_toggle_{status}_{stage}_{state_name}",
+            st.button(f"{group_label}  ·  {len(entries)} {'route' if len(entries) == 1 else 'routes'}  {'−' if is_open else '+'}",
+                      key=f"revamp_group_toggle_{status}_{stage}_{safe_group}",
                       on_click=_toggle_state_group, args=(group_key,),
                       use_container_width=True)
             if not is_open:
@@ -1253,11 +1284,20 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                  or not entry[1].get("is_removal"))]
     fn_posted = (ghost_db or {}).get("_fn_posted", {}) or {}
     fn_providers = (ghost_db or {}).get("_fn_provider", {}) or {}
-    matching.sort(key=lambda entry: (({"Pending": 0, "Posted": 1, "Assigned": 2}[
-                                      _fn_stage(entry[3], fn_posted, fn_providers)]
-                                      if status == "Field Nation" else 0),
-                                     str(entry[1].get("state") or "").upper(),
-                                     str(entry[1].get("city") or "").lower(), entry[0]))
+    if status in ("Sent", "Accepted", "Declined"):
+        matching.sort(
+            key=lambda entry: (
+                _saved_status_sort_key(entry[1]),
+                str(entry[1].get("city") or "").lower(),
+            ),
+            reverse=True,
+        )
+    else:
+        matching.sort(key=lambda entry: (({"Pending": 0, "Posted": 1, "Assigned": 2}[
+                                          _fn_stage(entry[3], fn_posted, fn_providers)]
+                                          if status == "Field Nation" else 0),
+                                         str(entry[1].get("state") or "").upper(),
+                                         str(entry[1].get("city") or "").lower(), entry[0]))
     selection_prefix = "revamp_fn_" if status == "Field Nation" else "revamp_bulk_"
     visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
                     if entry[2] == "Field Nation" or
