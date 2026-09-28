@@ -22,6 +22,7 @@ import streamlit as st
 
 STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red")
+HIGH_RATE_FLAG_THRESHOLD = 25.00  # Matches the dispatch card's $24.99 cutoff.
 
 
 @st.cache_resource(show_spinner=False)
@@ -123,7 +124,7 @@ def _route_hash(route):
     return hashlib.md5("".join(ids).encode()).hexdigest()
 
 
-def _route_status(route, sent_db, nearest_miles=None):
+def _route_status(route, sent_db, nearest_miles=None, pod=None):
     route_hash = _route_hash(route)
     local = st.session_state.get(f"route_state_{route_hash}")
     persisted_status = ""
@@ -147,7 +148,15 @@ def _route_status(route, sent_db, nearest_miles=None):
         return "Declined"
     if local == "finalized":
         return "Accepted"
-    if route.get("status") == "Flagged" or (nearest_miles is not None and nearest_miles > 50):
+    # The dispatch card calculates the selected contractor's rate after the
+    # route builder runs. Read that rate on the next rerun so Revamp moves a
+    # $25+/stop card into Flagged, even when the builder used a cheaper IC.
+    calculated_rate = 0.0
+    if pod and not st.session_state.get(f"_route_fa_{pod}_{route_hash}", False):
+        calculated_rate = float(st.session_state.get(f"_rate_master_{pod}_{route_hash}", 0) or 0)
+    if (route.get("status") == "Flagged"
+            or (nearest_miles is not None and nearest_miles > 50)
+            or calculated_rate >= HIGH_RATE_FLAG_THRESHOLD):
         return "Flagged"
     return "Ready"
 
@@ -1172,7 +1181,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             route_hash = _route_hash(route)
             seen_hashes.add(route_hash)
             display_route = dict(route)
-            route_state = _route_status(route, sent_db, nearest[1] if nearest else None)
+            route_state = _route_status(route, sent_db, nearest[1] if nearest else None, pod)
             saved = saved_by_hash.get((pod, route_hash))
             if saved:
                 display_route["_ghost_record"] = saved
