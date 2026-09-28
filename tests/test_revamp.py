@@ -30,6 +30,20 @@ def load_functions(filename, names, extra=None):
 
 
 class RevampTests(unittest.TestCase):
+    def test_search_finds_client_names_in_live_and_saved_routes(self):
+        searchable = load_functions("revamp_workspace.py", ["_searchable"])["_searchable"]
+        live = {"city": "San Diego", "data": [{"venue_name": "Store 12",
+                 "client_company": "Confie Insurance", "task_type": "Kiosk Install",
+                 "sio": "SIO-101"}], "contractor_name": "Morgan Lee"}
+        saved = {"wo": "WO-123", "_ghost_record": {"stop_data": [
+            {"venue": "Store 24", "campaigns": [{"name": "Local Plus Health"}]}]}}
+        self.assertIn("confie insurance", searchable(live))
+        self.assertIn("morgan lee", searchable(live))
+        self.assertIn("kiosk install", searchable(live))
+        self.assertIn("sio-101", searchable(live))
+        self.assertIn("local plus health", searchable(saved))
+        self.assertIn("wo-123", searchable(saved))
+
     def test_background_build_survives_waiter_timeout_and_deduplicates(self):
         cache = {}
         started, release = threading.Event(), threading.Event()
