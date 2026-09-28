@@ -20,7 +20,7 @@ import requests
 import streamlit as st
 
 
-STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Routed")
+STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red")
 
 
@@ -1193,8 +1193,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                          wo=record.get("wo") or "",
                                          comp=record.get("comp", 0),
                                          due=record.get("due") or "N/A")
-            all_routes.append((pod, display_route, route_state,
-                               route_hash, nearest))
+            if route_state != "Routed":
+                all_routes.append((pod, display_route, route_state,
+                                   route_hash, nearest))
     # Accepted routes often leave Onfleet's unassigned feed; include the
     # persisted ghost records so they remain visible in this workspace.
     for pod in loaded:
@@ -1218,7 +1219,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 "stops": ghost.get("stops", ghost.get("lCnt", 0)),
                 "data": rebuilt_fn_data,
             }
-            all_routes.append((pod, route, state, route_hash, None))
+            if state != "Routed":
+                all_routes.append((pod, route, state, route_hash, None))
     counts = {status: sum(1 for entry in all_routes if entry[2] == status)
               for status in STATUSES[1:]}
     counts["Over 50 mi"] = sum(1 for entry in all_routes
