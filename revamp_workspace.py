@@ -177,12 +177,23 @@ def _dedupe_route_entries(entries):
 
 
 def _searchable(route):
-    fields = [route.get("city", ""), route.get("state", ""), route.get("wo", "")]
-    for task in route.get("data", []):
-        fields.extend(str(task.get(k, "")) for k in (
-            "full", "venue_name", "vid", "sio", "kiosk_id", "zip", "id"
-        ))
-    return " ".join(str(field) for field in fields).lower()
+    """Index live tasks and saved-route payloads, including nested clients."""
+    fields = []
+    seen = set()
+
+    def collect(value):
+        if isinstance(value, (dict, list, tuple, set)):
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            values = value.values() if isinstance(value, dict) else value
+            for item in values:
+                collect(item)
+        elif value is not None and not isinstance(value, bool):
+            fields.append(str(value))
+
+    collect(route)
+    return " ".join(fields).casefold()
 
 
 def _eligible_ics(ic_df):
@@ -1083,7 +1094,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         st.markdown('<div class="revamp-heading">Dispatch</div>', unsafe_allow_html=True)
     with search_col:
         search = st.text_input(
-            "Search routes", placeholder="Search venue, VID, city, state, ZIP, SIO or kiosk",
+            "Search routes", placeholder="Search client, contractor, venue, WO, task or stop",
             label_visibility="collapsed", key="revamp_search",
         ).strip().lower()
 
