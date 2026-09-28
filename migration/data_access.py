@@ -806,7 +806,7 @@ def _ingest_sent_record(
     except Exception:
         pass
 
-    if status_label in ("accepted", "finalized", "sent", "field_nation"):
+    if status_label in ("accepted", "finalized", "sent", "declined", "field_nation"):
         locs_str = str(p.get("locs", ""))
         stops_list = [s.strip() for s in locs_str.split("|") if s.strip()]
         state_guess = str(p.get("state", "UNKNOWN"))
@@ -876,6 +876,7 @@ def _ingest_sent_record(
                 "contractor_name": c_name,
                 "contractor_email": str(p.get("ice") or "").strip(),
                 "route_ts": ts_display,
+                "route_ts_iso": dt_obj.isoformat() if hasattr(dt_obj, "isoformat") else str(dt_obj or ""),
                 "city": city_guess,
                 "state": norm_state,
                 "stops": p.get("lCnt", 0),
