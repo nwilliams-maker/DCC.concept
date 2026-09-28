@@ -148,12 +148,11 @@ def _route_status(route, sent_db, nearest_miles=None, pod=None):
         return "Declined"
     if local == "finalized":
         return "Accepted"
-    # The dispatch card calculates the selected contractor's rate after the
-    # route builder runs. Read that rate on the next rerun so Revamp moves a
-    # $25+/stop card into Flagged, even when the builder used a cheaper IC.
+    # The dispatch card saves its original calculated rate once. Subsequent
+    # manual edits to Rate/Stop must leave the preview in its current queue.
     calculated_rate = 0.0
     if pod and not st.session_state.get(f"_route_fa_{pod}_{route_hash}", False):
-        calculated_rate = float(st.session_state.get(f"_rate_master_{pod}_{route_hash}", 0) or 0)
+        calculated_rate = float(st.session_state.get(f"_auto_rate_{pod}_{route_hash}", 0) or 0)
     if (route.get("status") == "Flagged"
             or (nearest_miles is not None and nearest_miles > 50)
             or calculated_rate >= HIGH_RATE_FLAG_THRESHOLD):
