@@ -264,6 +264,7 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
     def test_exactly_50_is_ready_and_over_50_is_flagged(self):
         scope = load_functions("revamp_workspace.py", ["_route_hash", "_route_status"],
                                {"hashlib": hashlib,
+                                "HIGH_RATE_FLAG_THRESHOLD": 25.00,
                                 "st": SimpleNamespace(session_state={})})
         route = {"status": "Ready", "data": [{"id": "t1"}]}
         self.assertEqual(scope["_route_status"](route, {}, 50), "Ready")
@@ -277,6 +278,23 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
         scope["st"].session_state["route_state_" + scope["_route_hash"](route)] = "email_sent"
         self.assertEqual(scope["_route_status"](
             route, {"t1": {"status": "accepted"}}, 50.1), "Accepted")
+
+    def test_autocalculated_rate_over_2499_moves_card_to_flagged(self):
+        session = {}
+        scope = load_functions("revamp_workspace.py", ["_route_hash", "_route_status"],
+                               {"hashlib": hashlib,
+                                "HIGH_RATE_FLAG_THRESHOLD": 25.00,
+                                "st": SimpleNamespace(session_state=session)})
+        route = {"status": "Ready", "data": [{"id": "rate-task"}]}
+        rate_key = "_rate_master_Orange_" + scope["_route_hash"](route)
+        session[rate_key] = 24.99
+        self.assertEqual(scope["_route_status"](route, {}, 10, "Orange"), "Ready")
+        session[rate_key] = 25.00
+        self.assertEqual(scope["_route_status"](route, {}, 10, "Orange"), "Flagged")
+        self.assertEqual(scope["_route_status"](
+            route, {"rate-task": {"status": "sent"}}, 10, "Orange"), "Sent")
+        session["_route_fa_Orange_" + scope["_route_hash"](route)] = True
+        self.assertEqual(scope["_route_status"](route, {}, 10, "Orange"), "Ready")
 
     def test_bulk_fn_retries_skip_existing_and_keep_route_stops(self):
         stored = {}
