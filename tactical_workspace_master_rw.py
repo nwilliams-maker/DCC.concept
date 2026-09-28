@@ -6836,6 +6836,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 # cross-dispatcher visibility of this row still catches up
                 # on its own without blocking this render.
                 final_sig = email_body_content.replace("LINK_PENDING", final_route_id)
+                # Route IDs contain contractor names/spaces (for example
+                # "Gino Sanchez-09282026-1"). Encode the route QUERY VALUE
+                # itself before Outlook receives the compose body so the
+                # portal URL is a syntactically valid, reliably linkified URL.
+                _raw_portal_url = f"{PORTAL_BASE_URL}?route={final_route_id}&v2=true"
+                _encoded_portal_url = (
+                    f"{PORTAL_BASE_URL}?route="
+                    f"{requests.utils.quote(str(final_route_id), safe='')}&v2=true"
+                )
+                final_sig = final_sig.replace(_raw_portal_url, _encoded_portal_url)
                 subject_line = requests.utils.quote(f"Route Request | {wo_val}")
                 body_content = requests.utils.quote(final_sig)
                 # Security audit M3 - the IC email is quote()-encoded like the
