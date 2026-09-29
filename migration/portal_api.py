@@ -186,6 +186,11 @@ def _optional_one_time_recovery() -> None:
     if os.environ.get("RECOVERY_RUN_ON_STARTUP") == "1":
         from .recover_legacy_routes import main
         main()
+    # The portal API stays online even when no dispatcher has signed in to
+    # Streamlit. Reconcile its shared Postgres roster from this process too.
+    if os.environ.get("ONFLEET_KEY"):
+        from .onfleet_contractor_reconcile import start_background_reconciliation
+        start_background_reconciliation(engine)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
