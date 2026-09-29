@@ -75,7 +75,7 @@ def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
     result = []
     for row in rows:
         ic = dict(row)
-        status = _clean_text(ic.get("ic_list")).upper()
+        status = (_clean_text(ic.get("ic_list")) or "").upper()
         pod = _clean_text(ic.get("pod_color"))
         phone = normalize_phone(ic.get("phone"))
         email = normalize_email(ic.get("email"))
