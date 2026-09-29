@@ -108,15 +108,36 @@ def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
         pod = _pod_for(ic)
         phone = normalize_phone(ic.get("phone"))
         email = normalize_email(ic.get("email"))
+        matched_worker = None
+        reason = None
         if status not in ELIGIBLE:
             outcome = "ineligible"
+            reason = f"ic_list={status or 'blank'}"
         elif not pod or not team_ids.get(f"pod: {_norm_title(pod)}"):
             outcome = "missing_pod_team"
+            reason = f"pod={pod or 'blank'}"
         elif not phone or len(phone) != 10 or not email or not _clean_text(ic.get("name")):
             outcome = "incomplete_contact"
+            missing = []
+            if not _clean_text(ic.get("name")):
+                missing.append("name")
+            if not phone or len(phone) != 10:
+                missing.append("phone")
+            if not email:
+                missing.append("email")
+            reason = "missing_or_invalid=" + ",".join(missing)
         else:
-            outcome, _ = _worker_matches(ic, workers)
-        result.append({**ic, "pod_color": pod, "outcome": outcome, "team_id": team_ids.get(f"pod: {_norm_title(pod)}")})
+            outcome, matched_worker = _worker_matches(ic, workers)
+            if outcome == "conflict":
+                reason = "name/email/phone conflicts with existing OnFleet worker"
+        result.append({
+            **ic,
+            "pod_color": pod,
+            "outcome": outcome,
+            "team_id": team_ids.get(f"pod: {_norm_title(pod)}"),
+            "onfleet_worker_id": matched_worker.get("id") if matched_worker else None,
+            "reason": reason,
+        })
     return result
 
 
@@ -179,6 +200,14 @@ def reconcile_missing_once(engine) -> list[dict]:
     preview = preview_new_contractors(engine)
     missing_ids = {ic["id"] for ic in preview if ic["outcome"] == "missing"}
     print(f"[onfleet/ic-sync] checked={len(preview)} missing={len(missing_ids)}", flush=True)
+    for ic in preview:
+        worker_suffix = f" worker_id={ic['onfleet_worker_id']}" if ic.get("onfleet_worker_id") else ""
+        reason_suffix = f" reason={ic['reason']}" if ic.get("reason") else ""
+        print(
+            f"[onfleet/ic-sync/detail] name={ic.get('name') or '(blank)'} "
+            f"outcome={ic['outcome']}{worker_suffix}{reason_suffix}",
+            flush=True,
+        )
     if not missing_ids:
         return []
     # Keep each pass bounded, even when a large intake lands at once.
@@ -220,6 +249,13 @@ def start_background_reconciliation(engine) -> None:
                     for result in results:
                         status = result["status"]
                         counts[status] = counts.get(status, 0) + 1
+                        worker_suffix = f" worker_id={result['worker_id']}" if result.get("worker_id") else ""
+                        reason_suffix = f" reason={result['reason']}" if result.get("reason") else ""
+                        print(
+                            f"[onfleet/ic-sync/result] name={result.get('name') or '(blank)'} "
+                            f"status={status}{worker_suffix}{reason_suffix}",
+                            flush=True,
+                        )
                     print(f"[onfleet/ic-sync] {counts}", flush=True)
             except Exception as exc:
                 # Keep the app available and retry on the next cycle.
