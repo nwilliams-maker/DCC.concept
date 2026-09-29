@@ -36,6 +36,19 @@ STATE_TO_POD = {
     **{s: "Purple" for s in ("KS","MT","NE","NM","ND","OK","SD","TN","TX","WY")},
     **{s: "Red" for s in ("CT","DE","ME","MA","NH","NY","PA","RI","VT","VA","WV")},
 }
+STATE_NAME_TO_ABBR = {
+    "ALABAMA":"AL","ALASKA":"AK","ARIZONA":"AZ","ARKANSAS":"AR","CALIFORNIA":"CA",
+    "COLORADO":"CO","CONNECTICUT":"CT","DELAWARE":"DE","FLORIDA":"FL","GEORGIA":"GA",
+    "HAWAII":"HI","IDAHO":"ID","ILLINOIS":"IL","INDIANA":"IN","IOWA":"IA","KANSAS":"KS",
+    "KENTUCKY":"KY","LOUISIANA":"LA","MAINE":"ME","MARYLAND":"MD","MASSACHUSETTS":"MA",
+    "MICHIGAN":"MI","MINNESOTA":"MN","MISSISSIPPI":"MS","MISSOURI":"MO","MONTANA":"MT",
+    "NEBRASKA":"NE","NEVADA":"NV","NEW HAMPSHIRE":"NH","NEW JERSEY":"NJ","NEW MEXICO":"NM",
+    "NEW YORK":"NY","NORTH CAROLINA":"NC","NORTH DAKOTA":"ND","OHIO":"OH","OKLAHOMA":"OK",
+    "OREGON":"OR","PENNSYLVANIA":"PA","RHODE ISLAND":"RI","SOUTH CAROLINA":"SC",
+    "SOUTH DAKOTA":"SD","TENNESSEE":"TN","TEXAS":"TX","UTAH":"UT","VERMONT":"VT",
+    "VIRGINIA":"VA","WASHINGTON":"WA","WEST VIRGINIA":"WV","WISCONSIN":"WI","WYOMING":"WY",
+    "DISTRICT OF COLUMBIA":"DC",
+}
 
 
 def _pod_for(ic: dict) -> str | None:
@@ -45,8 +58,11 @@ def _pod_for(ic: dict) -> str | None:
     import re
     address = str(ic.get("location") or "").upper()
     match = re.search(r"(?:,|\s)\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?|\s|,|$)", address)
-    if match:
+    if match and match.group(1) in STATE_TO_POD:
         return STATE_TO_POD.get(match.group(1))
+    for name, abbr in STATE_NAME_TO_ABBR.items():
+        if re.search(rf"\b{re.escape(name)}\b", address):
+            return STATE_TO_POD.get(abbr)
     return None
 
 
