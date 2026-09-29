@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -70,6 +71,17 @@ def get_contractors(engine: sa.Engine) -> pd.DataFrame:
     start_background_reconciliation(engine)
     with engine.connect() as conn:
         return pd.read_sql(sa.text("SELECT * FROM contractors"), conn)
+
+
+# Revamp has a sign-in wall. Start the IC check during service startup so a
+# dispatcher does not have to open the roster before new workers reach OnFleet.
+if os.environ.get("DCC_REVAMP_UI") == "1" and os.environ.get("DATABASE_URL") and os.environ.get("ONFLEET_KEY"):
+    try:
+        from .onfleet_contractor_reconcile import start_background_reconciliation
+        _ic_sync_engine = sa.create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+        start_background_reconciliation(_ic_sync_engine)
+    except Exception as exc:
+        print(f"[onfleet/ic-sync] startup failed: {type(exc).__name__}: {exc}", flush=True)
 
 # ---------------------------------------------------------------------------
 # Routes (replaces the Saved/Accepted/Declined/Finalized/Archive tabs and
