@@ -61,6 +61,13 @@ except ImportError:
 def get_contractors(engine: sa.Engine) -> pd.DataFrame:
     """Returns the same shape as today's `ic_df`: one row per contractor,
     lowercase column names, ready to drop into st.session_state['ic_df']."""
+    # The active Postgres roster is refreshed by the app. Start its OnFleet
+    # reconciliation worker once per process when the roster is first read.
+    try:
+        from .onfleet_contractor_reconcile import start_background_reconciliation
+    except ImportError:
+        from onfleet_contractor_reconcile import start_background_reconciliation
+    start_background_reconciliation(engine)
     with engine.connect() as conn:
         return pd.read_sql(sa.text("SELECT * FROM contractors"), conn)
 

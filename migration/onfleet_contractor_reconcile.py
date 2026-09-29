@@ -7,17 +7,27 @@ existing worker. Phone and email conflicts are left for manual review.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import threading
 
 import sqlalchemy as sa
 
-from .contractor_sync import (
-    _clean_text, _norm_title, _onfleet_list_workers, _onfleet_request,
-    normalize_email, normalize_phone,
-)
+try:
+    from .contractor_sync import (
+        _clean_text, _norm_title, _onfleet_list_workers, _onfleet_request,
+        normalize_email, normalize_phone,
+    )
+except ImportError:
+    from contractor_sync import (
+        _clean_text, _norm_title, _onfleet_list_workers, _onfleet_request,
+        normalize_email, normalize_phone,
+    )
 
 ELIGIBLE = {"ACTIVE", "IN TRAINING", "NEED INSURANCE"}
 NEW_IC_CUTOFF = datetime(2026, 9, 25, tzinfo=timezone.utc)
 MAX_CREATES_PER_RUN = 20
+RECONCILE_INTERVAL_SECONDS = 300
+_background_lock = threading.Lock()
+_background_started = False
 
 
 def _worker_matches(contractor: dict, workers: list[dict]) -> tuple[str, dict | None]:
@@ -122,3 +132,41 @@ def create_missing_contractors(engine, *, selected_ids: set[int]) -> list[dict]:
             return results
         finally:
             lock_conn.execute(sa.text("SELECT pg_advisory_unlock(817496325)"))
+
+
+def reconcile_missing_once(engine) -> list[dict]:
+    """Sync one bounded batch; the next cycle picks up any remaining workers."""
+    preview = preview_new_contractors(engine)
+    missing_ids = {ic["id"] for ic in preview if ic["outcome"] == "missing"}
+    if not missing_ids:
+        return []
+    # Keep each pass bounded, even when a large intake lands at once.
+    return create_missing_contractors(engine, selected_ids=set(sorted(missing_ids)[:MAX_CREATES_PER_RUN]))
+
+
+def start_background_reconciliation(engine) -> None:
+    """Start once per app process; PostgreSQL locks serialize multiple replicas."""
+    global _background_started
+    if engine is None:
+        return
+    with _background_lock:
+        if _background_started:
+            return
+        _background_started = True
+
+    def run() -> None:
+        while True:
+            try:
+                results = reconcile_missing_once(engine)
+                if results:
+                    counts: dict[str, int] = {}
+                    for result in results:
+                        status = result["status"]
+                        counts[status] = counts.get(status, 0) + 1
+                    print(f"[onfleet/ic-sync] {counts}", flush=True)
+            except Exception as exc:
+                # Keep the app available and retry on the next cycle.
+                print(f"[onfleet/ic-sync] {type(exc).__name__}: {exc}", flush=True)
+            threading.Event().wait(RECONCILE_INTERVAL_SECONDS)
+
+    threading.Thread(target=run, name="onfleet-ic-sync", daemon=True).start()

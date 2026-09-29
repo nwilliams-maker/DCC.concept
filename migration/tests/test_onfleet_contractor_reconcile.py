@@ -3,7 +3,10 @@ from unittest.mock import patch
 
 import sqlalchemy as sa
 
-from migration.onfleet_contractor_reconcile import _worker_matches, preview_new_contractors
+from migration.onfleet_contractor_reconcile import (
+    MAX_CREATES_PER_RUN, _worker_matches, preview_new_contractors,
+    reconcile_missing_once,
+)
 
 
 def test_worker_matching_catches_conflicting_contacts_and_duplicate_names():
@@ -43,3 +46,14 @@ def test_preview_filters_status_and_requires_a_pod_team():
         request.return_value.json.return_value = [{"id": "team1", "name": "POD: Blue"}]
         outcomes = {r["name"]: r["outcome"] for r in preview_new_contractors(engine)}
     assert outcomes == {"New IC": "missing", "Inactive IC": "ineligible", "No Pod": "missing_pod_team"}
+
+
+def test_automatic_reconciliation_only_sends_a_bounded_missing_batch():
+    candidates = [{"id": n, "outcome": "missing"} for n in range(1, 24)]
+    candidates += [{"id": 24, "outcome": "already_present"},
+                   {"id": 25, "outcome": "conflict"}]
+    with patch("migration.onfleet_contractor_reconcile.preview_new_contractors", return_value=candidates), \
+         patch("migration.onfleet_contractor_reconcile.create_missing_contractors", return_value=[{"status": "created"}]) as create:
+        assert reconcile_missing_once(object()) == [{"status": "created"}]
+    selected = create.call_args.kwargs["selected_ids"]
+    assert selected == set(range(1, MAX_CREATES_PER_RUN + 1))
