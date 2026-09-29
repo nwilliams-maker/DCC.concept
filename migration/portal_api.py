@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import json
 import os
+import hmac
+from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from fastapi import FastAPI, Request
@@ -78,6 +80,104 @@ _ALLOWED_ORIGINS = [
 ]
 
 app = FastAPI(title="DCC portal API")
+
+
+@app.post("/internal/contractors/sync")
+async def sync_recent_contractors(request: Request):
+    """Receive the Monday IC/FA intake from DCC's existing hourly sync.
+
+    This writes Revamp's own Postgres roster, which its contractor picker and
+    bounded OnFleet worker reconciliation already read. The dedicated token
+    is required even when the endpoint is reachable from the public domain.
+    """
+    expected = (os.environ.get("REVAMP_CONTRACTOR_SYNC_TOKEN") or "").strip()
+    supplied = request.headers.get("Authorization", "")
+    if not expected or not hmac.compare_digest(supplied, f"Bearer {expected}"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    rows = body.get("contractors") if isinstance(body, dict) else None
+    if not isinstance(rows, list) or len(rows) > 100:
+        return JSONResponse({"error": "Expected at most 100 contractors"}, status_code=400)
+
+    from .contractor_sync import normalize_email, normalize_phone, _clean_text
+    cutoff = datetime(2026, 9, 24, 5, tzinfo=timezone.utc)
+    prepared = []
+    skipped = 0
+    for source in rows:
+        if not isinstance(source, dict):
+            skipped += 1
+            continue
+        try:
+            created = datetime.fromisoformat(str(source.get("monday_created_at") or "").replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+        except ValueError:
+            skipped += 1
+            continue
+        email = normalize_email(source.get("email"))
+        name = _clean_text(source.get("name"))
+        phone = normalize_phone(source.get("phone"))
+        location = _clean_text(source.get("location"))
+        status = (_clean_text(source.get("ic_list")) or "").upper()
+        if created < cutoff or not email or not name or (status in {"ACTIVE", "IN TRAINING", "NEED INSURANCE"} and (not phone or len(phone) != 10 or not location)):
+            skipped += 1
+            continue
+        prepared.append({
+            "monday_item_id": str(source.get("monday_item_id") or ""),
+            "monday_created_at": created,
+            "email": email, "name": name, "phone": "+1" + phone if phone and len(phone) == 10 else _clean_text(source.get("phone")),
+            "location": location, "ic_list": status or None,
+            "pod_color": _clean_text(source.get("pod_color")),
+            "digital_certified": bool(source.get("digital_certified")),
+            "unrestricted": bool(source.get("unrestricted")),
+        })
+
+    added = updated = conflicts = 0
+    with engine.begin() as conn:
+        conn.execute(sa.text("""
+            CREATE TABLE IF NOT EXISTS contractor_monday_intake (
+                email TEXT PRIMARY KEY,
+                monday_item_id TEXT NOT NULL,
+                monday_created_at TIMESTAMPTZ NOT NULL
+            )
+        """))
+        for row in prepared:
+            existing = conn.execute(sa.text("SELECT id, name, phone FROM contractors WHERE email = :email"), row).mappings().first()
+            if existing:
+                old_phone = normalize_phone(existing["phone"])
+                new_phone = normalize_phone(row["phone"])
+                if old_phone and new_phone and old_phone != new_phone and existing["name"].strip().casefold() != row["name"].casefold():
+                    conflicts += 1
+                    continue
+                conn.execute(sa.text("""
+                    UPDATE contractors SET name=:name, phone=:phone, location=:location,
+                      ic_list=:ic_list, pod_color=COALESCE(:pod_color, pod_color),
+                      digital_certified=:digital_certified, unrestricted=:unrestricted,
+                      lat=CASE WHEN location IS DISTINCT FROM :location THEN NULL ELSE lat END,
+                      lng=CASE WHEN location IS DISTINCT FROM :location THEN NULL ELSE lng END,
+                      updated_at=now()
+                    WHERE email=:email
+                """), row)
+                updated += 1
+            else:
+                conn.execute(sa.text("""
+                    INSERT INTO contractors (email, name, phone, location, ic_list, pod_color,
+                        digital_certified, unrestricted)
+                    VALUES (:email, :name, :phone, :location, :ic_list, :pod_color,
+                        :digital_certified, :unrestricted)
+                """), row)
+                added += 1
+            conn.execute(sa.text("""
+                INSERT INTO contractor_monday_intake (email, monday_item_id, monday_created_at)
+                VALUES (:email, :monday_item_id, :monday_created_at)
+                ON CONFLICT (email) DO UPDATE SET monday_item_id=EXCLUDED.monday_item_id,
+                    monday_created_at=EXCLUDED.monday_created_at
+            """), row)
+    return {"received": len(rows), "added": added, "updated": updated,
+            "skipped": skipped, "conflicts": conflicts}
 
 
 @app.on_event("startup")
