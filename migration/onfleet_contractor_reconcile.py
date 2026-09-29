@@ -23,11 +23,31 @@ except ImportError:
     )
 
 ELIGIBLE = {"ACTIVE", "IN TRAINING", "NEED INSURANCE"}
-NEW_IC_CUTOFF = datetime(2026, 9, 25, tzinfo=timezone.utc)
+NEW_IC_CUTOFF = datetime(2026, 9, 24, 5, tzinfo=timezone.utc)  # Sep 24 midnight Chicago
 MAX_CREATES_PER_RUN = 20
 RECONCILE_INTERVAL_SECONDS = 300
 _background_lock = threading.Lock()
 _background_started = False
+
+STATE_TO_POD = {
+    **{s: "Blue" for s in ("AL","AR","FL","IL","IA","LA","MI","MN","MS","MO","NC","SC","WI","OR","WA","NV")},
+    **{s: "Green" for s in ("CO","DC","GA","IN","KY","MD","NJ","OH","UT")},
+    **{s: "Orange" for s in ("AK","AZ","CA","HI","ID")},
+    **{s: "Purple" for s in ("KS","MT","NE","NM","ND","OK","SD","TN","TX","WY")},
+    **{s: "Red" for s in ("CT","DE","ME","MA","NH","NY","PA","RI","VT","VA","WV")},
+}
+
+
+def _pod_for(ic: dict) -> str | None:
+    pod = _clean_text(ic.get("pod_color"))
+    if pod:
+        return pod
+    import re
+    address = str(ic.get("location") or "").upper()
+    match = re.search(r"(?:,|\s)\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?|\s|,|$)", address)
+    if match:
+        return STATE_TO_POD.get(match.group(1))
+    return None
 
 
 def _worker_matches(contractor: dict, workers: list[dict]) -> tuple[str, dict | None]:
@@ -76,7 +96,7 @@ def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
     for row in rows:
         ic = dict(row)
         status = (_clean_text(ic.get("ic_list")) or "").upper()
-        pod = _clean_text(ic.get("pod_color"))
+        pod = _pod_for(ic)
         phone = normalize_phone(ic.get("phone"))
         email = normalize_email(ic.get("email"))
         if status not in ELIGIBLE:
@@ -87,8 +107,32 @@ def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
             outcome = "incomplete_contact"
         else:
             outcome, _ = _worker_matches(ic, workers)
-        result.append({**ic, "outcome": outcome, "team_id": team_ids.get(f"pod: {_norm_title(pod)}")})
+        result.append({**ic, "pod_color": pod, "outcome": outcome, "team_id": team_ids.get(f"pod: {_norm_title(pod)}")})
     return result
+
+
+def _create_worker_in_onfleet(ic: dict) -> dict:
+    phone = normalize_phone(ic["phone"])
+    address = _clean_text(ic.get("location"))
+    if not phone or len(phone) != 10 or not address:
+        raise ValueError("valid phone and address required for OnFleet routing")
+    destination = _onfleet_request("POST", "/destinations",
+                                   json={"address": {"unparsed": address}}).json()
+    destination_id = destination.get("id")
+    if not destination_id:
+        raise RuntimeError("OnFleet destination returned no id")
+    body = {
+        "name": _clean_text(ic["name"]), "phone": "+1" + phone,
+        "email": normalize_email(ic["email"]), "teams": [ic["team_id"]],
+        "addresses": {"routing": destination_id},
+        "metadata": [{"name": "Address", "type": "string", "value": address}],
+    }
+    worker = _onfleet_request("POST", "/workers", json=body).json()
+    worker_id = worker.get("id")
+    verified = _onfleet_request("GET", f"/workers/{worker_id}").json() if worker_id else {}
+    okay = (verified.get("id") == worker_id and normalize_phone(verified.get("phone")) == phone
+            and bool((verified.get("addresses") or {}).get("routing")))
+    return {"name": ic["name"], "status": "created" if okay else "verify_failed", "worker_id": worker_id}
 
 
 def create_missing_contractors(engine, *, selected_ids: set[int]) -> list[dict]:
@@ -112,22 +156,8 @@ def create_missing_contractors(engine, *, selected_ids: set[int]) -> list[dict]:
                 if outcome != "missing":
                     results.append({"name": ic["name"], "status": outcome})
                     continue
-                phone = normalize_phone(ic["phone"])
-                body = {
-                    "name": _clean_text(ic["name"]),
-                    "phone": "+1" + phone,
-                    "email": normalize_email(ic["email"]),
-                    "teams": [ic["team_id"]],
-                }
-                address = _clean_text(ic.get("location"))
-                if address:
-                    body["metadata"] = [{"name": "Address", "type": "string", "value": address}]
                 try:
-                    worker = _onfleet_request("POST", "/workers", json=body).json()
-                    worker_id = worker.get("id")
-                    verified = _onfleet_request("GET", f"/workers/{worker_id}").json() if worker_id else {}
-                    okay = verified.get("id") == worker_id and normalize_phone(verified.get("phone")) == phone
-                    results.append({"name": ic["name"], "status": "created" if okay else "verify_failed", "worker_id": worker_id})
+                    results.append(_create_worker_in_onfleet(ic))
                 except Exception as exc:
                     results.append({"name": ic["name"], "status": "failed", "reason": str(exc)})
             return results

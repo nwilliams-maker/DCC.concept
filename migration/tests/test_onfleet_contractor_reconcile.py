@@ -4,8 +4,8 @@ from unittest.mock import patch
 import sqlalchemy as sa
 
 from migration.onfleet_contractor_reconcile import (
-    MAX_CREATES_PER_RUN, _worker_matches, preview_new_contractors,
-    reconcile_missing_once,
+    MAX_CREATES_PER_RUN, NEW_IC_CUTOFF, _worker_matches,
+    _create_worker_in_onfleet, preview_new_contractors, reconcile_missing_once,
 )
 
 
@@ -47,7 +47,30 @@ def test_preview_filters_status_and_requires_a_pod_team():
         request.return_value.json.return_value = [{"id": "team1", "name": "POD: Blue"}]
         outcomes = {r["name"]: r["outcome"] for r in preview_new_contractors(engine)}
     assert outcomes == {"New IC": "missing", "Inactive IC": "ineligible",
-                        "No Pod": "missing_pod_team", "No Status": "ineligible"}
+                        "No Pod": "missing", "No Status": "ineligible"}
+    assert NEW_IC_CUTOFF == datetime(2026, 9, 24, 5, tzinfo=timezone.utc)
+
+
+def test_create_worker_uses_onfleet_routing_address_and_verifies_it():
+    ic = {"id": 1, "name": "New IC", "email": "new@example.com",
+          "phone": "3125551212", "location": "123 Main St, Chicago, IL",
+          "team_id": "blue", "outcome": "missing"}
+
+    def request(method, path, **kwargs):
+        class Response:
+            def json(self):
+                if path == "/destinations":
+                    return {"id": "destination-1"}
+                if method == "POST" and path == "/workers":
+                    assert kwargs["json"]["addresses"] == {"routing": "destination-1"}
+                    return {"id": "worker-1"}
+                return {"id": "worker-1", "phone": "+13125551212",
+                        "addresses": {"routing": "destination-1"}}
+        return Response()
+
+    with patch("migration.onfleet_contractor_reconcile._onfleet_request", side_effect=request):
+        result = _create_worker_in_onfleet(ic)
+    assert result["status"] == "created"
 
 
 def test_automatic_reconciliation_only_sends_a_bounded_missing_batch():
