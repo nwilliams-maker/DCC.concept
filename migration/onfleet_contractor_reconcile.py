@@ -58,14 +58,15 @@ def _worker_matches(contractor: dict, workers: list[dict]) -> tuple[str, dict | 
     return "missing", None
 
 
-def preview_new_contractors(engine) -> list[dict]:
+def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
+    where_clause = "WHERE created_at >= :cutoff" if cutoff is not None else ""
     with engine.connect() as conn:
-        rows = conn.execute(sa.text("""
+        rows = conn.execute(sa.text(f"""
             SELECT id, name, email, phone, location, pod_color, ic_list, created_at
             FROM contractors
-            WHERE created_at >= :cutoff
+            {where_clause}
             ORDER BY created_at DESC, id DESC
-        """), {"cutoff": NEW_IC_CUTOFF}).mappings().all()
+        """), {"cutoff": cutoff} if cutoff is not None else {}).mappings().all()
 
     workers = _onfleet_list_workers()
     teams_data = _onfleet_request("GET", "/teams").json()
@@ -145,6 +146,17 @@ def reconcile_missing_once(engine) -> list[dict]:
     return create_missing_contractors(engine, selected_ids=set(sorted(missing_ids)[:MAX_CREATES_PER_RUN]))
 
 
+def audit_full_roster_once(engine) -> None:
+    """Count older contractors omitted by the intake cutoff; never create."""
+    preview = preview_new_contractors(engine, cutoff=None)
+    outcomes: dict[str, int] = {}
+    for ic in preview:
+        outcome = ic["outcome"]
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    newest = max((str(ic["created_at"]) for ic in preview if ic.get("created_at")), default="none")
+    print(f"[onfleet/ic-sync] full_roster={len(preview)} outcomes={outcomes} newest_created_at={newest}", flush=True)
+
+
 def start_background_reconciliation(engine) -> None:
     """Start once per app process; PostgreSQL locks serialize multiple replicas."""
     global _background_started
@@ -157,6 +169,10 @@ def start_background_reconciliation(engine) -> None:
     print("[onfleet/ic-sync] worker started", flush=True)
 
     def run() -> None:
+        try:
+            audit_full_roster_once(engine)
+        except Exception as exc:
+            print(f"[onfleet/ic-sync] full roster audit failed: {type(exc).__name__}: {exc}", flush=True)
         while True:
             try:
                 results = reconcile_missing_once(engine)
