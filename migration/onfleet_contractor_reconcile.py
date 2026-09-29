@@ -138,6 +138,7 @@ def reconcile_missing_once(engine) -> list[dict]:
     """Sync one bounded batch; the next cycle picks up any remaining workers."""
     preview = preview_new_contractors(engine)
     missing_ids = {ic["id"] for ic in preview if ic["outcome"] == "missing"}
+    print(f"[onfleet/ic-sync] checked={len(preview)} missing={len(missing_ids)}", flush=True)
     if not missing_ids:
         return []
     # Keep each pass bounded, even when a large intake lands at once.
@@ -153,6 +154,7 @@ def start_background_reconciliation(engine) -> None:
         if _background_started:
             return
         _background_started = True
+    print("[onfleet/ic-sync] worker started", flush=True)
 
     def run() -> None:
         while True:
