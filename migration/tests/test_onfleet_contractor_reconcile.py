@@ -34,6 +34,7 @@ def test_preview_filters_status_and_requires_a_pod_team():
             (1, "New IC", "new@example.com", "5551112222", "Chicago, IL", "Blue", "ACTIVE"),
             (2, "Inactive IC", "inactive@example.com", "5551113333", "Chicago, IL", "Blue", "INACTIVE"),
             (3, "No Pod", "nopod@example.com", "5551114444", "Chicago, IL", None, "ACTIVE"),
+            (4, "No Status", "nostatus@example.com", "5551115555", "Chicago, IL", "Blue", None),
         ]
         for row in rows:
             conn.execute(sa.text("""
@@ -45,7 +46,8 @@ def test_preview_filters_status_and_requires_a_pod_team():
          patch("migration.onfleet_contractor_reconcile._onfleet_request") as request:
         request.return_value.json.return_value = [{"id": "team1", "name": "POD: Blue"}]
         outcomes = {r["name"]: r["outcome"] for r in preview_new_contractors(engine)}
-    assert outcomes == {"New IC": "missing", "Inactive IC": "ineligible", "No Pod": "missing_pod_team"}
+    assert outcomes == {"New IC": "missing", "Inactive IC": "ineligible",
+                        "No Pod": "missing_pod_team", "No Status": "ineligible"}
 
 
 def test_automatic_reconciliation_only_sends_a_bounded_missing_batch():
