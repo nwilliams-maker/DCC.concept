@@ -35,19 +35,30 @@ def test_preview_filters_status_and_requires_a_pod_team():
             (2, "Inactive IC", "inactive@example.com", "5551113333", "Chicago, IL", "Blue", "INACTIVE"),
             (3, "No Pod", "nopod@example.com", "5551114444", "Chicago, IL", None, "ACTIVE"),
             (4, "No Status", "nostatus@example.com", "5551115555", "Chicago, IL", "Blue", None),
+            (5, "Imported Sep24", "imported@example.com", "5551116666", "Chicago, IL", "Blue", "ACTIVE"),
         ]
         for row in rows:
             conn.execute(sa.text("""
                 INSERT INTO contractors VALUES (:id, :name, :email, :phone, :location,
                     :pod, :status, :created)
             """), dict(zip(("id", "name", "email", "phone", "location", "pod", "status", "created"),
-                            (*row, datetime(2026, 9, 29, tzinfo=timezone.utc)))))
+                            (*row, datetime(2026, 9, 23 if row[0] == 5 else 29, tzinfo=timezone.utc)))))
+        conn.execute(sa.text("""
+            CREATE TABLE contractor_monday_intake (
+                email TEXT PRIMARY KEY, monday_item_id TEXT, monday_created_at TIMESTAMP
+            )
+        """))
+        conn.execute(sa.text("""
+            INSERT INTO contractor_monday_intake VALUES
+            ('imported@example.com', 'monday-5', :created)
+        """), {"created": datetime(2026, 9, 24, 5, tzinfo=timezone.utc)})
     with patch("migration.onfleet_contractor_reconcile._onfleet_list_workers", return_value=[]), \
          patch("migration.onfleet_contractor_reconcile._onfleet_request") as request:
         request.return_value.json.return_value = [{"id": "team1", "name": "POD: Blue"}]
         outcomes = {r["name"]: r["outcome"] for r in preview_new_contractors(engine)}
     assert outcomes == {"New IC": "missing", "Inactive IC": "ineligible",
-                        "No Pod": "missing", "No Status": "ineligible"}
+                        "No Pod": "missing", "No Status": "ineligible",
+                        "Imported Sep24": "missing"}
     assert NEW_IC_CUTOFF == datetime(2026, 9, 24, 5, tzinfo=timezone.utc)
 
 

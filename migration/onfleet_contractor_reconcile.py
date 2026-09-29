@@ -79,13 +79,22 @@ def _worker_matches(contractor: dict, workers: list[dict]) -> tuple[str, dict | 
 
 
 def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
-    where_clause = "WHERE created_at >= :cutoff" if cutoff is not None else ""
+    where_clause = "WHERE c.created_at >= :cutoff OR mi.monday_created_at >= :cutoff" if cutoff is not None else ""
+    with engine.begin() as conn:
+        conn.execute(sa.text("""
+            CREATE TABLE IF NOT EXISTS contractor_monday_intake (
+                email TEXT PRIMARY KEY, monday_item_id TEXT NOT NULL,
+                monday_created_at TIMESTAMPTZ NOT NULL
+            )
+        """))
     with engine.connect() as conn:
         rows = conn.execute(sa.text(f"""
-            SELECT id, name, email, phone, location, pod_color, ic_list, created_at
-            FROM contractors
+            SELECT c.id, c.name, c.email, c.phone, c.location, c.pod_color,
+                   c.ic_list, c.created_at
+            FROM contractors c
+            LEFT JOIN contractor_monday_intake mi ON mi.email = c.email
             {where_clause}
-            ORDER BY created_at DESC, id DESC
+            ORDER BY c.created_at DESC, c.id DESC
         """), {"cutoff": cutoff} if cutoff is not None else {}).mappings().all()
 
     workers = _onfleet_list_workers()

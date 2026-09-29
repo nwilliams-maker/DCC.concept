@@ -126,6 +126,8 @@ async def sync_recent_contractors(request: Request):
             skipped += 1
             continue
         prepared.append({
+            "monday_item_id": str(source.get("monday_item_id") or ""),
+            "monday_created_at": created,
             "email": email, "name": name, "phone": "+1" + phone if phone and len(phone) == 10 else _clean_text(source.get("phone")),
             "location": location, "ic_list": status or None,
             "pod_color": _clean_text(source.get("pod_color")),
@@ -135,6 +137,13 @@ async def sync_recent_contractors(request: Request):
 
     added = updated = conflicts = 0
     with engine.begin() as conn:
+        conn.execute(sa.text("""
+            CREATE TABLE IF NOT EXISTS contractor_monday_intake (
+                email TEXT PRIMARY KEY,
+                monday_item_id TEXT NOT NULL,
+                monday_created_at TIMESTAMPTZ NOT NULL
+            )
+        """))
         for row in prepared:
             existing = conn.execute(sa.text("SELECT id, name, phone FROM contractors WHERE email = :email"), row).mappings().first()
             if existing:
@@ -161,6 +170,12 @@ async def sync_recent_contractors(request: Request):
                         :digital_certified, :unrestricted)
                 """), row)
                 added += 1
+            conn.execute(sa.text("""
+                INSERT INTO contractor_monday_intake (email, monday_item_id, monday_created_at)
+                VALUES (:email, :monday_item_id, :monday_created_at)
+                ON CONFLICT (email) DO UPDATE SET monday_item_id=EXCLUDED.monday_item_id,
+                    monday_created_at=EXCLUDED.monday_created_at
+            """), row)
     return {"received": len(rows), "added": added, "updated": updated,
             "skipped": skipped, "conflicts": conflicts}
 
