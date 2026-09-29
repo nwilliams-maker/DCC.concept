@@ -1113,6 +1113,47 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     selected_pods = accessible if pod_choice == "All my pods" else [pod_choice]
     with refresh_col:
         refresh_clicked = st.button("Check new tasks", key="revamp_sync", use_container_width=True)
+
+    # Contractor intake is separate from task extraction. The roster is in
+    # Postgres, while new OnFleet workers used to be created only by the
+    # retired Monday import. Keep this control in the Revamp app itself.
+    auth_user = st.session_state.get("_auth_user") or {}
+    if db_engine is not None and str(auth_user.get("pod", "")).upper() in ("ADMIN", "MANAGER", "ALL"):
+        with st.expander("New ICs in OnFleet"):
+            st.caption("Check recent eligible DCC contractors against OnFleet by phone and email.")
+            if st.button("Check new ICs", key="revamp_ic_check"):
+                try:
+                    from migration.onfleet_contractor_reconcile import preview_new_contractors
+                    st.session_state["revamp_ic_preview"] = preview_new_contractors(db_engine)
+                except Exception as exc:
+                    st.error(f"Contractor check failed: {exc}")
+            checked = st.session_state.get("revamp_ic_preview")
+            if checked is not None:
+                missing = [ic for ic in checked if ic["outcome"] == "missing"]
+                st.write(f"{len(checked)} recent ICs checked; {len(missing)} eligible workers missing from OnFleet.")
+                st.dataframe([
+                    {"Name": ic["name"], "Pod": ic["pod_color"],
+                     "Status": ic["ic_list"], "OnFleet": ic["outcome"],
+                     "Added": str(ic["created_at"])[:16]}
+                    for ic in checked
+                ], hide_index=True, use_container_width=True)
+                if missing:
+                    choices = {f"{ic['name']} · {ic['pod_color']} · #{ic['id']}": ic["id"] for ic in missing}
+                    selected = st.multiselect(
+                        "Add these missing workers", list(choices),
+                        default=list(choices), key="revamp_ic_selected",
+                    )
+                    if st.button("Add selected to OnFleet", key="revamp_ic_create",
+                                 disabled=not selected):
+                        from migration.onfleet_contractor_reconcile import create_missing_contractors
+                        try:
+                            with st.spinner("Matching and adding selected ICs..."):
+                                results = create_missing_contractors(db_engine,
+                                    selected_ids={choices[label] for label in selected})
+                            st.dataframe(results, hide_index=True, use_container_width=True)
+                            st.session_state.pop("revamp_ic_preview", None)
+                        except Exception as exc:
+                            st.error(f"Contractor sync stopped: {exc}")
     # A new signed-in session loads its selected pod automatically. Switching
     # pods loads only pods this session has not yet built; the refresh button
     # explicitly rebuilds the selected pod(s) against fresh Onfleet data.
