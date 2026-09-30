@@ -3135,29 +3135,38 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def _distance_to_route(ic_lat, ic_lng, route_data, fallback_center=None):
-    """Straight-line proximity from an IC home to the actual route.
-
-    Distance is the minimum haversine distance to any stop in the route, not
-    the cluster anchor/center. This is the value used for contractor ordering,
-    the 100-mile eligibility cap, and Ready/Flagged distance checks.
-    """
-    distances = []
+def _route_center(route_data, fallback_center=None):
+    """Geographic center of the actual unique route stops."""
+    pts = []
+    seen = set()
     for task in route_data or []:
-        try:
-            lat = task.get('lat')
-            lng = task.get('lon')
-            if lat is not None and lng is not None:
-                d = haversine(ic_lat, ic_lng, lat, lng)
-                if math.isfinite(d):
-                    distances.append(d)
-        except Exception:
+        key = str(task.get('full', '') or '')
+        if key in seen:
             continue
-    if distances:
-        return min(distances)
+        seen.add(key)
+        try:
+            lat = float(task.get('lat'))
+            lng = float(task.get('lon'))
+            if math.isfinite(lat) and math.isfinite(lng):
+                pts.append((lat, lng))
+        except (TypeError, ValueError):
+            continue
+    if pts:
+        return (
+            sum(p[0] for p in pts) / len(pts),
+            sum(p[1] for p in pts) / len(pts),
+        )
     if fallback_center and len(fallback_center) >= 2:
-        return haversine(ic_lat, ic_lng, fallback_center[0], fallback_center[1])
-    return float('inf')
+        return float(fallback_center[0]), float(fallback_center[1])
+    return None
+
+
+def _distance_to_route_center(ic_lat, ic_lng, route_data, fallback_center=None):
+    """Straight-line distance from an IC home to the true route center."""
+    center = _route_center(route_data, fallback_center)
+    if not center:
+        return float('inf')
+    return haversine(ic_lat, ic_lng, center[0], center[1])
 
 
 def _ic_home_loc(ic, fallback=None):
@@ -4422,7 +4431,7 @@ def process_digital_pool(master_bar=None):
         has_ic = False
         ic_dist = 0
         if not v_ics_base.empty:
-            dists = [_distance_to_route(lat, lng, group, [anc['lat'], anc['lon']]) for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])]
+            dists = [_distance_to_route_center(lat, lng, group, [anc['lat'], anc['lon']]) for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])]
             valid_ics = v_ics_base.copy()
             valid_ics['d'] = dists
             valid_ics = valid_ics[valid_ics['d'] <= 100]
@@ -4947,7 +4956,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 if not v_ics_base.empty:
                     # 🚀 OPTIMIZATION: Use list comprehension instead of pandas .apply(). It is ~100x faster.
                     dists = [
-                        _distance_to_route(lat, lng, group, [anc['lat'], anc['lon']])
+                        _distance_to_route_center(lat, lng, group, [anc['lat'], anc['lon']])
                         for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])
                     ]
                 
@@ -5958,7 +5967,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 v_ics['_resolved_lat'] = _resolved.apply(lambda p: p[0] if p else None)
                 v_ics['_resolved_lng'] = _resolved.apply(lambda p: p[1] if p else None)
                 v_ics['d'] = v_ics.apply(
-                    lambda x: _distance_to_route(
+                    lambda x: _distance_to_route_center(
                         x.get('_resolved_lat'), x.get('_resolved_lng'),
                         cluster.get('data', []), cluster.get('center')
                     ),
@@ -9381,7 +9390,7 @@ def run_pod_tab(pod_name):
                             v_ics = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy()
                             if not v_ics.empty:
                                 v_ics['d'] = v_ics.apply(
-                                    lambda x: _distance_to_route(
+                                    lambda x: _distance_to_route_center(
                                         x[lat_col], x[lng_col], c.get('data', []), c.get('center')
                                     ),
                                     axis=1
