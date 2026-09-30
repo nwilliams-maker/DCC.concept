@@ -3800,6 +3800,65 @@ def _mapbox_geocode(address, cache=None):
     return None
 
 
+def _routing_ic_pool(ic_df):
+    """Eligible contractor pool for Ready/Flagged classification.
+
+    Uses stored lat/lng when present; otherwise geocodes the contractor's
+    current location text with the same cached Mapbox helper used by the
+    contractor dropdown. This prevents valid nearby ICs from disappearing
+    from classification just because historical coordinates are blank.
+    """
+    if ic_df is None or ic_df.empty:
+        return pd.DataFrame(), None, None
+
+    lat_col = next((col for col in ic_df.columns if 'lat' in str(col).lower()), 'lat')
+    lng_col = next((col for col in ic_df.columns if 'lng' in str(col).lower() or 'lon' in str(col).lower()), 'lng')
+    if lat_col not in ic_df.columns:
+        ic_df = ic_df.copy()
+        ic_df[lat_col] = None
+    if lng_col not in ic_df.columns:
+        ic_df = ic_df.copy()
+        ic_df[lng_col] = None
+
+    pool = ic_df[~ic_df.astype(str).apply(
+        lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1
+    )].copy()
+
+    elig_col = next((col for col in pool.columns if str(col).strip().lower() in ('ic list','ic_list')), None)
+    if elig_col:
+        elig = pool[elig_col].astype(str).str.strip().str.upper()
+        pool = pool[elig.isin(['ACTIVE', 'IN TRAINING', 'NEED INSURANCE'])].copy()
+
+    loc_col = next((col for col in pool.columns if str(col).strip().lower() == 'location'), None)
+
+    def _resolve(row):
+        try:
+            lat = row.get(lat_col)
+            lng = row.get(lng_col)
+            if pd.notna(lat) and pd.notna(lng):
+                return float(lat), float(lng)
+        except Exception:
+            pass
+        if loc_col:
+            loc = str(row.get(loc_col, '') or '').strip()
+            if loc:
+                try:
+                    coords = _mapbox_geocode(loc)
+                    if coords:
+                        return float(coords[1]), float(coords[0])
+                except Exception as exc:
+                    _log_err("routing_ic_pool/geocode", exc)
+        return None, None
+
+    if not pool.empty:
+        resolved = pool.apply(_resolve, axis=1)
+        pool[lat_col] = resolved.apply(lambda p: p[0] if p else None)
+        pool[lng_col] = resolved.apply(lambda p: p[1] if p else None)
+        pool = pool.dropna(subset=[lat_col, lng_col]).copy()
+
+    return pool, lat_col, lng_col
+
+
 @st.cache_resource(show_spinner=False)
 def _gmaps_route_cache():
     """Process-wide route cache: (home, waypoints_tuple) → (mi, hrs, str, order, ts).
@@ -4303,9 +4362,7 @@ def process_digital_pool(master_bar=None):
     
     # 3. Route ONLY the Digital Tasks
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
-    lat_col = next((col for col in ic_df.columns if 'lat' in str(col).lower()), 'lat')
-    lng_col = next((col for col in ic_df.columns if 'lng' in str(col).lower()), 'lng')
-    v_ics_base = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy() if (lat_col in ic_df.columns and lng_col in ic_df.columns) else pd.DataFrame()
+    v_ics_base, lat_col, lng_col = _routing_ic_pool(ic_df)
 
     clusters = []
     route_radius = 20 # Strict 20-mile radius for digital (May 18 2026 — was 25)
@@ -4531,11 +4588,15 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             _lat_col = next((c for c in _ic_df_peek.columns if 'lat' in str(c).lower()), None)
             _lng_col = next((c for c in _ic_df_peek.columns if 'lng' in str(c).lower()
                              or 'lon' in str(c).lower()), None)
+            _loc_col = next((c for c in _ic_df_peek.columns if str(c).strip().lower() == 'location'), None)
             if _lat_col is not None and _lng_col is not None:
-                _ic_geo_sig = hash(tuple(
-                    zip(_ic_df_peek[_lat_col].astype(str),
-                        _ic_df_peek[_lng_col].astype(str))
-                ))
+                _sig_cols = [
+                    _ic_df_peek[_lat_col].astype(str),
+                    _ic_df_peek[_lng_col].astype(str),
+                ]
+                if _loc_col is not None:
+                    _sig_cols.append(_ic_df_peek[_loc_col].astype(str))
+                _ic_geo_sig = hash(tuple(zip(*_sig_cols)))
             else:
                 _ic_geo_sig = len(_ic_df_peek)
         except Exception:
@@ -4777,14 +4838,9 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             total_pool = len(pool)
             ic_df = (_warm_load_ic_df() if warm_only else st.session_state.get('ic_df', pd.DataFrame()))
         
-            # 🌟 CRITICAL FIX: Safe extraction using standardized headers
-            lat_col = next((col for col in ic_df.columns if 'lat' in str(col).lower()), 'lat')
-            lng_col = next((col for col in ic_df.columns if 'lng' in str(col).lower()), 'lng')
-        
-            if lat_col in ic_df.columns and lng_col in ic_df.columns:
-                v_ics_base = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy()
-            else:
-                v_ics_base = pd.DataFrame()
+            # Use the same eligible-contractor + coordinate recovery logic as
+            # the contractor dropdown so Ready/Flagged sees the same IC pool.
+            v_ics_base, lat_col, lng_col = _routing_ic_pool(ic_df)
 
             while pool:
                 # Routing progress calculation
