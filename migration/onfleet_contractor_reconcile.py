@@ -25,10 +25,6 @@ except ImportError:
 ELIGIBLE = {"ACTIVE", "IN TRAINING", "NEED INSURANCE"}
 NEW_IC_CUTOFF = datetime(2026, 9, 24, 5, tzinfo=timezone.utc)  # Sep 24 midnight Chicago
 MAX_CREATES_PER_RUN = 20
-# Team used when a new IC's pod can't be read from their address. Blank
-# (the default) keeps the old behavior: log it for review, don't create.
-import os as _os
-DEFAULT_POD = (_os.environ.get("ONFLEET_DEFAULT_POD") or "").strip()
 RECONCILE_INTERVAL_SECONDS = 300
 _background_lock = threading.Lock()
 _background_started = False
@@ -150,12 +146,8 @@ def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
             if outcome == "conflict":
                 reason = "name/email/phone conflicts with existing OnFleet worker"
             elif outcome == "missing":
+                # A new worker must go on their own pod's team; never guess one.
                 team_id = team_ids.get(f"pod: {_norm_title(pod)}") if pod else None
-                if not team_id:
-                    team_id = team_ids.get(f"pod: {_norm_title(DEFAULT_POD)}") if DEFAULT_POD else None
-                    if team_id:
-                        reason = f"pod={pod or 'blank'} -> default POD: {DEFAULT_POD}"
-                        pod = DEFAULT_POD
                 if not team_id:
                     outcome = "missing_pod_team"
                     reason = f"pod={pod or 'blank'} location={_clean_text(ic.get('location')) or 'blank'}"
