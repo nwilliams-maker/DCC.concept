@@ -10849,7 +10849,8 @@ if os.environ.get("DCC_REVAMP_UI") == "1":
                          "is_dispatch_associate": _is_dispatch_associate,
                      },
                      merge_same_wo_ghosts=_merge_same_wo_ghosts,
-                     cluster_store=_pod_cluster_store)
+                     cluster_store=_pod_cluster_store,
+                     mapbox_geocode=_mapbox_geocode)
     st.stop()
 
 # Updated Main Tabs
