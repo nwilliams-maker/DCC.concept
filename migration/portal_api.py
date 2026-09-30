@@ -233,8 +233,6 @@ async def sync_recent_contractors(request: Request):
                     UPDATE contractors SET name=:name, phone=:phone, location=:location,
                       ic_list=:ic_list, pod_color=COALESCE(:pod_color, pod_color),
                       digital_certified=:digital_certified, unrestricted=:unrestricted,
-                      lat=CASE WHEN location IS DISTINCT FROM :location THEN NULL ELSE lat END,
-                      lng=CASE WHEN location IS DISTINCT FROM :location THEN NULL ELSE lng END,
                       updated_at=now()
                     WHERE email=:email
                 """), row)
