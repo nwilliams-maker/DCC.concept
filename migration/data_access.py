@@ -79,6 +79,10 @@ def _mirror_route_to_peer(engine: sa.Engine, wo: str) -> None:
             value = out.get(key)
             if hasattr(value, "isoformat"):
                 out[key] = value.isoformat()
+        # Normalize Decimal/date values before crossing the project boundary.
+        # requests' default JSON encoder cannot serialize Decimal (comp), which
+        # previously caused accepted-route mirrors to fail silently.
+        out = json.loads(json.dumps(out, default=str))
         resp = requests.post(
             f"{ROUTE_SYNC_URL}/internal/routes/sync",
             headers={"Authorization": f"Bearer {ROUTE_SYNC_TOKEN}"},
@@ -118,6 +122,17 @@ if os.environ.get("DCC_REVAMP_UI") == "1" and os.environ.get("DATABASE_URL") and
         start_background_reconciliation(_ic_sync_engine)
     except Exception as exc:
         print(f"[onfleet/ic-sync] startup failed: {type(exc).__name__}: {exc}", flush=True)
+
+# Accepted routes must also be reconciled with real OnFleet Route Plans.
+# The database status write intentionally survives OnFleet failures, so this
+# background check repairs any missing plan idempotently.
+if os.environ.get("DATABASE_URL") and os.environ.get("ONFLEET_KEY"):
+    try:
+        from .onfleet_route_reconcile import start_background_reconciliation as _start_route_reconciliation
+        _route_sync_engine = sa.create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+        _start_route_reconciliation(_route_sync_engine)
+    except Exception as exc:
+        print(f"[onfleet/route-reconcile] startup failed: {type(exc).__name__}: {exc}", flush=True)
 
 # ---------------------------------------------------------------------------
 # Routes (replaces the Saved/Accepted/Declined/Finalized/Archive tabs and
