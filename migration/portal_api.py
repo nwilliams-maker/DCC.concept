@@ -59,6 +59,7 @@ except ImportError:
     import data_access as da
 
 DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
+ROUTE_SYNC_TOKEN = (os.environ.get("ROUTE_SYNC_TOKEN") or "").strip()
 if not DATABASE_URL:
     raise RuntimeError(
         "DATABASE_URL must be set -- this must point at the SAME Postgres "
@@ -80,6 +81,80 @@ _ALLOWED_ORIGINS = [
 ]
 
 app = FastAPI(title="DCC portal API")
+
+
+@app.post("/internal/routes/sync")
+async def internal_route_sync(request: Request):
+    """Authenticated cross-project route-state replication endpoint."""
+    if not ROUTE_SYNC_TOKEN:
+        return JSONResponse({"error": "Route sync not configured."}, status_code=503)
+    auth = request.headers.get("authorization", "")
+    if not hmac.compare_digest(auth, f"Bearer {ROUTE_SYNC_TOKEN}"):
+        return JSONResponse({"error": "Unauthorized."}, status_code=401)
+    body = await request.json()
+    route = body.get("route") if isinstance(body, dict) else None
+    if not isinstance(route, dict):
+        return JSONResponse({"error": "Missing route."}, status_code=400)
+    wo = str(route.get("wo") or "").strip()
+    status = str(route.get("status") or "").strip().lower()
+    if not wo or status not in {"sent", "accepted", "declined", "finalized", "archived"}:
+        return JSONResponse({"error": "Invalid route."}, status_code=400)
+
+    payload = route.get("payload")
+    locs = route.get("locs")
+    stop_data = route.get("stop_data")
+    if not isinstance(payload, str):
+        payload = json.dumps(payload or {})
+    if locs is not None and not isinstance(locs, str):
+        locs = json.dumps(locs)
+    if stop_data is not None and not isinstance(stop_data, str):
+        stop_data = json.dumps(stop_data)
+
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                """
+                INSERT INTO routes
+                    (wo, contractor_id, contractor_name, status, comp, due, locs,
+                     stop_data, cluster_hash, payload, created_at, updated_at)
+                VALUES
+                    (:wo,
+                     (SELECT id FROM contractors
+                      WHERE lower(email) = lower(COALESCE(CAST(:email AS text), ''))
+                      LIMIT 1),
+                     :contractor_name, CAST(:status AS route_status), :comp, :due,
+                     CAST(:locs AS jsonb), CAST(:stop_data AS jsonb), :cluster_hash,
+                     CAST(:payload AS jsonb),
+                     COALESCE(CAST(:created_at AS timestamptz), now()),
+                     COALESCE(CAST(:updated_at AS timestamptz), now()))
+                ON CONFLICT (wo) DO UPDATE SET
+                    contractor_name = EXCLUDED.contractor_name,
+                    status = EXCLUDED.status,
+                    comp = EXCLUDED.comp,
+                    due = EXCLUDED.due,
+                    locs = EXCLUDED.locs,
+                    stop_data = EXCLUDED.stop_data,
+                    cluster_hash = EXCLUDED.cluster_hash,
+                    payload = EXCLUDED.payload,
+                    updated_at = EXCLUDED.updated_at
+                """
+            ),
+            {
+                "wo": wo,
+                "email": (json.loads(payload).get("ice") if payload else None),
+                "contractor_name": route.get("contractor_name"),
+                "status": status,
+                "comp": route.get("comp"),
+                "due": route.get("due"),
+                "locs": locs,
+                "stop_data": stop_data,
+                "cluster_hash": route.get("cluster_hash"),
+                "payload": payload,
+                "created_at": route.get("created_at"),
+                "updated_at": route.get("updated_at"),
+            },
+        )
+    return {"success": True, "wo": wo, "status": status}
 
 
 @app.post("/internal/contractors/sync")

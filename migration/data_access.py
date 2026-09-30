@@ -45,6 +45,7 @@ from typing import Any
 
 import pandas as pd
 import sqlalchemy as sa
+import requests
 
 # tactical_workspace_master_rw.py imports this as `from migration import
 # data_access`, while migration/tests/test_migration.py imports it as a bare
@@ -53,6 +54,41 @@ try:
     from . import fn_side_effects as _fx
 except ImportError:
     import fn_side_effects as _fx
+
+ROUTE_SYNC_URL = (os.environ.get("ROUTE_SYNC_URL") or "").rstrip("/")
+ROUTE_SYNC_TOKEN = (os.environ.get("ROUTE_SYNC_TOKEN") or "").strip()
+
+def _mirror_route_to_peer(engine: sa.Engine, wo: str) -> None:
+    """Best-effort mirror of one route row to the peer DCC/Revamp database."""
+    if not ROUTE_SYNC_URL or not ROUTE_SYNC_TOKEN or not wo:
+        return
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                sa.text(
+                    "SELECT wo, contractor_name, status::text AS status, comp, due, locs, "
+                    "stop_data, cluster_hash, payload, created_at, updated_at "
+                    "FROM routes WHERE wo = :wo"
+                ),
+                {"wo": wo},
+            ).mappings().first()
+        if not row:
+            return
+        out = dict(row)
+        for key in ("created_at", "updated_at", "due"):
+            value = out.get(key)
+            if hasattr(value, "isoformat"):
+                out[key] = value.isoformat()
+        resp = requests.post(
+            f"{ROUTE_SYNC_URL}/internal/routes/sync",
+            headers={"Authorization": f"Bearer {ROUTE_SYNC_TOKEN}"},
+            json={"route": out},
+            timeout=10,
+        )
+        if resp.status_code >= 300:
+            print(f"[route-sync] {wo} peer HTTP {resp.status_code}", flush=True)
+    except Exception as exc:
+        print(f"[route-sync] {wo} mirror failed: {exc}", flush=True)
 
 # ---------------------------------------------------------------------------
 # Contractors (replaces load_ic_database / _warm_load_ic_df / the inline
@@ -138,6 +174,7 @@ def save_route(engine: sa.Engine, wo: str, contractor_name: str, payload: dict[s
             },
         )
         _log_event(conn, wo, "saveRoute", payload)
+    _mirror_route_to_peer(engine, wo)
 
 def _set_route_status(engine_or_conn, wo: str, status: str, action: str, event_payload: dict[str, Any] | None = None) -> None:
     def _do(conn):
@@ -150,6 +187,7 @@ def _set_route_status(engine_or_conn, wo: str, status: str, action: str, event_p
     if isinstance(engine_or_conn, sa.Engine):
         with engine_or_conn.begin() as conn:
             _do(conn)
+        _mirror_route_to_peer(engine_or_conn, wo)
     else:
         _do(engine_or_conn)
 
@@ -507,6 +545,7 @@ def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | No
         )
         _log_event(conn, new_wo, "markFNAssigned", {"work_order": work_order, "provider": provider, "side_effects": side_effects})
 
+    _mirror_route_to_peer(engine, new_wo)
     return {"success": True, "wo": new_wo, "partial": side_effects.get("partial", False), "partialReason": side_effects.get("partialReason", "")}
 
 def mirror_mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | None = None) -> dict[str, Any]:
