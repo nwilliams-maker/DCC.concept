@@ -25,6 +25,10 @@ except ImportError:
 ELIGIBLE = {"ACTIVE", "IN TRAINING", "NEED INSURANCE"}
 NEW_IC_CUTOFF = datetime(2026, 9, 24, 5, tzinfo=timezone.utc)  # Sep 24 midnight Chicago
 MAX_CREATES_PER_RUN = 20
+# Team used when a new IC's pod can't be read from their address. Blank
+# (the default) keeps the old behavior: log it for review, don't create.
+import os as _os
+DEFAULT_POD = (_os.environ.get("ONFLEET_DEFAULT_POD") or "").strip()
 RECONCILE_INTERVAL_SECONDS = 300
 _background_lock = threading.Lock()
 _background_started = False
@@ -129,9 +133,6 @@ def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
         if status not in ELIGIBLE:
             outcome = "ineligible"
             reason = f"ic_list={status or 'blank'}"
-        elif not pod or not team_ids.get(f"pod: {_norm_title(pod)}"):
-            outcome = "missing_pod_team"
-            reason = f"pod={pod or 'blank'}"
         elif not phone or len(phone) != 10 or not email or not _clean_text(ic.get("name")):
             outcome = "incomplete_contact"
             missing = []
@@ -143,9 +144,21 @@ def preview_new_contractors(engine, *, cutoff=NEW_IC_CUTOFF) -> list[dict]:
                 missing.append("email")
             reason = "missing_or_invalid=" + ",".join(missing)
         else:
+            # Check OnFleet first: an IC who is already a worker doesn't need a
+            # pod/team, so a blank or unreadable pod must not hide that.
             outcome, matched_worker = _worker_matches(ic, workers)
             if outcome == "conflict":
                 reason = "name/email/phone conflicts with existing OnFleet worker"
+            elif outcome == "missing":
+                team_id = team_ids.get(f"pod: {_norm_title(pod)}") if pod else None
+                if not team_id:
+                    team_id = team_ids.get(f"pod: {_norm_title(DEFAULT_POD)}") if DEFAULT_POD else None
+                    if team_id:
+                        reason = f"pod={pod or 'blank'} -> default POD: {DEFAULT_POD}"
+                        pod = DEFAULT_POD
+                if not team_id:
+                    outcome = "missing_pod_team"
+                    reason = f"pod={pod or 'blank'} location={_clean_text(ic.get('location')) or 'blank'}"
         result.append({
             **ic,
             "pod_color": pod,
@@ -239,6 +252,17 @@ def audit_full_roster_once(engine) -> None:
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
     newest = max((str(ic["created_at"]) for ic in preview if ic.get("created_at")), default="none")
     print(f"[onfleet/ic-sync] full_roster={len(preview)} outcomes={outcomes} newest_created_at={newest}", flush=True)
+    # Name every eligible IC who isn't cleanly in OnFleet, so they can be
+    # reviewed/added from the logs (counts alone don't say who).
+    for ic in preview:
+        if ic["outcome"] in ("missing", "missing_pod_team", "conflict", "incomplete_contact"):
+            print(
+                f"[onfleet/ic-sync/roster] name={ic.get('name') or '(blank)'} outcome={ic['outcome']} "
+                f"phone={normalize_phone(ic.get('phone')) or 'blank'} pod={ic.get('pod_color') or 'blank'} "
+                f"location={_clean_text(ic.get('location')) or 'blank'}"
+                + (f" reason={ic['reason']}" if ic.get("reason") else ""),
+                flush=True,
+            )
 
 
 def start_background_reconciliation(engine) -> None:
