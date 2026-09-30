@@ -174,8 +174,8 @@ async def sync_recent_contractors(request: Request):
     except Exception:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     rows = body.get("contractors") if isinstance(body, dict) else None
-    if not isinstance(rows, list) or len(rows) > 100:
-        return JSONResponse({"error": "Expected at most 100 contractors"}, status_code=400)
+    if not isinstance(rows, list) or len(rows) > 5000:
+        return JSONResponse({"error": "Expected at most 5000 contractors"}, status_code=400)
 
     from .contractor_sync import normalize_email, normalize_phone, _clean_text
     prepared = []
@@ -196,7 +196,10 @@ async def sync_recent_contractors(request: Request):
         phone = normalize_phone(source.get("phone"))
         location = _clean_text(source.get("location"))
         status = (_clean_text(source.get("ic_list")) or "").upper()
-        if not email or not name or (status in {"ACTIVE", "IN TRAINING", "NEED INSURANCE"} and (not phone or len(phone) != 10 or not location)):
+        # Store the contractor record even when phone/location is incomplete.
+        # Those fields affect route eligibility / OnFleet creation, but should
+        # never prevent a valid Monday IC/FA row from existing in Postgres.
+        if not email or not name:
             skipped += 1
             continue
         prepared.append({
