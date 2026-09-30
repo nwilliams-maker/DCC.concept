@@ -9312,7 +9312,7 @@ def run_pod_tab(pod_name):
                     remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                    with st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"{badges} 🟢 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                         render_dispatch(i, c, pod_name)
                     
         with t_flagged:
@@ -9334,7 +9334,7 @@ def run_pod_tab(pod_name):
                     remov_tag = f" 🗑️ CVS Removal — {c.get('remov_count', 0)} Units" if c.get('is_removal') else ""
                     _BOOSTED_BADGES = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
-                    with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                    with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                         render_dispatch(i+1000, c, pod_name)
 
         with t_fn:
@@ -9833,7 +9833,7 @@ def run_pod_tab(pod_name):
                     if _dig_ins_n > 0: _dig_type_parts.append(f"🔧 {_dig_ins_n} Ins/Rem")
                     if _dig_svc_n > 0: _dig_type_parts.append(f"⚙️ {_dig_svc_n} Service")
                     _dig_type_pill = f" | {' · '.join(_dig_type_parts)}" if _dig_type_parts else ""
-                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_type_pill}{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                    with st.expander(f"🔌{c['city']}, {c['state']} | {c['stops']} Stops{_dig_type_pill}{_dig_boosted_pill}{_dig_esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                         render_dispatch(i+7000, c, pod_name)
                     
     with col_right:
@@ -11292,7 +11292,7 @@ with tabs[6]:
                         _GD_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gd_boost = f" | {next((v for k,v in _GD_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GD_BOOSTED) else ""
                         _gd_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(f"{get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gd_boost}{_gd_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                             render_dispatch(i+8000, c, "Global_Digital")
                             
             with t_flagged:
@@ -11307,7 +11307,7 @@ with tabs[6]:
                         _GDF_BOOSTED = {'local plus': '⭐ LOCAL PLUS', 'boosted': '🔥 BOOSTED'}
                         _gdf_boost = f" | {next((v for k,v in _GDF_BOOSTED.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _GDF_BOOSTED) else ""
                         _gdf_esc = f" | ❗ {c.get('esc_count', 0)}" if c.get('esc_count', 0) > 0 else ""
-                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
+                        with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                             render_dispatch(i+9000, c, "Global_Digital")
                             
             with t_fn:
