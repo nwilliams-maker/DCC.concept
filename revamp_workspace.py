@@ -153,8 +153,12 @@ def _route_status(route, sent_db, nearest_miles=None, pod=None):
     calculated_rate = 0.0
     if pod and not st.session_state.get(f"_route_fa_{pod}_{route_hash}", False):
         calculated_rate = float(st.session_state.get(f"_auto_rate_{pod}_{route_hash}", 0) or 0)
-    if (route.get("status") == "Flagged"
-            or (nearest_miles is not None and nearest_miles > 50)
+    # Re-evaluate the queue from CURRENT contractor proximity/rate.
+    # Do not let a stale pre-sync route["status"] keep a route Flagged after
+    # the contractor pool has changed. The screenshot case was 1.4 mi in the
+    # detail dropdown while the list still showed 138.3 mi + Flagged.
+    if ((nearest_miles is None)
+            or nearest_miles > 60
             or calculated_rate >= HIGH_RATE_FLAG_THRESHOLD):
         return "Flagged"
     return "Ready"
@@ -195,11 +199,17 @@ def _searchable(route):
     return " ".join(fields).casefold()
 
 
-def _eligible_ics(ic_df):
+def _eligible_ics(ic_df, mapbox_geocode=None):
+    """Same eligible contractor pool used by the route detail dropdown.
+
+    Stored lat/lng is preferred. If coordinates are missing, resolve the
+    contractor's current location text through the shared cached geocoder
+    instead of silently dropping the contractor.
+    """
     if ic_df is None or ic_df.empty:
         return []
     columns = {str(c).strip().lower(): c for c in ic_df.columns}
-    if not all(k in columns for k in ("lat", "lng", "ic list")):
+    if "ic list" not in columns:
         return []
     result = []
     for _, row in ic_df.iterrows():
@@ -207,20 +217,61 @@ def _eligible_ics(ic_df):
             "ACTIVE", "IN TRAINING", "NEED INSURANCE"
         ):
             continue
-        try:
-            latitude = float(row[columns["lat"]])
-            longitude = float(row[columns["lng"]])
-            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
-                continue
-        except (ValueError, TypeError):
+
+        latitude = longitude = None
+        if "lat" in columns and "lng" in columns:
+            try:
+                latitude = float(row[columns["lat"]])
+                longitude = float(row[columns["lng"]])
+                if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                    latitude = longitude = None
+            except (ValueError, TypeError):
+                latitude = longitude = None
+
+        if (latitude is None or longitude is None) and mapbox_geocode and "location" in columns:
+            location = str(row.get(columns["location"], "") or "").strip()
+            if location and location.lower() not in ("nan", "none"):
+                try:
+                    coords = mapbox_geocode(location)
+                    if coords:
+                        longitude, latitude = float(coords[0]), float(coords[1])
+                except Exception:
+                    latitude = longitude = None
+
+        if latitude is None or longitude is None:
             continue
         result.append((str(row.get(columns.get("name"), "Unknown")), latitude, longitude))
     return result
 
 
-def _nearest_ic(route, eligible_ics, haversine):
+def _route_center(route):
+    """True geographic center of the route's unique live stops."""
+    points = []
+    seen = set()
+    for task in route.get("data", []) or []:
+        key = str(task.get("full", "") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            lat = float(task.get("lat"))
+            lng = float(task.get("lon"))
+            if -90 <= lat <= 90 and -180 <= lng <= 180:
+                points.append((lat, lng))
+        except (ValueError, TypeError):
+            continue
+    if points:
+        return (
+            sum(lat for lat, _ in points) / len(points),
+            sum(lng for _, lng in points) / len(points),
+        )
     center = route.get("center")
-    if not center or len(center) != 2:
+    return center if center and len(center) == 2 else None
+
+
+def _nearest_ic(route, eligible_ics, haversine):
+    center = _route_center(route)
+    if not center:
         return None
     distances = []
     for name, latitude, longitude in eligible_ics:
@@ -809,7 +860,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      haversine, db_engine, assign_tasks_to_fn_team,
                      fetch_sent_records_from_sheet, default_due_days=14,
                      fn_ghost_to_cluster=None, saved_route_helpers=None,
-                     merge_same_wo_ghosts=None, cluster_store=None):
+                     merge_same_wo_ghosts=None, cluster_store=None,
+                     mapbox_geocode=None):
     """Render one selected route while retaining the existing dispatch actions."""
     st.markdown("""
     <style>
@@ -1226,7 +1278,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if missing:
         st.caption("Could not load: " + ", ".join(missing) + ". Click Check new tasks to retry.")
 
-    eligible_ics = _eligible_ics(st.session_state.get("ic_df"))
+    eligible_ics = _eligible_ics(st.session_state.get("ic_df"), mapbox_geocode)
     all_routes = []
     seen_hashes = set()
     ghosts_by_pod = {
