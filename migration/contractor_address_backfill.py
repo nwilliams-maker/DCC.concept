@@ -7,6 +7,9 @@ random among Address / Location / Service Area / City-State; (3) a changed
 address could keep the old coordinates. The regular sync only looks at
 Monday items edited in the last 48h, so existing rows never self-heal.
 
+Coordinates come from Monday's own *Location map pin when present, else a
+strict Mapbox geocode.
+
 This script re-reads EVERY item on the Monday IC board, re-geocodes every
 matched contractor with the fixed rules, and reports old vs. new.
 
@@ -30,12 +33,12 @@ import sqlalchemy as sa
 
 try:
     from .contractor_sync import (
-        _clean_text, _fetch_board_rows, _geocode, _item_to_source,
+        _clean_text, _fetch_board_rows, _geocode, _item_to_source, _source_coords,
         normalize_email, normalize_phone,
     )
 except ImportError:  # pragma: no cover - run as a plain script
     from contractor_sync import (  # type: ignore
-        _clean_text, _fetch_board_rows, _geocode, _item_to_source,
+        _clean_text, _fetch_board_rows, _geocode, _item_to_source, _source_coords,
         normalize_email, normalize_phone,
     )
 
@@ -84,7 +87,7 @@ def plan_fixes(
 
         new_loc = _clean_text(src.get("location")) or c.get("location")
         row["new_location"] = new_loc
-        lat, lng = geocode(new_loc) if new_loc else (None, None)
+        lat, lng = _source_coords(src, new_loc, geocode)
         loc_changed = new_loc != c.get("location")
 
         if lat is None or lng is None:
@@ -124,8 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if not (os.environ.get("MAPBOX_TOKEN") or "").strip():
-        print("MAPBOX_TOKEN is not set - refusing to run (every row would look ungeocodable).", file=sys.stderr)
-        return 2
+        print("Note: MAPBOX_TOKEN not set - only Monday map pins will be used for coordinates.", file=sys.stderr)
     engine = sa.create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
 
     mapping, items = _fetch_board_rows()
