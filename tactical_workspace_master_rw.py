@@ -5864,9 +5864,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 _loc = str(_row.get('location', '') or '').strip()
                 if _loc:
                     try:
-                        _coords = geocode(_loc)
+                        _coords = _mapbox_geocode(_loc)
                         if _coords:
-                            # Existing geocode() returns (lng, lat).
+                            # _mapbox_geocode() returns (lng, lat).
                             return float(_coords[1]), float(_coords[0])
                     except Exception as _coord_e:
                         _log_err("contractor_dropdown_geocode", _coord_e)
