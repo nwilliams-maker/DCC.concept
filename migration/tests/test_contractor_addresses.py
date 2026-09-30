@@ -1,6 +1,8 @@
+import json
+
 from migration.contractor_sync import (
     _coordinate_updates, _discover_mapping, _extract_state_zip_from_query,
-    _mapbox_match_is_acceptable,
+    _item_to_source, _mapbox_match_is_acceptable,
 )
 from migration.contractor_address_backfill import plan_fixes
 
@@ -30,12 +32,42 @@ def test_exact_address_hit_accepted_and_wrong_state_or_zip_rejected():
     assert not _mapbox_match_is_acceptable(FRESNO, _feat(0.99, ["address"], zip_code="93650", address="1234"))
 
 
-def test_location_column_prefers_address_over_service_area_deterministically():
-    cols = [{"id": "svc", "title": "Service Area"}, {"id": "loc", "title": "*Location"},
-            {"id": "addr", "title": "Address"}, {"id": "em", "title": "Email"}]
+def test_location_column_prefers_monday_location_type_over_street_only_address():
+    # Real IC/FA board: hidden "*Address" text (street only) + "*Location" map column.
+    cols = [{"id": "text_addr", "title": "*Address", "type": "text"},
+            {"id": "loc", "title": "*Location", "type": "location"},
+            {"id": "svc", "title": "Service Area", "type": "text"},
+            {"id": "em", "title": "Email", "type": "email"}]
     for _ in range(20):
-        assert _discover_mapping(cols)["location"] == "addr"
-    assert _discover_mapping(cols[1:2] + cols[3:])["location"] == "loc"
+        assert _discover_mapping(cols)["location"] == "loc"
+    # No map column: title priority still picks Location over Address.
+    text_only = [{"id": "a", "title": "Address", "type": "text"},
+                 {"id": "l", "title": "Location", "type": "text"}, cols[3]]
+    assert _discover_mapping(text_only)["location"] == "l"
+
+
+def test_item_to_source_takes_full_address_and_monday_pin():
+    mapping = {"email": "em", "location": "loc"}
+    item = {"id": "1", "name": "Adel Bahri", "column_values": [
+        {"id": "em", "text": "bahriadel21@gmail.com", "value": None},
+        {"id": "loc", "text": "7153 East Warren Drive, Denver, CO, USA",
+         "value": json.dumps({"lat": "39.6763", "lng": "-104.9012", "address": "7153 East Warren Drive, Denver, CO, USA"})},
+    ]}
+    src = _item_to_source(item, mapping)
+    assert src["location"] == "7153 East Warren Drive, Denver, CO, USA"
+    assert (src["monday_lat"], src["monday_lng"]) == (39.6763, -104.9012)
+
+
+def test_monday_pin_used_before_mapbox_and_corrects_existing_coords():
+    src = {"location": "7153 East Warren Drive, Denver, CO, USA", "monday_lat": 39.6763, "monday_lng": -104.9012}
+    never = lambda _: (_ for _ in ()).throw(AssertionError("should not geocode"))
+    existing = {"location": "7153 East Warren Drive", "lat": None, "lng": None}
+    assert _coordinate_updates(existing, src, {"location": src["location"]}, geocode=never) == \
+        {"lat": 39.6763, "lng": -104.9012}
+    stale = {"location": src["location"], "lat": 39.0, "lng": -105.0}
+    assert _coordinate_updates(stale, src, {}, geocode=never) == {"lat": 39.6763, "lng": -104.9012}
+    same = {"location": src["location"], "lat": 39.6763, "lng": -104.9012}
+    assert _coordinate_updates(same, src, {}, geocode=never) == {}
 
 
 def test_changed_address_that_fails_geocode_clears_old_coords():
@@ -62,6 +94,8 @@ def test_backfill_plan_classifies_rows():
         {"email": "new@x.com", "phone": "5595550100", "location": FRESNO},
         {"email": "e@x.com", "location": "Nowhere"},
     ]
+    contractors.append({"id": 6, "name": "Adel", "email": "f@x.com", "phone": "", "location": "7153 East Warren Drive", "lat": None, "lng": None})
+    sources.append({"email": "f@x.com", "location": "7153 East Warren Drive, Denver, CO, USA", "monday_lat": 39.67, "monday_lng": -104.9})
     geo = {FRESNO: (36.80, -119.80), "99 Elm Dr, Fresno, CA 93721": (36.75, -119.76)}
     plan = {p["name"]: p for p in plan_fixes(contractors, sources, geocode=lambda l: geo.get(l, (None, None)))}
     assert plan["Moved"]["action"] == "coords_moved"
@@ -70,3 +104,6 @@ def test_backfill_plan_classifies_rows():
     assert plan["ByPhone"]["action"] == "coords_filled"
     assert plan["Gone"]["action"] == "no_monday_match"
     assert plan["Vague"]["action"] == "coords_unverified"
+    assert plan["Adel"]["action"] == "address_changed"
+    assert plan["Adel"]["new_location"] == "7153 East Warren Drive, Denver, CO, USA"
+    assert (plan["Adel"]["new_lat"], plan["Adel"]["new_lng"]) == (39.67, -104.9)
