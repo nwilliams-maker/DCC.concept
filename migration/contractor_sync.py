@@ -14,20 +14,30 @@ import sqlalchemy as sa
 BOARD_ID = int(os.environ.get("MONDAY_CONTRACTOR_BOARD_ID", "5840676529"))
 MONDAY_API_URL = "https://api.monday.com/v2"
 
-COLUMN_ALIASES = {
-    "email": {"email", "email address", "e-mail", "e mail"},
-    "name": {"name", "contractor", "contractor name", "ic", "ic name", "independent contractor"},
-    "phone": {"phone", "phone number", "mobile", "cell", "cell phone"},
-    "location": {"location", "address", "home location", "service area", "city state", "city/state"},
-    "ic_list": {"ic list", "ic_list", "list", "contractor list"},
-    "pod_color": {"pod color", "pod", "pod_color", "pod colour"},
-    "digital_certified": {"digital certified", "digital certification", "digital_certified", "digital cert"},
-    "unrestricted": {"unrestricted", "unrestricted ic", "full access"},
-    "ic_status": {"ic status", "status", "contractor status"},
-    "inactive_reason": {"reason for inactive status", "inactive reason", "reason inactive"},
+# Ordered by priority: when a board has several matching columns, the first
+# alias listed wins. (These used to be sets, whose iteration order is random
+# per process, so "location" could flip between e.g. Address and Service Area
+# from one sync run to the next.)
+COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "email": ("email", "email address", "e-mail", "e mail"),
+    "name": ("name", "contractor name", "ic name", "contractor", "independent contractor", "ic"),
+    "phone": ("phone", "phone number", "cell phone", "mobile", "cell"),
+    # Full street address first; broad area-style columns only as a fallback.
+    "location": ("address", "home address", "street address", "location", "home location",
+                 "city state", "city/state", "service area"),
+    "ic_list": ("ic list", "ic_list", "contractor list", "list"),
+    "pod_color": ("pod color", "pod_color", "pod colour", "pod"),
+    "digital_certified": ("digital certified", "digital_certified", "digital certification", "digital cert"),
+    "unrestricted": ("unrestricted", "unrestricted ic", "full access"),
+    "ic_status": ("ic status", "contractor status", "status"),
+    "inactive_reason": ("reason for inactive status", "inactive reason", "reason inactive"),
 }
 TRUE_VALUES = {"yes", "y", "true", "1", "checked"}
 FALSE_VALUES = {"no", "n", "false", "0", "unchecked"}
+US_STATES = frozenset(
+    "AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO "
+    "MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY PR".split()
+)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -355,12 +365,15 @@ def _extract_state_zip_from_query(location: str) -> tuple[str | None, str | None
     state = None
     zip_code = None
 
-    # Prefer explicit USPS abbreviation near a ZIP / comma boundary.
-    m_state = re.search(r"(?:,|\\s)\\s*([A-Z]{2})(?:\\s|,|$)", text)
-    if m_state:
-        state = m_state.group(1)
+    # Use the LAST two-letter token that is a real USPS state code, so street
+    # suffixes like "ST" / "CT" / "DR" earlier in the address aren't mistaken
+    # for the state.
+    for tok in reversed(re.findall(r"(?:^|[,\s])([A-Z]{2})(?=[\s,]|$)", text)):
+        if tok in US_STATES:
+            state = tok
+            break
 
-    m_zip = re.search(r"\\b(\\d{5})(?:-\\d{4})?\\b", text)
+    m_zip = re.search(r"\b(\d{5})(?:-\d{4})?\b", text)
     if m_zip:
         zip_code = m_zip.group(1)
 
@@ -383,7 +396,7 @@ def _mapbox_result_state_zip(feature: dict[str, Any]) -> tuple[str | None, str |
                 state = short
         elif pid.startswith("postcode."):
             txt = str(part.get("text") or "").strip()
-            m = re.search(r"\\b(\\d{5})\\b", txt)
+            m = re.search(r"\b(\d{5})\b", txt)
             if m:
                 zip_code = m.group(1)
 
@@ -398,7 +411,7 @@ def _mapbox_match_is_acceptable(location: str, feature: dict[str, Any]) -> bool:
 
     # Reject weak/fuzzy first results. A complete street address should be
     # essentially exact; city/state-only locations can be slightly less exact.
-    has_street_number = bool(re.search(r"\\b\\d{1,6}\\b", str(location or "")))
+    has_street_number = bool(re.search(r"\b\d{1,6}\b", str(location or "")))
     min_relevance = 0.90 if has_street_number else 0.80
     if relevance < min_relevance:
         return False
@@ -476,6 +489,28 @@ def _build_update(existing: dict[str, Any], source: dict[str, Any]) -> dict[str,
         if incoming is not None and incoming != existing.get(field):
             out[field] = bool(incoming)
     return out
+
+
+def _coordinate_updates(
+    existing: dict[str, Any], source: dict[str, Any], updates: dict[str, Any], geocode=None
+) -> dict[str, Any]:
+    """lat/lng changes that go with a sync update.
+
+    If the address text changed, the coordinates are re-derived from the NEW
+    address; if that geocode fails they are cleared rather than left pointing
+    at the old address. If only the coordinates are missing, fill them when
+    possible.
+    """
+    geocode = geocode or _geocode
+    if "location" in updates:
+        lat, lng = geocode(updates["location"])
+        return {"lat": lat, "lng": lng}
+    loc = _clean_text(source.get("location"))
+    if loc and (existing.get("lat") is None or existing.get("lng") is None):
+        lat, lng = geocode(loc)
+        if lat is not None and lng is not None:
+            return {"lat": lat, "lng": lng}
+    return {}
 
 
 def _recent_source(source: dict[str, Any], lookback_hours: int) -> bool:
@@ -615,14 +650,7 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                 continue
 
             updates = _build_update(existing, source)
-            if "location" in updates or (
-                _clean_text(source.get("location"))
-                and (existing.get("lat") is None or existing.get("lng") is None)
-            ):
-                lat, lng = _geocode(updates.get("location") or source.get("location"))
-                if lat is not None and lng is not None:
-                    updates["lat"] = lat
-                    updates["lng"] = lng
+            updates.update(_coordinate_updates(existing, source, updates))
             if not updates:
                 result["unchanged"] += 1
                 continue
