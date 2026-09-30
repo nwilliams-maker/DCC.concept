@@ -103,7 +103,6 @@ async def sync_recent_contractors(request: Request):
         return JSONResponse({"error": "Expected at most 100 contractors"}, status_code=400)
 
     from .contractor_sync import normalize_email, normalize_phone, _clean_text
-    cutoff = datetime(2026, 9, 24, 5, tzinfo=timezone.utc)
     prepared = []
     skipped = 0
     for source in rows:
@@ -122,7 +121,7 @@ async def sync_recent_contractors(request: Request):
         phone = normalize_phone(source.get("phone"))
         location = _clean_text(source.get("location"))
         status = (_clean_text(source.get("ic_list")) or "").upper()
-        if created < cutoff or not email or not name or (status in {"ACTIVE", "IN TRAINING", "NEED INSURANCE"} and (not phone or len(phone) != 10 or not location)):
+        if not email or not name or (status in {"ACTIVE", "IN TRAINING", "NEED INSURANCE"} and (not phone or len(phone) != 10 or not location)):
             skipped += 1
             continue
         prepared.append({
