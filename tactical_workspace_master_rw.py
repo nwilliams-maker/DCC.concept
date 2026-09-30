@@ -3135,6 +3135,31 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def _distance_to_route(ic_lat, ic_lng, route_data, fallback_center=None):
+    """Straight-line proximity from an IC home to the actual route.
+
+    Distance is the minimum haversine distance to any stop in the route, not
+    the cluster anchor/center. This is the value used for contractor ordering,
+    the 100-mile eligibility cap, and Ready/Flagged distance checks.
+    """
+    distances = []
+    for task in route_data or []:
+        try:
+            lat = task.get('lat')
+            lng = task.get('lon')
+            if lat is not None and lng is not None:
+                d = haversine(ic_lat, ic_lng, lat, lng)
+                if math.isfinite(d):
+                    distances.append(d)
+        except Exception:
+            continue
+    if distances:
+        return min(distances)
+    if fallback_center and len(fallback_center) >= 2:
+        return haversine(ic_lat, ic_lng, fallback_center[0], fallback_center[1])
+    return float('inf')
+
+
 def _ic_home_loc(ic, fallback=None):
     """Resolve an IC row to its best-known home location for routing.
 
@@ -4397,7 +4422,7 @@ def process_digital_pool(master_bar=None):
         has_ic = False
         ic_dist = 0
         if not v_ics_base.empty:
-            dists = [haversine(anc['lat'], anc['lon'], lat, lng) for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])]
+            dists = [_distance_to_route(lat, lng, group, [anc['lat'], anc['lon']]) for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])]
             valid_ics = v_ics_base.copy()
             valid_ics['d'] = dists
             valid_ics = valid_ics[valid_ics['d'] <= 100]
@@ -4922,7 +4947,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 if not v_ics_base.empty:
                     # 🚀 OPTIMIZATION: Use list comprehension instead of pandas .apply(). It is ~100x faster.
                     dists = [
-                        haversine(anc['lat'], anc['lon'], lat, lng) 
+                        _distance_to_route(lat, lng, group, [anc['lat'], anc['lon']])
                         for lat, lng in zip(v_ics_base[lat_col], v_ics_base[lng_col])
                     ]
                 
@@ -5933,9 +5958,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 v_ics['_resolved_lat'] = _resolved.apply(lambda p: p[0] if p else None)
                 v_ics['_resolved_lng'] = _resolved.apply(lambda p: p[1] if p else None)
                 v_ics['d'] = v_ics.apply(
-                    lambda x: haversine(
-                        cluster['center'][0], cluster['center'][1],
-                        x.get('_resolved_lat'), x.get('_resolved_lng')
+                    lambda x: _distance_to_route(
+                        x.get('_resolved_lat'), x.get('_resolved_lng'),
+                        cluster.get('data', []), cluster.get('center')
                     ),
                     axis=1
                 )
@@ -9355,7 +9380,12 @@ def run_pod_tab(pod_name):
                         if lat_col in ic_df.columns and lng_col in ic_df.columns:
                             v_ics = ic_df[~ic_df.astype(str).apply(lambda x: x.str.contains('Field Agent', case=False, na=False).any(), axis=1)].dropna(subset=[lat_col, lng_col]).copy()
                             if not v_ics.empty:
-                                v_ics['d'] = v_ics.apply(lambda x: haversine(c['center'][0], c['center'][1], x[lat_col], x[lng_col]), axis=1)
+                                v_ics['d'] = v_ics.apply(
+                                    lambda x: _distance_to_route(
+                                        x[lat_col], x[lng_col], c.get('data', []), c.get('center')
+                                    ),
+                                    axis=1
+                                )
                                 closest_ic = v_ics.sort_values('d').iloc[0]
                                 _, hrs, _, _ = get_gmaps(_ic_home_loc(closest_ic, f"{c['center'][0]},{c['center'][1]}"), [t['full'] for t in c['data'][:25]])
                                 est_pay = hrs * 25.0 # 🌟 STRICTLY HOURLY
