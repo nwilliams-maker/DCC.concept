@@ -22,8 +22,11 @@ COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     "email": ("email", "email address", "e-mail", "e mail"),
     "name": ("name", "contractor name", "ic name", "contractor", "independent contractor", "ic"),
     "phone": ("phone", "phone number", "cell phone", "mobile", "cell"),
-    # Full street address first; broad area-style columns only as a fallback.
-    "location": ("address", "home address", "street address", "location", "home location",
+    # Monday's map-type "*Location" column holds the full formatted address
+    # (street, city, state) plus a map pin; the hidden "*Address" text column
+    # is street-line only. Location first; see also the type preference in
+    # _discover_mapping.
+    "location": ("location", "home location", "address", "home address", "street address",
                  "city state", "city/state", "service area"),
     "ic_list": ("ic list", "ic_list", "contractor list", "list"),
     "pod_color": ("pod color", "pod_color", "pod colour", "pod"),
@@ -248,6 +251,15 @@ def _discover_mapping(columns: list[dict[str, Any]]) -> dict[str, str]:
         matches = [by_title[a] for a in aliases if a in by_title]
         if matches:
             mapping[field] = matches[0]
+    # A real Monday map/location column beats any same-named text column: it
+    # carries the full address and its own coordinates.
+    location_typed = [
+        str(c.get("id")) for c in columns
+        if str(c.get("type") or "").lower() == "location"
+        and _norm_title(c.get("title")) in COLUMN_ALIASES["location"]
+    ]
+    if location_typed:
+        mapping["location"] = location_typed[0]
     missing = [f for f in ("email",) if f not in mapping]
     if missing:
         raise RuntimeError(
@@ -310,6 +322,8 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
         "name": txt("name") or _clean_text(item.get("name")),
         "phone": txt("phone"),
         "location": txt("location"),
+        "monday_lat": None,
+        "monday_lng": None,
         "ic_list": txt("ic_list"),
         "pod_color": txt("pod_color"),
         "digital_certified": parse_bool(txt("digital_certified")),
@@ -317,10 +331,36 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
         "ic_status": txt("ic_status"),
         "inactive_reason": txt("inactive_reason"),
     }
+    loc_val = vals.get(mapping.get("location") or "") or {}
+    m_lat, m_lng = _monday_location_coords(loc_val.get("value"))
+    if m_lat is not None:
+        source["monday_lat"], source["monday_lng"] = m_lat, m_lng
     availability = _availability_class(source)
     if availability:
         source["ic_list"] = availability
     return source
+
+
+def _monday_location_coords(raw: Any) -> tuple[float | None, float | None]:
+    """lat/lng from a Monday location column's JSON value, if valid (U.S.)."""
+    if not raw:
+        return None, None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        lat, lng = float(data.get("lat")), float(data.get("lng"))
+    except Exception:
+        return None, None
+    if not (-179.9 <= lng <= -66.0 and 18.0 <= lat <= 72.0):
+        return None, None
+    return lat, lng
+
+
+def _source_coords(source: dict[str, Any], location: str | None, geocode=None) -> tuple[float | None, float | None]:
+    """Prefer Monday's own map pin for the address; fall back to strict Mapbox."""
+    lat, lng = source.get("monday_lat"), source.get("monday_lng")
+    if lat is not None and lng is not None:
+        return lat, lng
+    return (geocode or _geocode)(location) if location else (None, None)
 
 
 def _availability_class(source: dict[str, Any], insurance_window_days: int = 90) -> str | None:
@@ -501,13 +541,19 @@ def _coordinate_updates(
     at the old address. If only the coordinates are missing, fill them when
     possible.
     """
-    geocode = geocode or _geocode
     if "location" in updates:
-        lat, lng = geocode(updates["location"])
+        lat, lng = _source_coords(source, updates["location"], geocode)
         return {"lat": lat, "lng": lng}
     loc = _clean_text(source.get("location"))
+    m_lat, m_lng = source.get("monday_lat"), source.get("monday_lng")
+    if m_lat is not None and m_lng is not None:
+        # Monday's pin is authoritative; update if ours is missing or differs.
+        e_lat, e_lng = existing.get("lat"), existing.get("lng")
+        if e_lat is None or e_lng is None or abs(e_lat - m_lat) > 1e-5 or abs(e_lng - m_lng) > 1e-5:
+            return {"lat": m_lat, "lng": m_lng}
+        return {}
     if loc and (existing.get("lat") is None or existing.get("lng") is None):
-        lat, lng = geocode(loc)
+        lat, lng = _source_coords(source, loc, geocode)
         if lat is not None and lng is not None:
             return {"lat": lat, "lng": lng}
     return {}
@@ -604,7 +650,7 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                     })
                     continue
 
-                lat, lng = _geocode(source.get("location"))
+                lat, lng = _source_coords(source, _clean_text(source.get("location")))
                 row = {
                     "email": email,
                     "name": name,
