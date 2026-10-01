@@ -391,11 +391,17 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
         except Exception:
             break
 
-    # Fetch the same authoritative 45-day state=0 population, but split the
-    # creation-time range into smaller independent windows and paginate those
-    # windows concurrently. OnFleet applies from/to to creation time for
-    # non-completed tasks, so the union is equivalent to the old single serial
-    # query while avoiding ~126 sequential network round trips.
+    # Fetch the full active OnFleet backlog, not just recent creations.
+    #
+    # Previous behavior hard-cut the state=0 population at 45 days by task
+    # creation time. Any still-open task older than that vanished before route
+    # classification, which made whole Ready/Flagged/CVS Kiosk Removal routes
+    # disappear from Revamp even though they were still active in OnFleet.
+    #
+    # Keep state=0 authoritative, but widen the creation-time horizon to 365
+    # days. Open dispatch work should not disappear simply because it aged past
+    # an arbitrary 45-day cutoff. Split the larger horizon into more windows so
+    # pagination stays bounded and requests remain parallel without a burst.
     #
     # IMPORTANT: do not replace this with a containers filter. OnFleet ignores
     # containers when state is supplied, and dropping state would pull assigned
@@ -403,8 +409,9 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
     # unassigned tasks because dispatch relies on them.
     _fetch_started = time.monotonic()
     _now_ms = int(time.time() * 1000)
-    time_window = _now_ms - (45 * 24 * 3600 * 1000)
-    _WINDOW_COUNT = 4
+    _OPEN_TASK_LOOKBACK_DAYS = 365
+    time_window = _now_ms - (_OPEN_TASK_LOOKBACK_DAYS * 24 * 3600 * 1000)
+    _WINDOW_COUNT = 12
     _window_span = max(1, (_now_ms - time_window) // _WINDOW_COUNT)
 
     _progress_lock = threading.Lock()
@@ -487,7 +494,8 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
     unique_tasks = list({t['id']: t for t in all_tasks_raw if t.get('id')}.values())
     print(
         f"[onfleet/tasks] parallel fetch {_WINDOW_COUNT} windows / {_page} pages, "
-        f"{len(unique_tasks)} unique tasks in {time.monotonic() - _fetch_started:.1f}s",
+        f"{len(unique_tasks)} unique state=0 tasks across {_OPEN_TASK_LOOKBACK_DAYS} days "
+        f"in {time.monotonic() - _fetch_started:.1f}s",
         flush=True,
     )
     # ROUTE-PLAN EXCLUSION (May 30 2026, Nick): any OnFleet route plan whose
@@ -539,6 +547,12 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
         }
     except Exception:
         pass
+    if _hit_cap:
+        raise RuntimeError(
+            "Onfleet open-task extraction hit the pagination safety cap; "
+            "refusing to render a knowingly incomplete route dataset."
+        )
+
     return {
         'tasks': unique_tasks,
         'target_team_ids': target_team_ids,
