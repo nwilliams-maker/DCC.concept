@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import html as _html
+from task_addresses import destination_zip, address_with_zip, task_location_address
 
 # --- CONFIG & CREDENTIALS ---
 # We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash.
@@ -4412,7 +4413,7 @@ def process_digital_pool(master_bar=None):
         pool.append({
             "id": t['id'], "city": addr.get('city', 'Unknown'), "state": stt,
             "full": f"{addr.get('number','')} {addr.get('street','')}, {addr.get('city','')}, {stt}",
-            "zip": addr.get('postalCode', ''),
+            "zip": destination_zip(addr),
             "lat": t['destination']['location'][1], "lon": t['destination']['location'][0],
             "escalated": is_esc, "task_type": tt_val, "is_digital": True, "db_status": t_status, "wo": t_wo,
             "boosted_standard": custom_boosted,
@@ -4876,7 +4877,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                         "city": addr.get('city', 'Unknown'), 
                         "state": stt,
                         "full": f"{addr.get('number','')} {addr.get('street','')}, {addr.get('city','')}, {stt}",
-                        "zip": addr.get('postalCode', ''),
+                        "zip": destination_zip(addr),
                         "lat": t['destination']['location'][1], 
                         "lon": t['destination']['location'][0],
                         "escalated": is_esc, 
@@ -6309,7 +6310,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             expand_str = " | ".join(expand_parts)
             esc_count_stop = sum(1 for t in cluster['data'] if t.get('full') == addr and t.get('escalated'))
             esc_inline = f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {esc_count_stop}</span>" if esc_count_stop > 0 else ""
-            display_addr = f"+ {addr}" if metrics.get('is_new') else addr
+            display_addr = task_location_address(addr, cluster["data"])
+            display_addr = f"+ {display_addr}" if metrics.get('is_new') else display_addr
             venue_prefix = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;white-space:normal;'>{esc(metrics['venue_name'])} — </span>" if metrics.get('venue_name') else ""
             task_pill = f"<span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{metrics['t_count']} Tasks</span>"
             pill_html = f"<span style='font-size:11px;color:#94a3b8;'> — {pill_str}</span>" if pill_str else ""
@@ -7272,7 +7274,8 @@ text-decoration:none;">📨 Default Mail</a>
             _lp_html = f" <span style='color:#ca8a04;font-weight:800;font-size:10px;'>⭐ {_metrics['lplus_cnt']}</span>" if _metrics.get('lplus_cnt', 0) > 0 else ""
             _esc_n   = sum(1 for _t in cluster['data'] if _t.get('full') == _addr and _t.get('escalated'))
             _esc_html= f" <span style='color:#dc2626;font-weight:900;font-size:10px;'>❗ {_esc_n}</span>" if _esc_n > 0 else ""
-            _display_addr = f"+ {_addr}" if _metrics.get('is_new') else _addr
+            _display_addr = task_location_address(_addr, cluster["data"])
+            _display_addr = f"+ {_display_addr}" if _metrics.get('is_new') else _display_addr
             _vp      = f"<span style='color:#94a3b8;font-size:11px;font-weight:600;white-space:normal;'>{_metrics['venue_name']} — </span>" if _metrics.get('venue_name') else ""
             _tp      = f"<span style='color:#633094;background:#f3e8ff;padding:1px 5px;border-radius:8px;font-weight:800;font-size:10px;'>{_metrics['t_count']} Tasks</span>"
             _ih      = f"<span style='font-size:13px;margin-left:6px;'>{_pill_str}</span>" if _pill_str else ""
@@ -7691,7 +7694,7 @@ def smart_sync_pod(pod_name):
             "city": addr.get('city', 'Unknown'),
             "state": stt,
             "full": f"{addr.get('number','')} {addr.get('street','')}, {addr.get('city','')}, {stt}",
-            "zip": addr.get('postalCode', ''),
+            "zip": destination_zip(addr),
             "lat": t['destination']['location'][1],
             "lon": t['destination']['location'][0],
             "escalated": is_esc,
@@ -7982,7 +7985,7 @@ def make_venue_details(data):
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(loc)}</span>"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(task_location_address(loc, loc_tasks))}</span>"
             f"{k_tag}{digi_ins_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}{_icon_html}"
             f"</summary>{camp_block}</details>"
         )
@@ -8097,7 +8100,7 @@ def make_venue_details_ghost(locs_list, stop_data=None):
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(addr)}</span>"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(address_with_zip(addr, sd.get("zip")))}</span>"
             f"{k_tag}{remov_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}"
             f"</summary>{camp_block}</details>"
         )
