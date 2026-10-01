@@ -5686,6 +5686,28 @@ def _detach_stops_from_cluster(clusters, source_task_ids, selected_addresses):
     return groups, remaining_ids
 
 
+def _contractor_selection_key(row):
+    """Stable dropdown identity independent of display badges/distance."""
+    def text(field):
+        value = row.get(field)
+        return "" if value is None or pd.isna(value) else str(value).strip()
+
+    contractor_id = text("id")
+    if contractor_id:
+        return "id:" + contractor_id
+    email = text("email").lower()
+    if email:
+        return "email:" + email
+    # Legacy rosters may omit IDs/email. Keep duplicate names distinct using
+    # their phone; address changes must not alter the selection identity.
+    phone = text("phone")
+    if phone.endswith(".0"):
+        phone = phone[:-2]
+    phone = re.sub(r"\D", "", phone)[-10:]
+    name = text("name").casefold()
+    return "legacy:" + hashlib.sha256(f"{name}|{phone}".encode()).hexdigest()
+
+
 # render_dispatch is a fragment — st.rerun() inside (Streamlit 1.39) defaults
 # to fragment scope, so clicks re-render only this one route card, not the
 # whole pod tab. State changes (session_state, sent_db, etc.) persist across
@@ -5836,8 +5858,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # --- 1. STATE KEYS & INITIALIZATION (🌟 UNIQUE BY POD) ---
     pay_key = f"pay_val_{pod_name}_{cluster_hash}"
     rate_key = f"rate_val_{pod_name}_{cluster_hash}"
-    sel_key = f"sel_{pod_name}_{cluster_hash}"
-    last_sel_key = f"last_sel_{pod_name}_{cluster_hash}"
+    sel_key = f"sel_{pod_name}_{cluster_hash}_identity_v2"
+    last_sel_key = f"last_sel_{pod_name}_{cluster_hash}_identity_v2"
 
     # --- 2. STOP METRICS & PILLS (build dict — UI rendered after financials) ---
     stop_metrics = {}
@@ -5902,6 +5924,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # --- 3. CONTRACTOR FILTERING (100 MILES) ---
     ic_df = st.session_state.get('ic_df', pd.DataFrame())
     ic_opts = {}
+    ic_labels = {}
     v_ics = pd.DataFrame()
     # 🔵 Lazy-init worker task counts so the badge works on first page load too.
     # Previously _worker_counts was only populated at the END of process_pod /
@@ -6070,7 +6093,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     else:
                         continue
                     label = f"{ic_name}{_elig_tag}{cert_icon}{_cnt_tag} ({_dist_label})"
-                    ic_opts[label] = r
+                    # Widget values must identify the contractor, not their
+                    # changing task-count/distance/status display label.
+                    identity = _contractor_selection_key(r)
+                    ic_opts[identity] = r
+                    ic_labels[identity] = label
 
     # --- DYNAMIC PRICING SYNC ---
     # Streamlit silently ignores st.session_state[widget_key] = X writes once the
@@ -6109,7 +6136,11 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     def update_for_new_contractor():
         selected_label = st.session_state.get(sel_key)
         if selected_label and selected_label != st.session_state.get(last_sel_key):
-            ic_new = ic_opts[selected_label]
+            ic_new = ic_opts.get(selected_label)
+            if ic_new is None:
+                # A roster refresh may remove an option before this callback
+                # fires. Preserve pay; the render asks for a new selection.
+                return
             st.session_state[f"_route_fa_{pod_name}_{cluster_hash}"] = _is_fa_employee(ic_new)
             _, h, _, _ = get_gmaps(_ic_home_loc(ic_new, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
             new_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
@@ -6181,8 +6212,17 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
         # ── CONTRACTOR ──────────────────────────────────────────────────
         if ic_opts:
-            selected_label = st.selectbox("Contractor", list(ic_opts.keys()), key=sel_key, on_change=update_for_new_contractor, label_visibility="collapsed")
-            ic = ic_opts[selected_label]
+            if sel_key in st.session_state and st.session_state[sel_key] not in ic_opts:
+                st.session_state[sel_key] = None
+            selected_label = st.selectbox(
+                "Contractor", list(ic_opts.keys()), key=sel_key,
+                format_func=lambda identity: ic_labels.get(identity, "Unavailable contractor"),
+                on_change=update_for_new_contractor, label_visibility="collapsed",
+            )
+            ic = ic_opts.get(selected_label)
+            if ic is None:
+                st.warning("The selected contractor is no longer available. Select a contractor to continue.")
+                return
             # 🌟 Resolve to trusted lat/lng (not the free-text 'location'
             # column, which can drift from the IC's actual lat/lng — produced
             # the "Cassie 4.4mi shows 333mi" bug).
