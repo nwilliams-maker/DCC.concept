@@ -70,11 +70,11 @@ def client(monkeypatch, tmp_path):
     return TestClient(portal_api.app), eng
 
 
-def _send(client, **row):
+def _send(client, refresh_addresses=False, **row):
     base = {"monday_item_id": "1", "monday_created_at": "2026-01-01T00:00:00Z", "email": "a@x.com",
             "name": "Adel Bahri", "phone": "7209035938", "ic_list": "ACTIVE"}
     r = client.post("/internal/contractors/sync", headers={"Authorization": "Bearer tok"},
-                    json={"contractors": [{**base, **row}]})
+                    json={"contractors": [{**base, **row}], "refresh_addresses": refresh_addresses})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -90,13 +90,43 @@ def test_receiver_insert_uses_pin_and_state_pod(client):
     assert _row(eng) == {"location": FULL, "lat": 39.6763, "lng": -104.9012, "pod_color": "Green"}
 
 
-def test_receiver_never_touches_existing_ic_address_coords_or_pod(client):
+def test_receiver_syncs_existing_address_and_pin_automatically(client):
     c, eng = client
     _send(c, location=FULL, monday_lat="39.6763", monday_lng="-104.9012")
     before = _row(eng)
-    _send(c, location="7153 East Warren Drive")                       # street-only
-    _send(c, location="99 Elm St, Austin, TX, USA", monday_lat="30.2", monday_lng="-97.7")  # changed
+    _send(c, location="7153 East Warren Drive", monday_lat="30.2", monday_lng="-97.7")
     assert _row(eng) == before
+    result = _send(c, location="99 Elm St, Austin, TX, USA", monday_lat="30.2", monday_lng="-97.7")
+    assert result["addresses_updated"] == 1
+    assert _row(eng) == {"location": "99 Elm St, Austin, TX, USA", "lat": 30.2, "lng": -97.7, "pod_color": "Purple"}
+    assert _send(c, location="99 Elm St, Austin, TX, USA", monday_lat="30.2", monday_lng="-97.7")["addresses_updated"] == 0
+
+
+def test_receiver_baseline_preserves_corrected_roster_then_tracks_edits(client):
+    c, eng = client
+    with eng.begin() as conn:
+        conn.execute(sa.text("INSERT INTO contractors (email,name,location,lat,lng,pod_color) VALUES ('a@x.com','Adel Bahri',:loc,39.6763,-104.9012,'Green')"), {"loc": FULL})
+    before = _row(eng)
+    _send(c, location="88 Old St, Austin, TX, USA", monday_lat=30.1, monday_lng=-97.6)
+    assert _row(eng) == before
+    _send(c, location="99 New St, Austin, TX, USA", monday_lat=30.2, monday_lng=-97.7)
+    assert _row(eng)["location"] == "99 New St, Austin, TX, USA"
+
+
+def test_receiver_targeted_refresh_and_failed_geocode_clear_old_pin(client):
+    c, eng = client
+    _send(c, location=FULL, monday_lat=39.6763, monday_lng=-104.9012)
+    _send(c, refresh_addresses=True, location="99 Elm St, Austin, TX, USA")
+    assert _row(eng) == {"location": "99 Elm St, Austin, TX, USA", "lat": None, "lng": None, "pod_color": "Purple"}
+
+
+def test_receiver_pin_only_change_and_blank_are_safe(client):
+    c, eng = client
+    _send(c, location=FULL, monday_lat=39.6763, monday_lng=-104.9012)
+    _send(c, location=None)
+    assert _row(eng)["lat"] == 39.6763
+    _send(c, location=FULL, monday_lat=39.6764, monday_lng=-104.9013)
+    assert _row(eng)["lat"] == 39.6764
 
 
 def test_receiver_still_updates_status_for_existing_ic(client):
