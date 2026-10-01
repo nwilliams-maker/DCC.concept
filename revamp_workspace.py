@@ -1149,7 +1149,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             label_visibility="collapsed", key="revamp_search",
         ).strip().lower()
 
-    accessible = [pod for pod in PODS if can_access_tab(pod)]
+    auth_user = st.session_state.get("_auth_user") or {}
+    auth_email = str(auth_user.get("email", "") or "").strip().lower()
+    accessible = [
+        pod for pod in PODS
+        if can_access_tab(pod)
+        or (pod == "Digital" and auth_email == "kheiden@terraboost.biz")
+    ]
     if not accessible:
         st.info("Your account has no pod access. Contact an administrator to update your access.")
         return
