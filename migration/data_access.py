@@ -1008,7 +1008,7 @@ def get_sent_records_from_db(
                 """
                 SELECT r.wo, r.contractor_name, r.status::text AS status,
                        r.payload, r.created_at, r.updated_at,
-                       ev.accepted_event_at, ev.declined_event_at
+                       ev.accepted_event_at, ev.declined_event_at, ev.finalized_event_at
                 FROM routes r
                 LEFT JOIN LATERAL (
                     SELECT
@@ -1020,7 +1020,10 @@ def get_sent_records_from_db(
                         (SELECT COALESCE(e.payload->>'decided_at', e.created_at::text)
                          FROM route_events e WHERE e.route_id = r.id
                          AND e.action = 'processDecision' AND e.payload->>'decision' = 'decline'
-                         ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS declined_event_at
+                         ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS declined_event_at,
+                        (SELECT e.created_at::text FROM route_events e
+                         WHERE e.route_id = r.id AND e.action = 'finalizeRoute'
+                         ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS finalized_event_at
                 ) ev ON TRUE
                 WHERE r.created_at >= :cutoff
                 ORDER BY r.created_at
@@ -1069,7 +1072,8 @@ def get_sent_records_from_db(
         p = _parsed(row["payload"])
         _status = str(row["status"] or "").lower()
         _status_ts = (
-            (row.get("accepted_event_at") or p.get("accepted_at")) if _status in ("accepted", "finalized") else
+            (row.get("finalized_event_at") or p.get("finalized_at") or row.get("accepted_event_at") or p.get("accepted_at")) if _status == "finalized" else
+            (row.get("accepted_event_at") or p.get("accepted_at")) if _status == "accepted" else
             (row.get("declined_event_at") or p.get("declined_at")) if _status == "declined" else
             p.get("sent_at") if _status == "sent" else
             None
