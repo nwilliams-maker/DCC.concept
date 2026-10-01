@@ -21,7 +21,7 @@ import streamlit as st
 
 
 STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined")
-PODS = ("Blue", "Green", "Orange", "Purple", "Red")
+PODS = ("Blue", "Green", "Orange", "Purple", "Red", "Digital")
 HIGH_RATE_FLAG_THRESHOLD = 25.00  # Matches the dispatch card's $24.99 cutoff.
 
 
