@@ -22,7 +22,7 @@ import streamlit as st
 from task_addresses import address_with_zip
 
 
-STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined")
+STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Finalized")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red", "Digital")
 HIGH_RATE_FLAG_THRESHOLD = 25.00  # Matches the dispatch card's $24.99 cutoff.
 
@@ -138,7 +138,9 @@ def _route_status(route, sent_db, nearest_miles=None, pod=None):
         )
         if match:
             persisted_status = str(match.get("status", "")).lower()
-    if persisted_status in ("accepted", "finalized"):
+    if persisted_status == "finalized":
+        return "Finalized"
+    if persisted_status == "accepted":
         return "Accepted"
     if persisted_status == "declined":
         return "Declined"
@@ -149,7 +151,7 @@ def _route_status(route, sent_db, nearest_miles=None, pod=None):
     if local == "declined":
         return "Declined"
     if local == "finalized":
-        return "Accepted"
+        return "Finalized"
     # The dispatch card saves its original calculated rate once. Subsequent
     # manual edits to Rate/Stop must leave the preview in its current queue.
     calculated_rate = 0.0
@@ -185,7 +187,7 @@ def _route_entry_key(pod, route, state, route_hash):
     key = f"{pod}:{route_hash}"
     # Different saved work orders can share task IDs/hash after a resend.
     # Keep their historical cards separate while actions use the real hash.
-    if state in ("Sent", "Accepted", "Declined"):
+    if state in ("Sent", "Accepted", "Declined", "Finalized"):
         wo = str(_saved_route_fields(route)["wo"] or "").strip()
         if wo:
             key += ":" + hashlib.sha256(wo.encode()).hexdigest()[:16]
@@ -322,7 +324,7 @@ def _display_contractor_name(route, state):
     fields = _saved_route_fields(route)
     name = str(fields.get("contractor") or "").strip()
     ghost = fields.get("ghost") or {}
-    if state in ("Sent", "Accepted", "Declined") and name.lower() == "field nation":
+    if state in ("Sent", "Accepted", "Declined", "Finalized") and name.lower() == "field nation":
         provider = str(ghost.get("fn_provider") or route.get("fn_provider") or "").strip()
         return provider or "Assigned Contractor"
     return name or "Unknown"
@@ -429,10 +431,10 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
             for saved_hash in hashes:
                 move_to_dispatch(
                     saved_hash, fields["contractor"], pod,
-                    action_label=("Ghost Archived" if is_ghost and state == "Accepted" else
+                    action_label=("Ghost Archived" if is_ghost and state in ("Accepted", "Finalized") else
                                   "Re-Routed" if state == "Sent" else "Revoked"),
                     check_onfleet=True, cluster_data=ghost if is_ghost else route,
-                    check_completed=state == "Accepted",
+                    check_completed=state in ("Accepted", "Finalized"),
                 )
             st.rerun()
 
@@ -659,7 +661,7 @@ def _saved_status_group_label(route):
 
 def _route_list_heading(route, state, route_hash):
     """Put saved work orders first without changing route queues."""
-    if state not in ("Accepted", "Declined"):
+    if state not in ("Accepted", "Declined", "Finalized"):
         return None
     fields = _saved_route_fields(route)
     ghost = fields["ghost"]
@@ -681,7 +683,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
         if not matching:
             st.info("No matching routes.")
         grouped = {}
-        saved_date_view = status in ("Sent", "Accepted", "Declined")
+        saved_date_view = status in ("Sent", "Accepted", "Declined", "Finalized")
         for entry in matching:
             stage = _fn_stage(entry[3], fn_posted, fn_providers) if status == "Field Nation" else ""
             if saved_date_view:
@@ -726,7 +728,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                              or int(_ghost.get("tasks") or _ghost.get("tCnt") or 0))
                     state_icon = {
                         "Ready": "●", "Flagged": "!", "Field Nation": "FN",
-                        "Sent": "→", "Accepted": "✓", "Declined": "×", "Routed": "◆"
+                        "Sent": "→", "Accepted": "✓", "Declined": "×", "Finalized": "✓", "Routed": "◆"
                     }.get(card_state, "•")
                     status_text = f"{state_icon} {card_state}"
                     if status == "Field Nation" and provider:
@@ -752,7 +754,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                         elif card_state in ("Posted", "Assigned"):
                             _date_bits.insert(0, f"Posted {_posted}")
                         label += "\n" + "  ·  ".join(_date_bits)
-                    elif card_state in ("Sent", "Accepted", "Declined"):
+                    elif card_state in ("Sent", "Accepted", "Declined", "Finalized"):
                         _saved = _saved_route_fields(route, _ghost)
                         _status_ts = _route_status_timestamp(route, card_state)
                         _date_bits = [f"{card_state} {_status_ts}"]
@@ -1076,6 +1078,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     div[class*="st-key-revamp_route_Field_Nation_"] button {border-left:4px solid var(--rv-amber)!important;background:#fffdf8!important}
     div[class*="st-key-revamp_route_Sent_"] button {border-left:4px solid var(--rv-blue)!important}
     div[class*="st-key-revamp_route_Accepted_"] button {border-left:4px solid var(--rv-green)!important;background:#fbfefc!important}
+    div[class*="st-key-revamp_route_Finalized_"] button {border-left:4px solid var(--rv-green)!important;background:#fbfefc!important}
     div[class*="st-key-revamp_route_Declined_"] button {border-left:4px solid #98a2b3!important}
     div[class*="st-key-revamp_route_Routed_"] button {border-left:4px solid #667085!important}
 
@@ -1380,10 +1383,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 display_route["_ghost_record"] = saved
                 live_ids = {str(task.get("id") or "").strip() for task in route.get("data", [])}
                 saved_ids = {str(task_id).strip() for task_id in saved.get("task_ids", [])}
-                if saved_ids and saved_ids != live_ids and route_state in ("Sent", "Accepted"):
+                if saved_ids and saved_ids != live_ids and route_state in ("Sent", "Accepted", "Finalized"):
                     display_route["_is_ghost"] = True
                     display_route["data"] = []
-            elif route_state in ("Sent", "Accepted", "Declined"):
+            elif route_state in ("Sent", "Accepted", "Declined", "Finalized"):
                 record = next((sent_db.get(str(task.get("id") or "").strip())
                                for task in route.get("data", [])
                                if str(task.get("id") or "").strip() in sent_db), None)
@@ -1396,7 +1399,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                          route_ts_iso=record.get("status_ts_iso") or "",
                                          db_status=record.get("status") or "")
             if route_state != "Routed":
-                if route_state in ("Sent", "Accepted", "Declined"):
+                if route_state in ("Sent", "Accepted", "Declined", "Finalized"):
                     seen_saved_routes.add((route_pod, route_hash,
                                            str(_saved_route_fields(display_route)["wo"] or "")))
                 all_routes.append((route_pod, display_route, route_state,
@@ -1414,7 +1417,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 continue
             seen_saved_routes.add(saved_identity)
             ghost_status = str(ghost.get("status", "")).lower()
-            state = ("Accepted" if ghost_status in ("accepted", "finalized") else
+            state = ("Finalized" if ghost_status == "finalized" else
+                     "Accepted" if ghost_status == "accepted" else
                      "Field Nation" if ghost_status in ("field_nation", "posted") else
                      "Sent" if ghost_status == "sent" else
                      "Declined" if ghost_status == "declined" else "Routed")
@@ -1463,7 +1467,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         f'<span class="revamp-pill">Unselected <b>{max(0, unselected)}</b></span>'
         f'<span class="revamp-pill">Field Nation <b>{counts["Field Nation"]}</b></span>'
         f'<span class="revamp-pill">Sent <b>{counts["Sent"]}</b></span>'
-        f'<span class="revamp-pill">Accepted <b>{counts["Accepted"]}</b></span>',
+        f'<span class="revamp-pill">Accepted <b>{counts["Accepted"]}</b></span>'
+        f'<span class="revamp-pill">Finalized <b>{counts["Finalized"]}</b></span>',
         unsafe_allow_html=True,
     )
 
@@ -1498,7 +1503,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                  or not entry[1].get("is_removal"))]
     fn_posted = (ghost_db or {}).get("_fn_posted", {}) or {}
     fn_providers = (ghost_db or {}).get("_fn_provider", {}) or {}
-    if status in ("Sent", "Accepted", "Declined"):
+    if status in ("Sent", "Accepted", "Declined", "Finalized"):
         matching.sort(
             key=lambda entry: (
                 _saved_status_sort_key(entry[1]),
@@ -1751,7 +1756,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             return
         pod, route, state, route_hash, nearest = current
         title = f"{route.get('city', 'Route')}, {route.get('state', '')}"
-        saved_fields = _saved_route_fields(route) if state in ("Sent", "Accepted", "Declined") else None
+        saved_fields = _saved_route_fields(route) if state in ("Sent", "Accepted", "Declined", "Finalized") else None
         if saved_fields:
             _display_name = _display_contractor_name(route, state)
             _status_time = _route_status_timestamp(route, state)
@@ -1916,7 +1921,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             st.rerun()
                         except Exception as exc:
                             st.error(f"Could not assign Field Nation rep: {exc}")
-        elif state in ("Sent", "Accepted", "Declined"):
+        elif state in ("Sent", "Accepted", "Declined", "Finalized"):
             if not saved_route_helpers:
                 st.error("Saved route details are unavailable. Refresh the page.")
             else:
