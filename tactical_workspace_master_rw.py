@@ -4183,6 +4183,43 @@ def _warm_load_ic_df():
         _log_err("warm_load_ic_df", _e)
         return pd.DataFrame()
 
+def _is_digital_dispatch_task(*, custom_task_type="", custom_boosted="", native_details="",
+                              c_type="", team_id=None, digital_team_ids=None):
+    """Authoritative digital-vs-static classification used by all ingest paths.
+
+    Priority:
+      1) OnFleet D - Digital Routes team always wins.
+      2) Official digital Task Type wins over incidental words in notes/details.
+      3) Premium_Digital / other boosted-standard values containing 'digital'.
+      4) Static-only task types stay static.
+
+    This keeps Initialize, per-pod processing, and Smart Sync from disagreeing
+    about where the same task belongs.
+    """
+    ctt = str(custom_task_type or "").strip().lower()
+    boosted = str(custom_boosted or "").strip().lower()
+    details = str(native_details or "").strip().lower()
+    team_ids = set(digital_team_ids or [])
+
+    if str(c_type or "").upper() == "TEAM" and team_id in team_ids:
+        return True
+
+    digital_types = ("service", "ins/rem", "offline", "site survey", "digital install")
+    if any(trigger in ctt for trigger in digital_types):
+        return True
+
+    if "digital" in boosted:
+        return True
+
+    static_types = ("photo", "magnet", "continuity", "new ad", "pull down",
+                    "kiosk install", "kiosk removal", "remove kiosk", "escalation")
+    combined = f"{details} {ctt}"
+    if any(trigger in combined for trigger in static_types):
+        return False
+
+    return False
+
+
 def process_digital_pool(master_bar=None):
     prog_bar = master_bar if master_bar else st.progress(0)
     prog_bar.progress(0.1, text="📥 Fetching National Tasks from Onfleet...")
@@ -4211,6 +4248,7 @@ def process_digital_pool(master_bar=None):
         return
     target_team_ids = _onfleet_data['target_team_ids']
     esc_team_ids    = _onfleet_data['esc_team_ids']
+    digital_team_ids = _onfleet_data.get('digital_team_ids', [])
     st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
     st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
     all_tasks_raw   = _onfleet_data['tasks']
@@ -4351,22 +4389,17 @@ def process_digital_pool(master_bar=None):
         # 🌟 Campaign Name always wins over Client Company for FN Customer Name
         client_company = campaign_name or client_company
 
-        # 2. CHECK REGULAR (STATIC) EXEMPTIONS FIRST
-        # Expanded to include "escalation" to prevent crossing over
-        search_string = f"{native_details} {custom_task_type}".lower()
-        REGULAR_EXEMPTIONS = ["photo", "magnet", "continuity", "new ad", "pull down", "kiosk install", "kiosk removal", "escalation"]
-        is_exempt = any(ex in search_string for ex in REGULAR_EXEMPTIONS)
-        
-        # 3. STRICT DIGITAL CHECK
-        is_digital_task = False
-
-        if not is_exempt:
-            # Rule A: Task Type contains service, ins/rem, offline, or site survey
-            if any(trigger in custom_task_type for trigger in ["service", "ins/rem", "offline", "site survey"]):
-                is_digital_task = True
-            # 🌟 Rule B: Boosted Standard contains the word 'digital' (Matches 'Premium_Digital')
-            elif "digital" in custom_boosted:
-                is_digital_task = True
+        # Authoritative Digital classification. Official digital Task Type
+        # and D - Digital Routes team membership win over incidental words in
+        # task notes/details (for example, "kiosk" in a Service-call note).
+        is_digital_task = _is_digital_dispatch_task(
+            custom_task_type=custom_task_type,
+            custom_boosted=custom_boosted,
+            native_details=native_details,
+            c_type=c_type,
+            team_id=container.get('team'),
+            digital_team_ids=digital_team_ids,
+        )
         
         # 🌟 SPEED FIX: Skip routing math entirely if it's not strictly digital
         if not is_digital_task: 
@@ -4814,35 +4847,16 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
 
                 # 🌟 Campaign Name always wins over Client Company for FN Customer Name
                 client_company = campaign_name or client_company
-                # 2. CHECK REGULAR (STATIC) EXEMPTIONS FIRST
-                # Combines native and custom type to ensure "Magnet" or "Photo" are never missed
-                search_string = f"{native_details} {custom_task_type}".lower()
-                REGULAR_EXEMPTIONS = ["photo", "magnet", "continuity", "new ad", "pull down", "kiosk", "escalation"]
-                is_exempt = any(ex in search_string for ex in REGULAR_EXEMPTIONS)
 
-                # 3. APPLY DIGITAL RULES
-                # Locked strictly to the triggers you defined
-                # 🌟 May 2026 — Site Survey added; see comment at first DIGITAL_WHITELIST.
-                DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey", "digital install"]
-                is_digital_task = False
-                # Jul 2026 (Nick): "Digital Install" custom task type wins over the
-                # kiosk exemption. Otherwise notes like "install kiosk here" trip
-                # the "kiosk" exemption above and the task lands in static.
-                if "digital install" in custom_task_type:
-                    is_digital_task = False
-                # Jul 2026 (Nick): tasks in the "D - Digital Routes" OnFleet
-                # team override the whitelist/exemption path — team membership
-                # wins so the task always lands in the Digital tab.
-                _digital_team_ids_local = _onfleet_data.get('digital_team_ids', [])
-                if c_type == 'TEAM' and container.get('team') in _digital_team_ids_local:
-                    is_digital_task = True
-                elif not is_exempt:
-                    # Rule A: Official Task Type matches whitelist
-                    if any(trigger in custom_task_type for trigger in DIGITAL_WHITELIST):
-                        is_digital_task = True
-                    # 🌟 Rule B: Boosted Standard contains the word 'digital' (matches 'Premium_Digital')
-                    elif "digital" in custom_boosted:
-                        is_digital_task = True
+                # Same authoritative classifier used by the Digital pool.
+                is_digital_task = _is_digital_dispatch_task(
+                    custom_task_type=custom_task_type,
+                    custom_boosted=custom_boosted,
+                    native_details=native_details,
+                    c_type=c_type,
+                    team_id=container.get('team'),
+                    digital_team_ids=_onfleet_data.get('digital_team_ids', []),
+                )
                 # --- 3. ASSIGN STATUS & POOL ---
                 t_status = 'ready'
                 t_wo = 'none'
@@ -7652,16 +7666,14 @@ def smart_sync_pod(pod_name):
         # 🌟 Campaign Name always wins over Client Company for FN Customer Name
         client_company = campaign_name or client_company
 
-        search_string = f"{native_details} {custom_task_type}".lower()
-        REGULAR_EXEMPTIONS = ["photo", "magnet", "continuity", "new ad", "pull down", "kiosk", "escalation"]
-        is_exempt = any(ex in search_string for ex in REGULAR_EXEMPTIONS)
-        DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey", "digital install"]
-        is_digital_task = False
-        if not is_exempt:
-            if any(trigger in custom_task_type for trigger in DIGITAL_WHITELIST):
-                is_digital_task = True
-            elif "digital" in custom_boosted:
-                is_digital_task = True
+        is_digital_task = _is_digital_dispatch_task(
+            custom_task_type=custom_task_type,
+            custom_boosted=custom_boosted,
+            native_details=native_details,
+            c_type=c_type,
+            team_id=container.get('team'),
+            digital_team_ids=_onfleet_data.get('digital_team_ids', []),
+        )
 
         t_status = fresh_sent_db.get(t['id'], {}).get('status', 'ready').lower() if t['id'] in fresh_sent_db else 'ready'
         t_wo = fresh_sent_db.get(t['id'], {}).get('wo', 'none') if t['id'] in fresh_sent_db else 'none'
