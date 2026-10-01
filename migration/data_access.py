@@ -266,6 +266,7 @@ def process_decision(
 
     route_payload = current["payload"] if isinstance(current["payload"], dict) else json.loads(current["payload"])
     agreed_comp = route_payload.get("comp")
+    decided_at = datetime.now(timezone.utc).isoformat()
     try:
         agreed_comp = float(agreed_comp)
     except (TypeError, ValueError):
@@ -290,14 +291,17 @@ def process_decision(
     event_payload = {
         "decision": decision, "signature": signature, "notes": notes, "phone": phone,
         "onfleet": onfleet_result,
+        "decided_at": decided_at,
     }
 
-    # Permanent historical timestamp: preserve the first successful acceptance.
+    # Record this decision before OnFleet work, not after its network delay.
+    # The idempotent return above preserves retries; a real resend/reaccept
+    # gets its own timestamp rather than inheriting the old acceptance.
     route_payload = dict(route_payload or {})
     if decision == "accept":
-        route_payload.setdefault("accepted_at", datetime.now(timezone.utc).isoformat())
+        route_payload["accepted_at"] = decided_at
     else:
-        route_payload.setdefault("declined_at", datetime.now(timezone.utc).isoformat())
+        route_payload["declined_at"] = decided_at
 
     with engine.begin() as conn:
         conn.execute(
@@ -794,7 +798,7 @@ def _normalize_ts(value: Any) -> tuple[Any, str]:
     """(pandas Timestamp-or-None, '%m/%d %I:%M %p' display string) for a
     Postgres timestamptz column value. Mirrors the sheet path's dt_obj/
     ts_display pair, but starting from a real datetime instead of a CSV
-    string -- no pd.to_datetime parsing/failure path needed. Strips any tz
+    string. Convert UTC/offset timestamps to Central time before stripping tz
     so it sorts/compares cleanly against the tz-naive timestamps the sheet
     path already produces (see _cached_fetch_sent_records_from_sheet's
     _sort_key, which does the same strip for the same reason)."""
@@ -804,8 +808,9 @@ def _normalize_ts(value: Any) -> tuple[Any, str]:
     if pd.isna(ts):
         return None, ""
     try:
-        if ts.tzinfo is not None:
-            ts = ts.tz_localize(None)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        ts = ts.tz_convert("America/Chicago").tz_localize(None)
     except Exception:
         pass
     return ts, ts.strftime("%m/%d %I:%M %p")
@@ -824,6 +829,7 @@ def _ingest_sent_record(
     history_db: dict[str, Any],
     pod_configs: dict[str, dict[str, Any]],
     state_map: dict[str, str],
+    status_ts_iso: str = "",
 ) -> None:
     """One record's worth of the per-row logic inside
     _cached_fetch_sent_records_from_sheet's main loop (sheet-CSV version:
@@ -861,6 +867,7 @@ def _ingest_sent_record(
             "comp": p.get("comp", 0),
             "due": p.get("due", "N/A"),
             "raw_ts": dt_obj,
+            "status_ts_iso": status_ts_iso or (dt_obj.tz_localize("America/Chicago", ambiguous=True).isoformat() if hasattr(dt_obj, "tz_localize") else ""),
         }
         history_db.setdefault(tid, []).append({
             "status": status_label,
@@ -949,7 +956,7 @@ def _ingest_sent_record(
                 "contractor_name": c_name,
                 "contractor_email": str(p.get("ice") or "").strip(),
                 "route_ts": ts_display,
-                "route_ts_iso": dt_obj.isoformat() if hasattr(dt_obj, "isoformat") else str(dt_obj or ""),
+                "route_ts_iso": status_ts_iso or (dt_obj.tz_localize("America/Chicago", ambiguous=True).isoformat() if hasattr(dt_obj, "tz_localize") else str(dt_obj or "")),
                 "city": city_guess,
                 "state": norm_state,
                 "stops": p.get("lCnt", 0),
@@ -999,10 +1006,27 @@ def get_sent_records_from_db(
         route_rows = conn.execute(
             sa.text(
                 """
-                SELECT wo, contractor_name, status::text AS status, payload, created_at, updated_at
-                FROM routes
-                WHERE created_at >= :cutoff
-                ORDER BY created_at
+                SELECT r.wo, r.contractor_name, r.status::text AS status,
+                       r.payload, r.created_at, r.updated_at,
+                       ev.accepted_event_at, ev.declined_event_at, ev.finalized_event_at
+                FROM routes r
+                LEFT JOIN LATERAL (
+                    SELECT
+                        (SELECT COALESCE(e.payload->>'decided_at', e.created_at::text)
+                         FROM route_events e WHERE e.route_id = r.id
+                         AND ((e.action = 'processDecision' AND e.payload->>'decision' = 'accept')
+                              OR e.action = 'markFNAssigned')
+                         ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS accepted_event_at,
+                        (SELECT COALESCE(e.payload->>'decided_at', e.created_at::text)
+                         FROM route_events e WHERE e.route_id = r.id
+                         AND e.action = 'processDecision' AND e.payload->>'decision' = 'decline'
+                         ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS declined_event_at,
+                        (SELECT e.created_at::text FROM route_events e
+                         WHERE e.route_id = r.id AND e.action = 'finalizeRoute'
+                         ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS finalized_event_at
+                ) ev ON TRUE
+                WHERE r.created_at >= :cutoff
+                ORDER BY r.created_at
                 """
             ),
             {"cutoff": cutoff_date},
@@ -1048,17 +1072,24 @@ def get_sent_records_from_db(
         p = _parsed(row["payload"])
         _status = str(row["status"] or "").lower()
         _status_ts = (
-            p.get("accepted_at") if _status in ("accepted", "finalized") else
-            p.get("declined_at") if _status == "declined" else
+            (row.get("finalized_event_at") or p.get("finalized_at") or row.get("accepted_event_at") or p.get("accepted_at")) if _status == "finalized" else
+            (row.get("accepted_event_at") or p.get("accepted_at")) if _status == "accepted" else
+            (row.get("declined_event_at") or p.get("declined_at")) if _status == "declined" else
             p.get("sent_at") if _status == "sent" else
             None
         )
-        dt_obj, ts_display = _normalize_ts(_status_ts or row.get("updated_at") or row["created_at"])
+        # An unrelated edit/finalization must not reorder acceptances. Legacy
+        # rows with no decision history fall back to their stable creation time.
+        timestamp = _status_ts or row["created_at"]
+        dt_obj, ts_display = _normalize_ts(timestamp)
+        utc_ts = pd.Timestamp(timestamp)
+        if utc_ts.tzinfo is None:
+            utc_ts = utc_ts.tz_localize("UTC")
         _ingest_sent_record(
             p=p, c_name=row["contractor_name"], dt_obj=dt_obj, ts_display=ts_display,
             status_label=row["status"], sent_dict=sent_dict, ghost_routes=ghost_routes,
             fn_posted_dict=fn_posted_dict, fn_provider_dict=fn_provider_dict, history_db=history_db,
-            pod_configs=pod_configs, state_map=state_map,
+            pod_configs=pod_configs, state_map=state_map, status_ts_iso=utc_ts.isoformat(),
         )
 
     for row in fn_rows:
