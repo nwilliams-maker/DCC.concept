@@ -119,6 +119,14 @@ WRITE_ACTIONS = {"address_changed", "address_changed_ungeocodable", "coords_fill
 
 
 def main(argv: list[str] | None = None) -> int:
+    print("Bulk address backfill is retired: the IC list was corrected on 2026-09-30 and "
+          "existing ICs' addresses must not be bulk-rewritten. To change one IC's address use:\n"
+          "  python -m migration.update_ic_address --email <ic email> --address \"<full address>\"",
+          file=sys.stderr)
+    return 2
+
+
+def _retired_bulk_main(argv: list[str] | None = None) -> int:  # kept for reference only
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--apply", action="store_true", help="write the fixes (default: dry run)")
     ap.add_argument("--clear-unverified", action="store_true",

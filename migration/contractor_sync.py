@@ -41,6 +41,29 @@ US_STATES = frozenset(
     "AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO "
     "MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY PR".split()
 )
+# Pod geography: Nick's state map is the source of truth for pod colors
+# (confirmed 2026-09-30). A pod is derived from the IC's address state; the
+# Monday Pod Color cell is only a fallback when no state can be read.
+STATE_TO_POD = {
+    **{s: "Blue" for s in ("AL", "AR", "FL", "IL", "IA", "LA", "MI", "MN", "MS", "MO", "NC", "SC", "WI", "OR", "WA", "NV")},
+    **{s: "Green" for s in ("CO", "DC", "GA", "IN", "KY", "MD", "NJ", "OH", "UT")},
+    **{s: "Orange" for s in ("AK", "AZ", "CA", "HI", "ID")},
+    **{s: "Purple" for s in ("KS", "MT", "NE", "NM", "ND", "OK", "SD", "TN", "TX", "WY")},
+    **{s: "Red" for s in ("CT", "DE", "ME", "MA", "NH", "NY", "PA", "RI", "VT", "VA", "WV")},
+}
+STATE_NAME_TO_ABBR = {
+    "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR", "CALIFORNIA": "CA",
+    "COLORADO": "CO", "CONNECTICUT": "CT", "DELAWARE": "DE", "FLORIDA": "FL", "GEORGIA": "GA",
+    "HAWAII": "HI", "IDAHO": "ID", "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA", "KANSAS": "KS",
+    "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD", "MASSACHUSETTS": "MA",
+    "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS", "MISSOURI": "MO", "MONTANA": "MT",
+    "NEBRASKA": "NE", "NEVADA": "NV", "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ", "NEW MEXICO": "NM",
+    "NEW YORK": "NY", "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH", "OKLAHOMA": "OK",
+    "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC",
+    "SOUTH DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT", "VERMONT": "VT",
+    "VIRGINIA": "VA", "WASHINGTON": "WA", "WEST VIRGINIA": "WV", "WISCONSIN": "WI", "WYOMING": "WY",
+    "DISTRICT OF COLUMBIA": "DC",
+}
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -335,6 +358,7 @@ def _item_to_source(item: dict[str, Any], mapping: dict[str, str]) -> dict[str, 
     m_lat, m_lng = _monday_location_coords(loc_val.get("value"))
     if m_lat is not None:
         source["monday_lat"], source["monday_lng"] = m_lat, m_lng
+    source["pod_color"] = resolved_pod(source.get("location"), source.get("pod_color"))
     availability = _availability_class(source)
     if availability:
         source["ic_list"] = availability
@@ -361,6 +385,32 @@ def _source_coords(source: dict[str, Any], location: str | None, geocode=None) -
     if lat is not None and lng is not None:
         return lat, lng
     return (geocode or _geocode)(location) if location else (None, None)
+
+
+def state_from_location(location: Any) -> str | None:
+    """USPS state code from an address: last real 2-letter code, else a full state name."""
+    text = str(location or "").upper()
+    if not text.strip():
+        return None
+    for tok in reversed(re.findall(r"(?:^|[,\s])([A-Z]{2})(?=[\s,]|$)", text)):
+        if tok in STATE_TO_POD:
+            return tok
+    for part in reversed([p.strip() for p in text.split(",")]):
+        part = re.sub(r"\s+\d{5}(?:-\d{4})?$", "", part)
+        if part in STATE_NAME_TO_ABBR:
+            return STATE_NAME_TO_ABBR[part]
+    for name in sorted(STATE_NAME_TO_ABBR, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(name)}\b", text):
+            return STATE_NAME_TO_ABBR[name]
+    return None
+
+
+def resolved_pod(location: Any, monday_pod: Any = None) -> str | None:
+    """Pod from the address state (source of truth); Monday pod only as fallback."""
+    st = state_from_location(location)
+    if st and st in STATE_TO_POD:
+        return STATE_TO_POD[st]
+    return _clean_text(monday_pod)
 
 
 def _availability_class(source: dict[str, Any], insurance_window_days: int = 90) -> str | None:
@@ -520,7 +570,10 @@ def _geocode(location: str | None) -> tuple[float | None, float | None]:
 
 def _build_update(existing: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for field in ("name", "phone", "location", "ic_list", "pod_color"):
+    # location / pod_color are deliberately NOT updated for existing ICs: the
+    # current list was corrected 2026-09-30 and is frozen (Nick's rule). Use
+    # migration/update_ic_address.py to change one specific IC's address.
+    for field in ("name", "phone", "ic_list"):
         incoming = _clean_text(source.get(field))
         if incoming and incoming != existing.get(field):
             out[field] = incoming
@@ -696,7 +749,6 @@ def sync_contractors_from_monday(engine: sa.Engine | None = None) -> dict[str, A
                 continue
 
             updates = _build_update(existing, source)
-            updates.update(_coordinate_updates(existing, source, updates))
             if not updates:
                 result["unchanged"] += 1
                 continue

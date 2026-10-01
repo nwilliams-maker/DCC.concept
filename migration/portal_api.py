@@ -157,6 +157,33 @@ async def internal_route_sync(request: Request):
     return {"success": True, "wo": wo, "status": status}
 
 
+def _intake_location(existing, incoming, pin_lat, pin_lng, state_of, geocode):
+    """Decide (location, lat, lng) for a NEW IC (existing ICs are frozen).
+
+    Coordinates come from Monday's map pin, else a strict geocode, else none.
+    The comparison rules below are kept for safety if ever reused, but the
+    intake endpoint only calls this for ICs not yet in Postgres.
+    """
+    old_loc = existing.get("location")
+    old_lat, old_lng = existing.get("lat"), existing.get("lng")
+    loc = incoming or old_loc
+    if old_loc and incoming and state_of(old_loc) and not state_of(incoming):
+        loc = old_loc
+    have_pin = pin_lat is not None and pin_lng is not None
+    if loc != old_loc:
+        if have_pin:
+            return loc, pin_lat, pin_lng
+        lat, lng = geocode(loc) if loc else (None, None)
+        return loc, lat, lng
+    if have_pin:
+        return loc, pin_lat, pin_lng
+    if (old_lat is None or old_lng is None) and loc:
+        lat, lng = geocode(loc)
+        if lat is not None and lng is not None:
+            return loc, lat, lng
+    return loc, old_lat, old_lng
+
+
 @app.post("/internal/contractors/sync")
 async def sync_recent_contractors(request: Request):
     """Receive the Monday IC/FA intake from DCC's existing hourly sync.
@@ -177,7 +204,10 @@ async def sync_recent_contractors(request: Request):
     if not isinstance(rows, list) or len(rows) > 5000:
         return JSONResponse({"error": "Expected at most 5000 contractors"}, status_code=400)
 
-    from .contractor_sync import normalize_email, normalize_phone, _clean_text
+    from .contractor_sync import (
+        normalize_email, normalize_phone, _clean_text, _monday_location_coords,
+        _geocode, resolved_pod, state_from_location,
+    )
     prepared = []
     skipped = 0
     for source in rows:
@@ -207,7 +237,10 @@ async def sync_recent_contractors(request: Request):
             "monday_created_at": created,
             "email": email, "name": name, "phone": "+1" + phone if phone and len(phone) == 10 else _clean_text(source.get("phone")),
             "location": location, "ic_list": status or None,
-            "pod_color": _clean_text(source.get("pod_color")),
+            # Pod comes from the address state (Nick's state map); Monday's
+            # pod cell is only a fallback when no state is readable.
+            "pod_color": resolved_pod(location, source.get("pod_color")),
+            "pin": _monday_location_coords({"lat": source.get("monday_lat"), "lng": source.get("monday_lng")}),
             "digital_certified": bool(source.get("digital_certified")),
             "unrestricted": bool(source.get("unrestricted")),
         })
@@ -222,28 +255,37 @@ async def sync_recent_contractors(request: Request):
             )
         """))
         for row in prepared:
-            existing = conn.execute(sa.text("SELECT id, name, phone FROM contractors WHERE email = :email"), row).mappings().first()
+            existing = conn.execute(sa.text(
+                "SELECT id, name, phone, location, lat, lng FROM contractors WHERE email = :email"
+            ), row).mappings().first()
+            pin_lat, pin_lng = row.pop("pin")
             if existing:
                 old_phone = normalize_phone(existing["phone"])
                 new_phone = normalize_phone(row["phone"])
                 if old_phone and new_phone and old_phone != new_phone and existing["name"].strip().casefold() != row["name"].casefold():
                     conflicts += 1
                     continue
+                # Existing ICs: address, coordinates and pod are FROZEN. The
+                # current list was corrected 2026-09-30 and must not be
+                # rewritten by syncs (Nick's rule). A specific IC's address is
+                # changed only deliberately via migration/update_ic_address.py.
                 conn.execute(sa.text("""
-                    UPDATE contractors SET name=:name, phone=:phone, location=:location,
-                      ic_list=:ic_list, pod_color=COALESCE(:pod_color, pod_color),
+                    UPDATE contractors SET name=:name, phone=:phone,
+                      ic_list=:ic_list,
                       digital_certified=:digital_certified, unrestricted=:unrestricted,
                       updated_at=now()
                     WHERE email=:email
                 """), row)
                 updated += 1
             else:
+                loc, lat, lng = _intake_location(
+                    {}, row["location"], pin_lat, pin_lng, state_from_location, _geocode)
                 conn.execute(sa.text("""
-                    INSERT INTO contractors (email, name, phone, location, ic_list, pod_color,
+                    INSERT INTO contractors (email, name, phone, location, lat, lng, ic_list, pod_color,
                         digital_certified, unrestricted)
-                    VALUES (:email, :name, :phone, :location, :ic_list, :pod_color,
+                    VALUES (:email, :name, :phone, :location, :lat, :lng, :ic_list, :pod_color,
                         :digital_certified, :unrestricted)
-                """), row)
+                """), {**row, "location": loc, "lat": lat, "lng": lng})
                 added += 1
             conn.execute(sa.text("""
                 INSERT INTO contractor_monday_intake (email, monday_item_id, monday_created_at)
