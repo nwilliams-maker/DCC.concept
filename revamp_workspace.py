@@ -21,7 +21,7 @@ import streamlit as st
 
 
 STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined")
-PODS = ("Blue", "Green", "Orange", "Purple", "Red")
+PODS = ("Blue", "Green", "Orange", "Purple", "Red", "Digital")
 HIGH_RATE_FLAG_THRESHOLD = 25.00  # Matches the dispatch card's $24.99 cutoff.
 
 
@@ -710,7 +710,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers):
                     if removal:
                         status_text += " · CVS Removal"
                     label = (f"{city}, {route.get('state', '')}    {status_text}\n"
-                             f"{pod} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
+                             f"{('Digital' if pod == 'Global_Digital' else pod)} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
                              f"{tasks} {'task' if tasks == 1 else 'tasks'}")
                     _important = _important_route_badges(route)
                     if _important:
@@ -861,7 +861,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      fetch_sent_records_from_sheet, default_due_days=14,
                      fn_ghost_to_cluster=None, saved_route_helpers=None,
                      merge_same_wo_ghosts=None, cluster_store=None,
-                     mapbox_geocode=None):
+                     mapbox_geocode=None, process_digital_pool=None):
     """Render one selected route while retaining the existing dispatch actions."""
     st.markdown("""
     <style>
@@ -1208,9 +1208,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             st.error(f"Contractor sync stopped: {exc}")
     # A new signed-in session loads its selected pod automatically. Switching
     # pods loads only pods this session has not yet built; the refresh button
-    # explicitly rebuilds the selected pod(s) against fresh Onfleet data.
+    # explicitly rebuilds the selected pod(s) against fresh OnFleet data.
+    def _cluster_key(pod):
+        return "global_digital_clusters" if pod == "Digital" else f"clusters_{pod}"
+
+    def _route_pod_key(pod):
+        return "Global_Digital" if pod == "Digital" else pod
+
     pending_pods = [pod for pod in selected_pods if
-                    f"clusters_{pod}" not in st.session_state and
+                    _cluster_key(pod) not in st.session_state and
                     not st.session_state.get(f"_revamp_load_attempted_{pod}")]
     if refresh_clicked or pending_pods:
         fetch_sent_records_from_sheet.clear()
@@ -1218,46 +1224,65 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             st.session_state[f"_revamp_load_attempted_{pod}"] = True
             started = time.monotonic()
             print(f"[revamp/sync] waiting for {pod} load", flush=True)
-            if cluster_store is not None:
-                # The server builds routes independently of the browser.
-                # Poll its task-page counter so mobile users see real counts
-                # and can reconnect without restarting the download.
-                future = _background_pod_build(
-                    pod, process_pod, cluster_store,
-                    refresh=refresh_clicked and index == 0,
-                )
-                indicator = st.progress(0.02, text="Connecting to OnFleet...")
-                last_display = None
-                try:
-                    while True:
-                        try:
-                            ready = future.result(timeout=1)
-                            break
-                        except FutureTimeout:
-                            display = _build_progress_display(pod)
-                            if display != last_display:
-                                indicator.progress(display[0], text=display[1])
-                                last_display = display
-                            if time.monotonic() - started > 240:
-                                st.session_state[f"_revamp_load_attempted_{pod}"] = False
-                                st.info("OnFleet extraction continues in the background. Reload to see the completed routes.")
-                                return
-                except Exception as exc:
-                    print(f"[revamp/sync] background build failed for {pod}: {type(exc).__name__}: {exc}", flush=True)
-                    ready = False
-                finally:
-                    indicator.empty()
-                if not ready:
-                    st.error("OnFleet task extraction failed. Click Check new tasks to retry.")
+
+            # Digital has its own authoritative pool builder and session-state
+            # store. Treat it like every other Revamp pod in the UI, but route
+            # its load through the existing Digital pipeline instead of
+            # process_pod(), which only supports the five geographic pods.
+            if pod == "Digital":
+                if process_digital_pool is None:
+                    st.error("Digital route loading is unavailable.")
                     continue
-            with st.spinner(f"Finishing {pod} routes..."):
-                with _pod_load_locks()[pod]:
-                    print(f"[revamp/sync] starting {pod}", flush=True)
-                    if cluster_store is None and refresh_clicked and index == 0:
-                        process_pod(pod, refresh_tasks=True)
-                    else:
-                        process_pod(pod)
-            loaded_count = len(st.session_state.get(f"clusters_{pod}", []))
+                try:
+                    with st.spinner("Loading Digital routes..."):
+                        process_digital_pool()
+                except Exception as exc:
+                    print(f"[revamp/sync] Digital load failed: {type(exc).__name__}: {exc}", flush=True)
+                    st.session_state[f"_revamp_load_attempted_{pod}"] = False
+                    st.error("Digital task extraction failed. Click Check new tasks to retry.")
+                    continue
+            else:
+                if cluster_store is not None:
+                    # The server builds routes independently of the browser.
+                    # Poll its task-page counter so mobile users see real counts
+                    # and can reconnect without restarting the download.
+                    future = _background_pod_build(
+                        pod, process_pod, cluster_store,
+                        refresh=refresh_clicked and index == 0,
+                    )
+                    indicator = st.progress(0.02, text="Connecting to OnFleet...")
+                    last_display = None
+                    try:
+                        while True:
+                            try:
+                                ready = future.result(timeout=1)
+                                break
+                            except FutureTimeout:
+                                display = _build_progress_display(pod)
+                                if display != last_display:
+                                    indicator.progress(display[0], text=display[1])
+                                    last_display = display
+                                if time.monotonic() - started > 240:
+                                    st.session_state[f"_revamp_load_attempted_{pod}"] = False
+                                    st.info("OnFleet extraction continues in the background. Reload to see the completed routes.")
+                                    return
+                    except Exception as exc:
+                        print(f"[revamp/sync] background build failed for {pod}: {type(exc).__name__}: {exc}", flush=True)
+                        ready = False
+                    finally:
+                        indicator.empty()
+                    if not ready:
+                        st.error("OnFleet task extraction failed. Click Check new tasks to retry.")
+                        continue
+                with st.spinner(f"Finishing {pod} routes..."):
+                    with _pod_load_locks()[pod]:
+                        print(f"[revamp/sync] starting {pod}", flush=True)
+                        if cluster_store is None and refresh_clicked and index == 0:
+                            process_pod(pod, refresh_tasks=True)
+                        else:
+                            process_pod(pod)
+
+            loaded_count = len(st.session_state.get(_cluster_key(pod), []))
             print(f"[revamp/sync] finished {pod}: {loaded_count} routes in {time.monotonic() - started:.1f}s", flush=True)
         st.session_state["_last_sync_ts"] = datetime.now()
 
@@ -1270,7 +1295,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     st.session_state["archived_wos"] = archived_wos
     st.session_state["_history_db"] = history_db
 
-    loaded = [pod for pod in selected_pods if f"clusters_{pod}" in st.session_state]
+    loaded = [pod for pod in selected_pods if _cluster_key(pod) in st.session_state]
     if not loaded:
         st.error("Routes could not be loaded. Click Check new tasks to retry.")
         return
@@ -1282,8 +1307,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     all_routes = []
     seen_hashes = set()
     ghosts_by_pod = {
-        pod: (merge_same_wo_ghosts((ghost_db or {}).get(pod, []))
-              if merge_same_wo_ghosts else (ghost_db or {}).get(pod, []))
+        pod: (merge_same_wo_ghosts((ghost_db or {}).get(_route_pod_key(pod), []))
+              if merge_same_wo_ghosts else (ghost_db or {}).get(_route_pod_key(pod), []))
         for pod in loaded
     }
     saved_by_hash = {
@@ -1292,23 +1317,23 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         if ghost.get("hash")
     }
     for pod in loaded:
-        for route in st.session_state.get(f"clusters_{pod}", []):
-            if route.get("is_digital"):
+        route_pod = _route_pod_key(pod)
+        for route in st.session_state.get(_cluster_key(pod), []):
+            if pod != "Digital" and route.get("is_digital"):
+                continue
+            if pod == "Digital" and not route.get("is_digital"):
                 continue
             nearest = _nearest_ic(route, eligible_ics, haversine)
             route_hash = _route_hash(route)
             seen_hashes.add(route_hash)
             display_route = dict(route)
-            route_state = _route_status(route, sent_db, nearest[1] if nearest else None, pod)
+            route_state = _route_status(route, sent_db, nearest[1] if nearest else None, route_pod)
             saved = saved_by_hash.get((pod, route_hash))
             if saved:
                 display_route["_ghost_record"] = saved
                 live_ids = {str(task.get("id") or "").strip() for task in route.get("data", [])}
                 saved_ids = {str(task_id).strip() for task_id in saved.get("task_ids", [])}
                 if saved_ids and saved_ids != live_ids and route_state in ("Sent", "Accepted"):
-                    # A bundled WO can persist several route rows while the
-                    # live feed exposes only one fragment. Show the full saved
-                    # card and its stop data, like DCC's unified ghost view.
                     display_route["_is_ghost"] = True
                     display_route["data"] = []
             elif route_state in ("Sent", "Accepted"):
@@ -1321,11 +1346,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                          comp=record.get("comp", 0),
                                          due=record.get("due") or "N/A")
             if route_state != "Routed":
-                all_routes.append((pod, display_route, route_state,
+                all_routes.append((route_pod, display_route, route_state,
                                    route_hash, nearest))
-    # Accepted routes often leave Onfleet's unassigned feed; include the
+
+    # Accepted routes often leave OnFleet's unassigned feed; include the
     # persisted ghost records so they remain visible in this workspace.
     for pod in loaded:
+        route_pod = _route_pod_key(pod)
         for ghost in ghosts_by_pod[pod]:
             route_hash = str(ghost.get("hash") or "")
             if (not route_hash or route_hash in seen_hashes or
@@ -1347,7 +1374,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 "data": rebuilt_fn_data,
             }
             if state != "Routed":
-                all_routes.append((pod, route, state, route_hash, None))
+                all_routes.append((route_pod, route, state, route_hash, None))
     # Multiple live clusters can contain the same task IDs. Their hashes (and
     # Streamlit widget keys) coincide; keep one route before counts, selection,
     # bulk actions, and the visible list are derived.
@@ -1677,7 +1704,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             st.markdown(f"### {html.escape(str(saved_fields['wo'] or title))}")
             _due_part = f" · Due {html.escape(str(saved_fields['due']))}" if state in ("Sent", "Accepted") else ""
             st.caption(
-                f"{title} · {state} {_status_time} · {pod} pod · "
+                f"{title} · {state} {_status_time} · {('Digital' if pod == 'Global_Digital' else pod)} pod · "
                 f"{saved_fields['stops']} stops · {saved_fields['tasks']} tasks{_due_part}"
             )
             st.caption(f"Assigned to: {_display_name}")
@@ -1687,7 +1714,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             _detail_tasks = (len(route.get("data", []))
                              or len(_ghost.get("task_ids") or [])
                              or int(_ghost.get("tasks") or _ghost.get("tCnt") or 0))
-            st.caption(f"{pod} pod · {route.get('stops', 0)} stops · "
+            st.caption(f"{('Digital' if pod == 'Global_Digital' else pod)} pod · {route.get('stops', 0)} stops · "
                        f"{_detail_tasks} tasks")
         if nearest:
             st.caption(f"Closest eligible IC: {nearest[0]} · {nearest[1]:.1f} mi")
