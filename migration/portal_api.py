@@ -158,17 +158,12 @@ async def internal_route_sync(request: Request):
 
 
 def _intake_location(existing, incoming, pin_lat, pin_lng, state_of, geocode):
-    """Decide (location, lat, lng) for a NEW IC (existing ICs are frozen).
-
-    Coordinates come from Monday's map pin, else a strict geocode, else none.
-    The comparison rules below are kept for safety if ever reused, but the
-    intake endpoint only calls this for ICs not yet in Postgres.
-    """
+    """Resolve a complete Monday Location without retaining a stale pin."""
     old_loc = existing.get("location")
     old_lat, old_lng = existing.get("lat"), existing.get("lng")
     loc = incoming or old_loc
     if old_loc and incoming and state_of(old_loc) and not state_of(incoming):
-        loc = old_loc
+        return old_loc, old_lat, old_lng
     have_pin = pin_lat is not None and pin_lng is not None
     if loc != old_loc:
         if have_pin:
@@ -186,7 +181,7 @@ def _intake_location(existing, incoming, pin_lat, pin_lng, state_of, geocode):
 
 @app.post("/internal/contractors/sync")
 async def sync_recent_contractors(request: Request):
-    """Receive the Monday IC/FA intake from DCC's existing hourly sync.
+    """Receive the Monday IC/FA intake from DCC's existing five-minute sync.
 
     This writes Revamp's own Postgres roster, which its contractor picker and
     bounded OnFleet worker reconciliation already read. The dedicated token
@@ -208,6 +203,7 @@ async def sync_recent_contractors(request: Request):
         normalize_email, normalize_phone, _clean_text, _monday_location_coords,
         _geocode, resolved_pod, state_from_location,
     )
+    refresh_addresses = body.get("refresh_addresses") is True
     prepared = []
     skipped = 0
     for source in rows:
@@ -245,7 +241,7 @@ async def sync_recent_contractors(request: Request):
             "unrestricted": bool(source.get("unrestricted")),
         })
 
-    added = updated = conflicts = 0
+    added = updated = conflicts = addresses_updated = 0
     with engine.begin() as conn:
         conn.execute(sa.text("""
             CREATE TABLE IF NOT EXISTS contractor_monday_intake (
@@ -254,9 +250,17 @@ async def sync_recent_contractors(request: Request):
                 monday_created_at TIMESTAMPTZ NOT NULL
             )
         """))
+        conn.execute(sa.text("""
+            CREATE TABLE IF NOT EXISTS contractor_monday_locations (
+                email TEXT PRIMARY KEY,
+                location TEXT NOT NULL,
+                pin_lat DOUBLE PRECISION,
+                pin_lng DOUBLE PRECISION
+            )
+        """))
         for row in prepared:
             existing = conn.execute(sa.text(
-                "SELECT id, name, phone, location, lat, lng FROM contractors WHERE email = :email"
+                "SELECT id, name, phone, location, lat, lng, pod_color FROM contractors WHERE email = :email"
             ), row).mappings().first()
             pin_lat, pin_lng = row.pop("pin")
             if existing:
@@ -265,10 +269,24 @@ async def sync_recent_contractors(request: Request):
                 if old_phone and new_phone and old_phone != new_phone and existing["name"].strip().casefold() != row["name"].casefold():
                     conflicts += 1
                     continue
-                # Existing ICs: address, coordinates and pod are FROZEN. The
-                # current list was corrected 2026-09-30 and must not be
-                # rewritten by syncs (Nick's rule). A specific IC's address is
-                # changed only deliberately via migration/update_ic_address.py.
+                # The first delivery records Monday's baseline, preserving the
+                # corrected roster. Later Location/pin edits sync automatically.
+                # An authenticated targeted refresh can apply an already-made edit.
+                prior = conn.execute(sa.text(
+                    "SELECT location, pin_lat, pin_lng FROM contractor_monday_locations WHERE email=:email"
+                ), row).mappings().first()
+                complete = bool(row["location"] and state_from_location(row["location"]))
+                changed = prior is not None and (
+                    row["location"] != prior["location"]
+                    or (pin_lat, pin_lng) != (prior["pin_lat"], prior["pin_lng"]))
+                if complete and (changed or refresh_addresses):
+                    loc, lat, lng = _intake_location(
+                        existing, row["location"], pin_lat, pin_lng, state_from_location, _geocode)
+                    conn.execute(sa.text("""
+                        UPDATE contractors SET location=:location, lat=:lat, lng=:lng,
+                          pod_color=:pod_color, updated_at=now() WHERE email=:email
+                    """), {**row, "location": loc, "lat": lat, "lng": lng})
+                    addresses_updated += 1
                 conn.execute(sa.text("""
                     UPDATE contractors SET name=:name, phone=:phone,
                       ic_list=:ic_list,
@@ -287,6 +305,15 @@ async def sync_recent_contractors(request: Request):
                         :digital_certified, :unrestricted)
                 """), {**row, "location": loc, "lat": lat, "lng": lng})
                 added += 1
+            # Blank or street-only values must not replace the last complete
+            # source snapshot, otherwise they would look like an address edit.
+            if row["location"] and state_from_location(row["location"]):
+                conn.execute(sa.text("""
+                    INSERT INTO contractor_monday_locations (email, location, pin_lat, pin_lng)
+                    VALUES (:email, :location, :pin_lat, :pin_lng)
+                    ON CONFLICT (email) DO UPDATE SET location=EXCLUDED.location,
+                        pin_lat=EXCLUDED.pin_lat, pin_lng=EXCLUDED.pin_lng
+                """), {**row, "pin_lat": pin_lat, "pin_lng": pin_lng})
             conn.execute(sa.text("""
                 INSERT INTO contractor_monday_intake (email, monday_item_id, monday_created_at)
                 VALUES (:email, :monday_item_id, :monday_created_at)
@@ -294,7 +321,7 @@ async def sync_recent_contractors(request: Request):
                     monday_created_at=EXCLUDED.monday_created_at
             """), row)
     return {"received": len(rows), "added": added, "updated": updated,
-            "skipped": skipped, "conflicts": conflicts}
+            "skipped": skipped, "conflicts": conflicts, "addresses_updated": addresses_updated}
 
 
 @app.on_event("startup")
