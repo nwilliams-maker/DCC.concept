@@ -18,6 +18,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
 import requests
 import streamlit as st
+from task_addresses import address_with_zip
 
 
 STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined")
@@ -1787,7 +1788,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             if stop_data:
                 st.caption("Stops")
                 for idx, stop in enumerate(stop_data[:12], 1):
-                    addr = str(stop.get("addr") or "").strip()
+                    addr = address_with_zip(stop.get("addr"), stop.get("zip"))
                     venue = str(stop.get("venue") or "").strip()
                     count = int(stop.get("t_count") or 0)
                     st.markdown(
@@ -1878,3 +1879,4 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 )
         else:
             st.caption(f"Route {route.get('wo') or route_hash}")
+
