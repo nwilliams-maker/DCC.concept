@@ -64,8 +64,8 @@ def test_build_update_preserves_blanks_and_unknown_bools():
         "digital_certified": None,
         "unrestricted": True,
     }
+    # pod_color / location are frozen for existing ICs (2026-09-30 rule).
     assert _build_update(existing, source) == {
         "ic_list": "B",
-        "pod_color": "Green",
         "unrestricted": True,
     }
