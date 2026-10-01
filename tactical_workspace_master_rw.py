@@ -10876,7 +10876,8 @@ if os.environ.get("DCC_REVAMP_UI") == "1":
                      },
                      merge_same_wo_ghosts=_merge_same_wo_ghosts,
                      cluster_store=_pod_cluster_store,
-                     mapbox_geocode=_mapbox_geocode)
+                     mapbox_geocode=_mapbox_geocode,
+                     process_digital_pool=process_digital_pool)
     st.stop()
 
 # Updated Main Tabs
