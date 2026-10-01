@@ -4250,6 +4250,11 @@ def process_digital_pool(master_bar=None):
     target_team_ids = _onfleet_data['target_team_ids']
     esc_team_ids    = _onfleet_data['esc_team_ids']
     digital_team_ids = _onfleet_data.get('digital_team_ids', [])
+    # Use the same deny-list as regular pods: Sandbox/Test teams and the
+    # Field Nation placeholder belong outside the dispatchable task pool.
+    _excluded_team_set = set(_onfleet_data.get('excluded_team_ids') or [])
+    if _onfleet_data.get('fn_team_id'):
+        _excluded_team_set.add(_onfleet_data['fn_team_id'])
     st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
     st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
     all_tasks_raw   = _onfleet_data['tasks']
@@ -4313,10 +4318,17 @@ def process_digital_pool(master_bar=None):
 
         container = t.get('container', {})
         c_type = str(container.get('type', '')).upper()
-        # 🛡️ DOUBLE-ROUTING GUARD: skip tasks already assigned to a worker.
-        if c_type == 'WORKER' or t.get('worker'):
+        # Match regular pods: reject actual worker containers and dispatched
+        # worker references; retain unassigned tasks with stale worker refs.
+        _t_id = str(t.get('id', '')).strip()
+        if c_type == 'WORKER':
             continue
-        if c_type == 'TEAM' and container.get('team') not in target_team_ids: continue
+        if t.get('worker') and _t_id in fresh_sent_db:
+            if str(fresh_sent_db[_t_id].get('status', '')).lower() in (
+                    'sent', 'accepted', 'declined', 'finalized', 'field_nation'):
+                continue
+        if c_type == 'TEAM' and container.get('team') in _excluded_team_set:
+            continue
 
         addr = t.get('destination', {}).get('address', {})
         stt = normalize_state(addr.get('state', ''))
