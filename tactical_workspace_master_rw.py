@@ -8100,7 +8100,7 @@ def make_venue_details_ghost(locs_list, stop_data=None):
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(address_with_zip(addr, sd.get("zip")))}</span>"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(address_with_zip(addr, sd.get('zip')))}</span>"
             f"{k_tag}{remov_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}"
             f"</summary>{camp_block}</details>"
         )
