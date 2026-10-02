@@ -126,7 +126,8 @@ st.date_input('Due',key='due')
     assert not app.exception
     assert len(app.get('progress')) == 0
     assert app.button(key='revamp_quiet_refresh').label == '↻'
-    assert any('Routes<span class="rv-task-spin">' in m.value for m in app.markdown)
+    assert any('width:12px;height:12px' in m.value and 'animation:rv-task-spin 0.8s linear infinite' in m.value for m in app.markdown)
+    assert any('border:0!important' in m.value and '.st-key-revamp_quiet_control button' in m.value for m in app.markdown)
     app.text_input(key='contractor').set_value('Michael').run()
     app.number_input(key='rate').set_value(30).run()
     due = app.date_input(key='due').value
@@ -201,3 +202,59 @@ def test_digital_background_builder_does_not_touch_session_or_render_progress():
     exec(compile(ast.Module(body=[node],type_ignores=[]),'tactical_workspace_master_rw.py','exec'),scope)
     assert scope['process_digital_pool'](warm_only=True) is True
     assert store == {'Digital':{'clusters':[]}}
+
+
+def test_bundled_badge_live_saved_merged_and_registry_without_false_positives():
+    import revamp_workspace as w
+    assert w._bundle_label({'bundle_count':1}) == '🔗 Bundled'
+    assert w._bundle_label({'_ghost_record':{'bundle_count':2}}) == '🔗 Bundled'
+    assert w._bundle_label({'_ghost_record':{'_merged_count':2}}) == '🔗 Bundled'
+    assert w._bundle_label({'_ghost_record':{'task_ids':['a','b']}},[{'a','b'}]) == '🔗 Bundled'
+    assert w._bundle_label({'data':[{'id':'a'},{'id':'b'},{'id':'c'}]},[{'a','b'}]) == '🔗 Bundled'
+    assert w._bundle_label({'data':[{'id':'a'}]},[{'a','b'}]) == ''
+    assert w._bundle_label({'data':[{'id':'a'},{'id':'b'}]}) == ''
+    assert w._bundle_label({'_ghost_record':{'_merged_count':1}}) == ''
+    assert w._bundle_label({'bundle_count':'not a number'}) == ''
+
+
+def test_bundle_identity_survives_postgres_reconstruction_for_every_saved_status():
+    from datetime import datetime
+    from migration import data_access as da
+    import revamp_workspace as w
+    for status in ('sent','accepted','declined','finalized','field_nation'):
+        ghosts={}
+        da._ingest_sent_record(p={'wo':'WO','taskIds':'a,b','bundle_count':1,'city':'Chicago','state':'IL','pod':'Blue'},
+            c_name='Michael',dt_obj=datetime.now(),ts_display='10/01 01:00 PM',status_label=status,
+            sent_dict={},ghost_routes=ghosts,fn_posted_dict={},fn_provider_dict={},history_db={},
+            pod_configs={'Blue':{'states':{'IL'}}},state_map={})
+        ghost=ghosts['Blue'][0]
+        assert ghost['bundle_count']==1
+        assert w._bundle_label({'_ghost_record':ghost})=='🔗 Bundled'
+
+
+def test_bundled_cards_display_badge_and_are_searchable():
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+    root=str(Path(__file__).resolve().parents[2])
+    source=f'''
+import sys
+sys.path.insert(0,{root!r})
+import streamlit as st
+import revamp_workspace as w
+route={{'wo':'WO-BUNDLE','city':'Chicago','state':'IL','stops':2,'bundle_count':1,
+        '_bundle_label':'🔗 Bundled','data':[{{'id':'a'}},{{'id':'b'}}]}}
+matching=[('Blue',route,'Sent',w._route_hash(route),None)]
+w._render_route_list(matching,'Sent',{{}},{{}})
+st.write(w._searchable(route))
+'''
+    app=AppTest.from_string(source).run()
+    assert not app.exception
+    card=next(button for button in app.button if button.key.startswith('revamp_route_'))
+    assert '**WO-BUNDLE** - Chicago, IL - → Sent · 🔗 Bundled' in card.label
+    assert any('bundled' in item.value for item in app.markdown)
+
+
+def test_bulk_field_nation_payload_keeps_bundle_identity():
+    from revamp_bulk_fn import _payload
+    payload=_payload({'bundle_count':2,'data':[]},'Blue','2026-10-10','WO','hash')
+    assert payload['bundle_count']==2

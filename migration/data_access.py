@@ -1000,6 +1000,7 @@ def _ingest_sent_record(
                 "due": p.get("due", "N/A"),
                 "status": status_label,
                 "hash": ghost_hash,
+                "bundle_count": p.get("bundle_count", 0),
                 "locs": p.get("locs", ""),
                 "stop_data": stop_data,
                 "task_ids": tids,
