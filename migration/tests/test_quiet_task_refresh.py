@@ -169,7 +169,8 @@ def _quiet_check_scope(source, session, cap=False, fail_pod=None):
     scope = {'st': SimpleNamespace(session_state=session,button=lambda *a,**k:False),
              '_quiet_refresh_service':ImmediateService, '_route_hash':lambda r:'hash',
              '_pod_load_locks':lambda:{'Blue':threading.Lock(),'Digital':threading.Lock()},
-             'time': __import__('time'), 'datetime': __import__('datetime').datetime}
+             'time': __import__('time'), 'datetime': __import__('datetime').datetime,
+             'ZoneInfo': __import__('zoneinfo').ZoneInfo}
     exec(compile(ast.Module(body=[node], type_ignores=[]),'revamp_workspace.py','exec'),scope)
     scope['_quiet_routes_check'](['Blue','Digital'],process,lambda warm_only:process('Digital',warm_only),lambda:cache,fetch)
     return calls
@@ -281,7 +282,8 @@ def test_no_change_notice_waits_for_manual_check_completion(manual):
         future.set_result({'Blue': []})
         assert not w._quiet_routes_check(['Blue'], None, None, None, None)
     if manual:
-        assert session['_revamp_quiet_notice'][0] == 'Up to date'
+        assert session['_revamp_quiet_notice'][0].startswith('Up to date · ')
+        assert session['_revamp_quiet_notice'][0].endswith(' CT')
     else:
         assert '_revamp_quiet_notice' not in session
     assert not session['_revamp_quiet_manual']

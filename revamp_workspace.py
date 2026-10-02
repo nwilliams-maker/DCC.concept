@@ -802,13 +802,14 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
                     st.session_state['_revamp_quiet_revision'] = st.session_state.get('_revamp_quiet_revision', 0) + 1
                 total_added += added
                 total_removed += removed
+            checked_at = datetime.now(ZoneInfo('America/Chicago')).strftime('%I:%M %p').lstrip('0') + ' CT'
             if total_added or total_removed:
                 parts = []
                 if total_added: parts.append(f"{total_added} {'task' if total_added == 1 else 'tasks'} added")
                 if total_removed: parts.append(f"{total_removed} {'task' if total_removed == 1 else 'tasks'} removed")
-                st.session_state['_revamp_quiet_notice'] = (' · '.join(parts), time.monotonic())
+                st.session_state['_revamp_quiet_notice'] = (' · '.join(parts) + ' · ' + checked_at, time.monotonic())
             elif was_manual:
-                st.session_state['_revamp_quiet_notice'] = ('Up to date', time.monotonic())
+                st.session_state['_revamp_quiet_notice'] = ('Up to date · ' + checked_at, time.monotonic())
             st.session_state['_revamp_quiet_error'] = False
             st.session_state['_last_sync_ts'] = datetime.now()
         except Exception as exc:
