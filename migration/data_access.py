@@ -160,6 +160,31 @@ def get_routes(engine: sa.Engine, statuses: list[str] | None = None) -> list[dic
         out.append(d)
     return out
 
+def _assert_tasks_not_reserved(conn, ids, wo):
+    """Serialize overlapping dispatches and reject another active DB route."""
+    tids = set(_fx._task_ids(ids))
+    if not tids:
+        return
+    if conn.dialect.name == "postgresql":
+        for tid in sorted(tids):
+            conn.execute(sa.text("SELECT pg_advisory_xact_lock(hashtextextended(:tid, 0))"), {"tid": tid})
+    # Fetch task IDs only, avoiding large stop/address payloads on every send.
+    payload_expr = ("jsonb_build_object('taskIds', COALESCE(payload->'taskIds', payload->'task_ids'))"
+                    if conn.dialect.name == "postgresql" else "payload")
+    rows = conn.execute(sa.text(f"""
+        SELECT wo, {payload_expr} AS payload FROM routes WHERE wo != :wo
+          AND CAST(status AS TEXT) IN ('sent','accepted','finalized')
+        UNION ALL
+        SELECT work_order AS wo, {payload_expr} AS payload FROM field_nation_orders WHERE work_order != :wo
+          AND status IN ('posted','assigned')
+    """), {"wo": wo}).mappings().all()
+    for row in rows:
+        payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"] or "{}")
+        overlap = tids.intersection(_fx._task_ids(payload.get("taskIds") or payload.get("task_ids")))
+        if overlap:
+            raise _fx.TaskAssignmentConflict([{"taskId": tid, "reason": f"already reserved by work order {row['wo']}"} for tid in sorted(overlap)])
+
+
 def save_route(engine: sa.Engine, wo: str, contractor_name: str, payload: dict[str, Any]) -> None:
     """Replaces the `saveRoute` GAS action. Upsert on `wo` gives the same
     dedupe behavior GAS's 10-minute cluster_hash cache gave -- a retry with
@@ -167,7 +192,9 @@ def save_route(engine: sa.Engine, wo: str, contractor_name: str, payload: dict[s
     payload = dict(payload or {})
     # Permanent historical timestamp: first time the route is sent.
     payload.setdefault("sent_at", datetime.now(timezone.utc).isoformat())
+    _fx.assert_tasks_available(payload.get("taskIds"), wo=wo)
     with engine.begin() as conn:
+        _assert_tasks_not_reserved(conn, payload.get("taskIds"), wo)
         conn.execute(
             sa.text(
                 """
@@ -288,6 +315,9 @@ def process_decision(
         except Exception as exc:  # noqa: BLE001 -- never let an Onfleet failure block the status write
             onfleet_result = {"onfleetSuccess": False, "onfleetMsg": f"Onfleet exception: {exc}", "routeSuccess": False, "routeMsg": "", "partial": True}
 
+    if decision == "accept" and onfleet_result.get("assignmentBlocked") and not onfleet_result.get("onfleetSuccess"):
+        return {"success": False, "error": onfleet_result.get("onfleetMsg"), **onfleet_result}
+
     event_payload = {
         "decision": decision, "signature": signature, "notes": notes, "phone": phone,
         "onfleet": onfleet_result,
@@ -365,7 +395,11 @@ def save_to_field_nation(engine: sa.Engine, work_order: str, payload: dict[str, 
     the intended entry point for that case -- don't pass mirror_only=True
     directly unless you have a specific reason to call save_to_field_nation()
     itself this way."""
+    if not mirror_only:
+        _fx.assert_tasks_available(payload.get("taskIds"), wo=work_order)
     with engine.begin() as conn:
+        if not mirror_only:
+            _assert_tasks_not_reserved(conn, payload.get("taskIds"), work_order)
         conn.execute(
             sa.text(
                 """

@@ -30,6 +30,15 @@ def load_functions(filename, names, extra=None):
 
 
 class RevampTests(unittest.TestCase):
+    def test_saved_card_headings_use_work_order_for_sent_and_other_statuses(self):
+        scope = load_functions("revamp_workspace.py", ["_route_list_heading", "_saved_route_fields"],
+                               {"st": SimpleNamespace(session_state={})})
+        route = {"wo": "Michael Burres-10012026-1", "city": "Manassas", "state": "VA", "data": []}
+        for state, icon in (("Sent", "→"), ("Accepted", "✓"), ("Declined", "×"), ("Finalized", "✓")):
+            self.assertEqual(scope["_route_list_heading"](route, state, "hash"),
+                f"**Michael Burres-10012026-1** - Manassas, VA - {icon} {state}")
+        self.assertIsNone(scope["_route_list_heading"](route, "Ready", "hash"))
+
     def test_search_finds_client_names_in_live_and_saved_routes(self):
         searchable = load_functions("revamp_workspace.py", ["_searchable"])["_searchable"]
         live = {"city": "San Diego", "data": [{"venue_name": "Store 12",
@@ -232,7 +241,7 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
         self.assertAlmostEqual(result[1], 1 + 8 * 10 / 60)
         self.assertEqual(result[3], list(range(8)))
 
-    def test_login_loads_one_pod_and_check_new_tasks_refreshes(self):
+    def test_login_loads_one_pod_and_switching_loads_only_new_pod(self):
         from streamlit.testing.v1 import AppTest
         source = f'''
 import sys
@@ -258,13 +267,13 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
         self.assertEqual(app.session_state["load_calls"], [("Blue", False)])
         app.selectbox(key="revamp_pod").set_value("Green").run()
         self.assertEqual(app.session_state["load_calls"], [("Blue", False), ("Green", False)])
-        app.button(key="revamp_sync").click().run()
-        self.assertEqual(app.session_state["load_calls"][-1], ("Green", True))
-        self.assertEqual(app.button(key="revamp_sync").label, "Check new tasks")
+        self.assertFalse(any(button.key == "revamp_sync" for button in app.button))
+        app.run()
+        self.assertEqual(app.session_state["load_calls"], [("Blue", False), ("Green", False)])
         self.assertFalse(app.exception)
 
     def test_nearest_active_contractor_and_over_50_miles(self):
-        scope = load_functions("revamp_workspace.py", ["_eligible_ics", "_nearest_ic"])
+        scope = load_functions("revamp_workspace.py", ["_eligible_ics", "_nearest_ic", "_route_center"])
         contractors = pd.DataFrame([
             {"name": "Inactive Nearby", "ic list": "INACTIVE", "lat": 0, "lng": 0},
             {"name": "Active Farther", "ic list": "ACTIVE", "lat": 60, "lng": 0},
@@ -275,14 +284,16 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
                                        lambda a, b, c, d: abs(a - c) + abs(b - d))
         self.assertEqual(nearest, ("Active Farther", 60))
 
-    def test_exactly_50_is_ready_and_over_50_is_flagged(self):
+    def test_over_50_filter_and_60_mile_flag_are_separate(self):
         scope = load_functions("revamp_workspace.py", ["_route_hash", "_route_status"],
                                {"hashlib": hashlib,
                                 "HIGH_RATE_FLAG_THRESHOLD": 25.00,
                                 "st": SimpleNamespace(session_state={})})
         route = {"status": "Ready", "data": [{"id": "t1"}]}
         self.assertEqual(scope["_route_status"](route, {}, 50), "Ready")
-        self.assertEqual(scope["_route_status"](route, {}, 50.1), "Flagged")
+        self.assertEqual(scope["_route_status"](route, {}, 50.1), "Ready")
+        self.assertEqual(scope["_route_status"](route, {}, 60), "Ready")
+        self.assertEqual(scope["_route_status"](route, {}, 60.1), "Flagged")
         self.assertEqual(scope["_route_status"](
             route, {"t1": {"status": "field_nation"}}, 50.1), "Field Nation")
         self.assertEqual(scope["_route_status"](
@@ -316,7 +327,7 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
         self.assertEqual(scope["_route_status"](route, {}, 10, "Orange"), "Ready")
 
     def test_duplicate_live_route_has_one_selection_key_and_keeps_flag(self):
-        dedupe = load_functions("revamp_workspace.py", ["_dedupe_route_entries"])["_dedupe_route_entries"]
+        dedupe = load_functions("revamp_workspace.py", ["_dedupe_route_entries", "_route_entry_key"])["_dedupe_route_entries"]
         ready = ("Orange", {"city": "Los Angeles"}, "Ready", "same-hash", None)
         flagged = ("Orange", {"city": "Los Angeles"}, "Flagged", "same-hash", None)
         other_pod = ("Blue", {"city": "Chicago"}, "Ready", "same-hash", None)
@@ -345,7 +356,7 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
     lambda *args: 0, object(), lambda *args: None, records)
 '''
         app = AppTest.from_string(source).run()
-        app.radio(key="revamp_status").set_value("Ready").run()
+        app.radio(key="revamp_status").set_value("Flagged").run()
         self.assertFalse(app.exception)
         self.assertEqual(len([box for box in app.checkbox
                               if box.key.startswith("revamp_bulk_")]), 1)
@@ -476,15 +487,15 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
     lambda *args: 0, object(), lambda *args: None, records)
 '''
         app = AppTest.from_string(source).run()
-        app.radio(key="revamp_status").set_value("Ready").run()
-        app.button(key="revamp_group_toggle_Ready__MI").click().run()
-        self.assertEqual(app.radio(key="revamp_status").value, "Ready")
-        self.assertEqual(app.query_params["view"], ["Ready"])
+        app.radio(key="revamp_status").set_value("Flagged").run()
+        app.button(key="revamp_group_toggle_Flagged__MI").click().run()
+        self.assertEqual(app.radio(key="revamp_status").value, "Flagged")
+        self.assertEqual(app.query_params["view"], ["Flagged"])
         app.button(key="revamp_select_visible").click().run()
-        self.assertEqual(app.radio(key="revamp_status").value, "Ready")
+        self.assertEqual(app.radio(key="revamp_status").value, "Flagged")
         detroit = next(button for button in app.button if button.label.startswith("Detroit"))
         detroit.click().run()
-        self.assertEqual(app.radio(key="revamp_status").value, "Ready")
+        self.assertEqual(app.radio(key="revamp_status").value, "Flagged")
         self.assertFalse(app.exception)
         app.radio(key="revamp_status").set_value("Field Nation").run()
         selected = next(checkbox for checkbox in app.checkbox if checkbox.key.startswith("revamp_fn_"))

@@ -2758,6 +2758,8 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
     try:
         auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}",
                 "Content-Type": "application/json"}
+        # Validate the complete route before touching either team or worker.
+        _da._fx.assert_tasks_available(task_ids, wo=wo_name, worker_id=fn_worker_id, allow_existing=True)
         # 1) Move into FN team container
         if fn_team_id:
             try:
@@ -2775,6 +2777,7 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
         else:
             _log_err("assign_tasks_to_fn_team/team_skip", "no fn_team_id")
 
+        _all_assigned = False
         # 2) Assign each task to the FN worker (state 0 → 1)
         if fn_worker_id:
             assign_payload = json.dumps({
@@ -2787,6 +2790,7 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
             })
             def _do_assign(tid):
                 try:
+                    _da._fx.assert_tasks_available([tid], wo=wo_name, worker_id=fn_worker_id, allow_existing=True)
                     r = requests.put(
                         f"https://onfleet.com/api/v2/tasks/{tid}",
                         headers=auth, data=assign_payload, timeout=10,
@@ -2802,6 +2806,7 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
             with ThreadPoolExecutor(max_workers=min(10, len(task_ids))) as _ex:
                 _results = list(_ex.map(_do_assign, task_ids))
             _ok = sum(_results)
+            _all_assigned = all(_results)
             _log_err("assign_tasks_to_fn_team/done",
                      f"team_move OK; worker assigned {_ok}/{len(task_ids)}")
         else:
@@ -2811,8 +2816,9 @@ def assign_tasks_to_fn_team(task_ids, fn_team_id, fn_worker_id=None, wo_name="",
         # 3) Create an OnFleet route plan named after the WO so the FN tasks
         #    show up as a grouped, named route in OnFleet under the Field
         #    Nation team. Mirrors GAS createOnfleetRoute pattern.
-        if fn_worker_id and wo_name and task_ids:
+        if fn_worker_id and wo_name and task_ids and _all_assigned:
             try:
+                _da._fx.assert_tasks_available(task_ids, wo=wo_name, worker_id=fn_worker_id, allow_existing=True)
                 _start_dt = datetime.now() + timedelta(days=2)
                 _start_dt = _start_dt.replace(hour=16, minute=0, second=0, microsecond=0)
                 _start_ms = int(_start_dt.timestamp() * 1000)
@@ -4221,12 +4227,15 @@ def _is_digital_dispatch_task(*, custom_task_type="", custom_boosted="", native_
     return False
 
 
-def process_digital_pool(master_bar=None):
-    prog_bar = master_bar if master_bar else st.progress(0)
+def process_digital_pool(master_bar=None, warm_only=False):
+    class QuietProgress:
+        def progress(self, *args, **kwargs): pass
+        def empty(self): pass
+    prog_bar = QuietProgress() if warm_only else (master_bar if master_bar else st.progress(0))
     prog_bar.progress(0.1, text="📥 Fetching National Tasks from Onfleet...")
     # Tick digital overlay timer
-    _ov = st.session_state.get('_loading_overlay')
-    _st = st.session_state.get('_loading_start')
+    _ov = None if warm_only else st.session_state.get('_loading_overlay')
+    _st = None if warm_only else st.session_state.get('_loading_start')
     if _ov and _st:
         import time as _t2
         _el = int(_t2.time() - _st); _m = _el // 60; _s = _el % 60
@@ -4244,9 +4253,9 @@ def process_digital_pool(master_bar=None):
     try:
         _onfleet_data = _fetch_onfleet_open_tasks_cached()
     except Exception as _e:
-        st.error(f"Onfleet API Error: {_e}")
+        if not warm_only: st.error(f"Onfleet API Error: {_e}")
         _log_err("process_digital_pool", f"shared pull failed: {type(_e).__name__}: {_e}")
-        return
+        return False
     target_team_ids = _onfleet_data['target_team_ids']
     esc_team_ids    = _onfleet_data['esc_team_ids']
     digital_team_ids = _onfleet_data.get('digital_team_ids', [])
@@ -4255,18 +4264,18 @@ def process_digital_pool(master_bar=None):
     _excluded_team_set = set(_onfleet_data.get('excluded_team_ids') or [])
     if _onfleet_data.get('fn_team_id'):
         _excluded_team_set.add(_onfleet_data['fn_team_id'])
-    st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
-    st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
+    if not warm_only: st.session_state['_fn_team_id'] = _onfleet_data.get('fn_team_id')
+    if not warm_only: st.session_state['_fn_worker_id'] = _onfleet_data.get('fn_worker_id')
     all_tasks_raw   = _onfleet_data['tasks']
     if _onfleet_data.get('_hit_cap'):
         _log_err("process_digital_pool", f"hit pagination cap (200 pages)")
-        st.warning(f"⚠️ Hit pagination cap of 200 pages while fetching Onfleet tasks. Some tasks may be missing.")
+        if not warm_only: st.warning(f"⚠️ Hit pagination cap of 200 pages while fetching Onfleet tasks. Some tasks may be missing.")
     prog_bar.progress(0.39, text=f"📡 Got {len(all_tasks_raw)} tasks from Onfleet...")
         
     prog_bar.progress(0.4, text="🔍 Isolating Digital Service Calls...")
     # Tick digital overlay timer
-    _ov = st.session_state.get('_loading_overlay')
-    _st = st.session_state.get('_loading_start')
+    _ov = None if warm_only else st.session_state.get('_loading_overlay')
+    _st = None if warm_only else st.session_state.get('_loading_start')
     if _ov and _st:
         import time as _t2
         _el = int(_t2.time() - _st); _m = _el // 60; _s = _el % 60
@@ -4284,10 +4293,12 @@ def process_digital_pool(master_bar=None):
     # taskType contains "site survey" now flow into the Digital pool alongside Service /
     # Ins-Rem / Offline. Same treatment as the other digital types (grouped into Digital tab).
     DIGITAL_WHITELIST = ["service", "ins/rem", "offline", "site survey", "digital install"]
-    fresh_sent_db, _, _archived_wos, _history_db = fetch_sent_records_from_sheet()
-    st.session_state['_history_db'] = _history_db
-    st.session_state.sent_db = fresh_sent_db
-    st.session_state['archived_wos'] = _archived_wos
+    fresh_sent_db, _, _archived_wos, _history_db = (
+        _cached_fetch_sent_records_from_db() if warm_only else fetch_sent_records_from_sheet()
+    )
+    if not warm_only: st.session_state['_history_db'] = _history_db
+    if not warm_only: st.session_state.sent_db = fresh_sent_db
+    if not warm_only: st.session_state['archived_wos'] = _archived_wos
 
     pool = []
     unique_tasks_dict = {t['id']: t for t in all_tasks_raw}
@@ -4441,8 +4452,8 @@ def process_digital_pool(master_bar=None):
 
     prog_bar.progress(0.6, text=f"🗺️ Routing {len(pool)} Digital Tasks...")
     # Tick digital overlay timer
-    _ov = st.session_state.get('_loading_overlay')
-    _st = st.session_state.get('_loading_start')
+    _ov = None if warm_only else st.session_state.get('_loading_overlay')
+    _st = None if warm_only else st.session_state.get('_loading_start')
     if _ov and _st:
         import time as _t2
         _el = int(_t2.time() - _st); _m = _el // 60; _s = _el % 60
@@ -4455,7 +4466,7 @@ def process_digital_pool(master_bar=None):
 <div class='dcc-pill'>⏱ {_m}:{_s:02d}</div><div style='font-size:10px; color:#94a3b8; margin-top:8px; font-style:italic;'>First load: ~30s (pulls live digital task pool).</div></div>""", unsafe_allow_html=True)
     
     # 3. Route ONLY the Digital Tasks
-    ic_df = st.session_state.get('ic_df', pd.DataFrame())
+    ic_df = _warm_load_ic_df() if warm_only else st.session_state.get('ic_df', pd.DataFrame())
     v_ics_base, lat_col, lng_col = _routing_ic_pool(ic_df)
 
     clusters = []
@@ -4535,10 +4546,14 @@ def process_digital_pool(master_bar=None):
         pool = rem
 
     # Save to dedicated Global Digital State
+    if warm_only:
+        _pod_cluster_store()['Digital'] = {'clusters': clusters}
+        return True
     st.session_state['global_digital_clusters'] = clusters
     # Re-apply Global_Digital bundles after the rebuild.
     _replay_bundles("Global_Digital")
     prog_bar.empty()
+    return True
 
 # --- CORE LOGIC ---
 @st.cache_resource(show_spinner=False)
@@ -5714,8 +5729,66 @@ def _contractor_selection_key(row):
 # fragments and propagate to supercards on the next auto_sync_checker tick
 # (every 60s) or any other app-scoped interaction. Calls that genuinely
 # need a full-page rerun use st.rerun(scope="app") explicitly.
+def _refresh_available_route(cluster, pod_name, cluster_hash, unavailable, *, action):
+    """Silently remove stale tasks and resume with recomputed route details."""
+    from migration.task_availability import remove_unavailable_tasks
+    unavailable = set(str(tid).strip() for tid in unavailable)
+    for key in list(st.session_state):
+        if key.startswith("clusters_") or key == "global_digital_clusters":
+            stored = st.session_state.get(key)
+            if isinstance(stored, list):
+                # Saved Sent/Accepted routes remain as historical records.
+                rebuilt = []
+                sent_db = st.session_state.get('sent_db') or {}
+                for item in stored:
+                    tids = [str(t.get('id','')).strip() for t in item.get('data', [])]
+                    item_hash = hashlib.md5("".join(sorted(tids)).encode()).hexdigest()
+                    protected = (st.session_state.get(f"route_state_{item_hash}") in ("email_sent", "field_nation", "finalized")
+                                 or any(str((sent_db.get(tid) or {}).get('status', '')).lower()
+                                        in ('sent', 'accepted', 'finalized', 'field_nation') for tid in tids))
+                    rebuilt.extend([item] if protected else remove_unavailable_tasks([item], unavailable))
+                st.session_state[key] = rebuilt
+    removed_count = len({str(t.get('id') or '').strip() for t in cluster.get('data', [])} & unavailable)
+    if removed_count:
+        st.session_state['_revamp_quiet_revision'] = st.session_state.get('_revamp_quiet_revision', 0) + 1
+        st.session_state['_revamp_quiet_notice'] = (f"{removed_count} {'task' if removed_count == 1 else 'tasks'} removed", time.monotonic())
+    remaining = remove_unavailable_tasks([cluster], unavailable)
+    _fetch_onfleet_open_tasks_cached.clear()
+    _pod_cluster_store().clear()
+    if remaining:
+        current = remaining[0]
+        new_ids = [str(t['id']).strip() for t in current['data']]
+        new_hash = hashlib.md5("".join(sorted(new_ids)).encode()).hexdigest()
+        # Retain the chosen IC, due date, and rate/stop. The new total, stop
+        # metrics, driving route, and email are recalculated on the rerender.
+        for prefix, suffix in (("sel_", "_identity_v2"), ("last_sel_", "_identity_v2"), ("dd_", "")):
+            old_key = f"{prefix}{pod_name}_{cluster_hash}{suffix}"
+            if old_key in st.session_state:
+                st.session_state[f"{prefix}{pod_name}_{new_hash}{suffix}"] = st.session_state[old_key]
+        rate = st.session_state.get(f"_rate_master_{pod_name}_{cluster_hash}")
+        if rate is not None:
+            st.session_state[f"_rate_master_{pod_name}_{new_hash}"] = rate
+            st.session_state[f"_pay_master_{pod_name}_{new_hash}"] = min(round(float(rate) * current['stops'], 2), PAY_CAP)
+            st.session_state[f"_auto_rate_{pod_name}_{new_hash}"] = st.session_state.get(f"_auto_rate_{pod_name}_{cluster_hash}", rate)
+        if action == "send":
+            st.session_state[f"_resume_generate_{pod_name}_{new_hash}"] = True
+        elif action == "fn":
+            st.session_state[f"fn_check_{pod_name}_{new_hash}"] = True
+        st.session_state["revamp_selected_route"] = f"{pod_name}:{new_hash}"
+        cluster.clear()
+        cluster.update(current)
+    else:
+        cluster['data'] = []
+        cluster['stops'] = 0
+    # Only this action card updates. The page, map, scroll position, and
+    # other route cards remain mounted.
+    st.rerun(scope="fragment")
+
+
 @st.fragment
 def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
+    if not cluster.get("data"):
+        return
     # Capture current state identifiers (cluster_hash is computed from the ORIGINAL data
     # and stays constant through preview — keeps session-state continuity intact).
     task_ids = [str(t['id']).strip() for t in cluster['data']]
@@ -6858,7 +6931,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 fn_checked = st.checkbox("Assign to FN", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")
             else:
                 fn_checked = is_fn
-        if _gen_clicked:
+        _resume_generate = st.session_state.pop(f"_resume_generate_{pod_name}_{cluster_hash}", False)
+        if _gen_clicked or (_resume_generate and is_unlocked and not is_fn and not _in_preview):
             # 🛡️ STEP 0: POST-TIMEOUT RETRY SAFETY (Sep 2026 — Nick: "clicking
             # Generate Link again to retry makes it worse"). A saveRoute POST
             # that times out CLIENT-SIDE (25s) can still be running — or have
@@ -6883,7 +6957,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
             # 🛡️ STEP 1: FAST COLLISION CHECK — only block active sent routes (not revoked/declined)
             local_sent_db = st.session_state.get('sent_db', {})
-            _active_statuses = ('sent',)
+            _active_statuses = ('sent', 'accepted', 'finalized', 'field_nation')
             collision = next(
                 (tid for tid in task_ids
                  if tid in local_sent_db
@@ -6895,7 +6969,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # A collision against OUR OWN prior attempt (same dispatcher, same
             # route) means the "timed out" saveRoute actually landed. Adopt
             # it as a success instead of firing a duplicate saveRoute.
-            if collision and not is_already_sent and local_sent_db[collision].get('name') == ic.get('name', 'Unknown'):
+            if collision and not is_already_sent and local_sent_db[collision].get('status', '').lower() == 'sent' and local_sent_db[collision].get('wo') == wo_val and local_sent_db[collision].get('name') == ic.get('name', 'Unknown'):
                 st.session_state[f"sent_ts_{cluster_hash}"] = local_sent_db[collision].get('time') or datetime.now().strftime('%m/%d %I:%M %p')
                 st.session_state[f"contractor_{cluster_hash}"] = ic.get('name', 'Unknown')
                 st.session_state[f"wo_{cluster_hash}"] = wo_val
@@ -6908,8 +6982,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 return
 
             if collision and not is_already_sent:
-                st.error(f"🚫 COLLISION: Dispatched by someone else ({local_sent_db[collision]['name']}).")
-                st.rerun()
+                unavailable = [tid for tid in task_ids if tid in local_sent_db and local_sent_db[tid].get('status', '').lower() in _active_statuses]
+                _refresh_available_route(cluster, pod_name, cluster_hash, unavailable, action="send")
                 return
 
             # Security audit H23 - in-flight guard. A double-click within ~1s
@@ -7007,6 +7081,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         raise RuntimeError("Railway database is unavailable")
                     _da.save_route(DB_ENGINE, wo_val, ic.get('name', 'Unknown'), payload)
                     _dispatch_result = {"success": True, "routeId": wo_val}
+                except _da._fx.TaskAssignmentConflict as e:
+                    _dispatch_result = {"_unavailable": e.conflicts, "_error": str(e)}
                 except Exception as e:
                     _dispatch_result = {"_error": str(e)}
 
@@ -7014,6 +7090,12 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # the in-flight guard so a later legitimate dispatch / resend works.
             st.session_state.pop(_dispatch_inflight_key, None)
 
+            # A stale available-work snapshot is quietly rebuilt, then the
+            # original Generate action resumes using only the remaining work.
+            if _dispatch_result.get("_unavailable"):
+                conflicts = _dispatch_result["_unavailable"]
+                if all("could not verify" not in c['reason'] and "could not be verified" not in c['reason'] for c in conflicts):
+                    _refresh_available_route(cluster, pod_name, cluster_hash, [c['taskId'] for c in conflicts], action="send")
             # Spinner now closed — handle result
             if _dispatch_result.get("_timeout"):
                 # 🌟 Sep 2026 — flag this cluster as "last attempt timed out" so
@@ -7023,7 +7105,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 st.session_state[_timed_out_key] = True
                 st.warning("⏱️ Google Sheets is taking too long. The earlier attempt may have actually saved — click **Generate Link** again and it'll check for that before creating a new one.")
             elif _dispatch_result.get("_error"):
-                st.error(f"Connection Error: {_dispatch_result['_error']} — Please try again.")
+                st.error(f"Could not send route: {_dispatch_result['_error']}")
             elif _dispatch_result.get("success"):
                 final_route_id = _dispatch_result.get("routeId")
                 st.session_state[sync_key] = final_route_id
@@ -7225,6 +7307,11 @@ text-decoration:none;">📨 Default Mail</a>
                 _fn_result = _da.save_to_field_nation(DB_ENGINE, _fn_wo_full, fn_payload)
                 if not _fn_result.get("success"):
                     raise RuntimeError(str(_fn_result))
+            except _da._fx.TaskAssignmentConflict as _fn_save_e:
+                if all("could not verify" not in c['reason'] and "could not be verified" not in c['reason'] for c in _fn_save_e.conflicts):
+                    _refresh_available_route(cluster, pod_name, cluster_hash, [c['taskId'] for c in _fn_save_e.conflicts], action="fn")
+                st.error("OnFleet could not be checked. Please try again when the connection is available.")
+                st.stop()
             except Exception as _fn_save_e:
                 _log_err("save_to_field_nation", _fn_save_e)
                 st.error(f"Could not move route to Field Nation: {_fn_save_e}")
@@ -10932,7 +11019,8 @@ if os.environ.get("DCC_REVAMP_UI") == "1":
                      merge_same_wo_ghosts=_merge_same_wo_ghosts,
                      cluster_store=_pod_cluster_store,
                      mapbox_geocode=_mapbox_geocode,
-                     process_digital_pool=process_digital_pool)
+                     process_digital_pool=process_digital_pool,
+                     fetch_open_tasks=_fetch_onfleet_open_tasks_cached)
     st.stop()
 
 # Updated Main Tabs

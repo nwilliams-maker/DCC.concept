@@ -142,6 +142,21 @@ def onfleet_fetch_with_backoff(method: str, url: str, *, json_body: Any = None, 
 # assignTasksToWorker -- called by processDecision on accept)
 # ---------------------------------------------------------------------------
 
+try:
+    from .task_availability import TaskAssignmentConflict, assert_tasks_available as _check_tasks, task_ids as _task_ids
+except ImportError:
+    from task_availability import TaskAssignmentConflict, assert_tasks_available as _check_tasks, task_ids as _task_ids
+
+
+def assert_tasks_available(ids, *, wo="", worker_id=None, allow_existing=False):
+    def fetch(tid):
+        response = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}", max_retries=2)
+        if response.status_code != 200:
+            raise RuntimeError(f"OnFleet HTTP {response.status_code}")
+        return response.json()
+    return _check_tasks(ids, fetch_task=fetch, wo=wo, worker_id=worker_id, allow_existing=allow_existing)
+
+
 def create_onfleet_route(wo_name: str, ordered_task_ids: list[str], worker_id: str) -> dict[str, Any]:
     """Port of createOnfleetRoute. Restricts to the same allow-listed Onfleet
     teams so a route is never created for a worker outside the dispatch
@@ -171,6 +186,7 @@ def create_onfleet_route(wo_name: str, ordered_task_ids: list[str], worker_id: s
                 ),
             }
 
+        assert_tasks_available(ordered_task_ids, wo=wo_name, worker_id=worker_id, allow_existing=True)
         start_time = int((time.time() + 2 * 86400) * 1000)  # +2 days, matches GAS's setHours(16,0,0,0) intent closely enough for route ordering
         route_payload = {
             "name": wo_name,
@@ -274,15 +290,32 @@ def assign_tasks_to_worker(
     if not worker_id:
         return {"success": False, "error": f"Contractor phone number not found in Onfleet. (Searched for: {core10})", "workerId": None}
 
-    task_array = [t.strip() for t in safe_task_ids.split(",") if t.strip()]
+    task_array = _task_ids(safe_task_ids)
+    try:
+        assert_tasks_available(task_array, wo=wo_name, worker_id=worker_id, allow_existing=True)
+    except TaskAssignmentConflict as exc:
+        return {"success": False, "assignmentBlocked": True, "error": str(exc), "conflicts": exc.conflicts, "workerId": None}
+
     # Ported literally from GAS: Math.ceil(((totalComp||0)*10)/taskArray.length)/10
     per_task_rate = (math.ceil(((total_comp or 0) * 10) / len(task_array)) / 10.0) if task_array else 0.0
 
     assigned_count = 0
+    assigned_task_ids = []
     assignment_errors: list[str] = []
     complete_after = int((time.time() + 2 * 86400) * 1000)
 
     for i, tid in enumerate(task_array):
+        # Recheck immediately before writing in case a task changed while the
+        # rest of this route was being assigned. Never replace another worker.
+        try:
+            current = assert_tasks_available([tid], wo=wo_name, worker_id=worker_id, allow_existing=True)[tid]
+        except TaskAssignmentConflict as exc:
+            assignment_errors.append(str(exc))
+            continue
+        if current.get("worker"):
+            assigned_count += 1  # Exact same-worker / WO retry; no task writes.
+            assigned_task_ids.append(tid)
+            continue
         is_digital = tid in digital_task_set
         meta = [
             {"name": "WO_NAME", "value": wo_name or "", "type": "string", "visibility": ["api"]},
@@ -302,19 +335,21 @@ def assign_tasks_to_worker(
         assign_resp = onfleet_fetch_with_backoff("put", f"{ONFLEET_BASE}/tasks/{tid}", json_body=assign_body)
         if assign_resp.status_code == 200:
             assigned_count += 1
+            assigned_task_ids.append(tid)
         else:
             assignment_errors.append(f"Task {tid} failed: {assign_resp.text}")
         if i < len(task_array) - 1:
             time.sleep(0.07)
 
     if assigned_count == 0:
-        return {"success": False, "error": f"Onfleet API rejected assignment. Details: {' | '.join(assignment_errors)}", "workerId": None}
+        return {"success": False, "error": f"Onfleet API rejected assignment. Details: {' | '.join(assignment_errors)}", "workerId": None, "assignmentBlocked": bool(assignment_errors)}
 
     is_partial = assigned_count < len(task_array)
     return {
         "success": True,
         "partial": is_partial,
         "assignedCount": assigned_count,
+        "assignedTaskIds": assigned_task_ids,
         "totalCount": len(task_array),
         "assignmentErrors": assignment_errors if is_partial else [],
         "msg": f"Assigned {assigned_count} out of {len(task_array)} tasks to worker.",
@@ -352,9 +387,10 @@ def apply_onfleet_decision(
     route_success = False
     route_msg = ""
     if onfleet_success and assign_result.get("workerId"):
-        ordered_ids = [
-            t.strip() for t in (stop_order or task_ids).split(",") if t.strip()
-        ]
+        assigned_ids = assign_result.get("assignedTaskIds", _task_ids(task_ids))
+        assigned_set = set(assigned_ids)
+        ordered_ids = [tid for tid in _task_ids(stop_order or task_ids) if tid in assigned_set]
+        ordered_ids += [tid for tid in assigned_ids if tid not in ordered_ids]
         route_result = create_onfleet_route(wo or "Route", ordered_ids, assign_result["workerId"])
         route_success = route_result.get("success", False)
         route_msg = f"Route created: {route_result.get('routeId')}" if route_success else f"Route creation failed: {route_result.get('error')}"
@@ -363,6 +399,8 @@ def apply_onfleet_decision(
     route_incomplete = (not onfleet_success) or partial or (not route_success)
     return {
         "onfleetSuccess": onfleet_success,
+        "assignmentBlocked": bool(assign_result.get("assignmentBlocked")),
+        "conflicts": assign_result.get("conflicts", []),
         "onfleetMsg": onfleet_msg,
         "routeSuccess": route_success,
         "routeMsg": route_msg,

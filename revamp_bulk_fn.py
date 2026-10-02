@@ -107,6 +107,7 @@ def bulk_assign(engine, selected_routes, due, assign_tasks_to_fn_team,
     persisted cluster hashes before any write to prevent repeat clicks from
     making duplicate Field Nation orders.
     """
+    from migration.task_availability import TaskAssignmentConflict, remove_unavailable_tasks
     saved, skipped, errors = [], [], []
     if engine is None or not fn_team_id or not fn_worker_id:
         return saved, skipped, [("", "Database, Field Nation team and worker are required")]
@@ -159,6 +160,23 @@ def bulk_assign(engine, selected_routes, due, assign_tasks_to_fn_team,
                 continue
 
             saved.append((route_hash, work_order))
+        except TaskAssignmentConflict as exc:
+            # Known ownership conflicts are routine stale-pool changes. Remove
+            # those tasks and continue the rest; API uncertainty remains an error.
+            if any(not c['reason'].lower().startswith(('already assigned', 'already completed', 'already reserved')) for c in exc.conflicts):
+                errors.append((route_hash, str(exc)))
+                continue
+            remaining = remove_unavailable_tasks([route], [c['taskId'] for c in exc.conflicts])
+            if not remaining:
+                skipped.append((route_hash, 'Already assigned'))
+                continue
+            route.clear()
+            route.update(remaining[0])
+            new_saved, new_skipped, new_errors = bulk_assign(
+                engine, [(pod, route)], due, assign_tasks_to_fn_team, fn_team_id, fn_worker_id)
+            saved.extend(new_saved)
+            skipped.extend(new_skipped)
+            errors.extend(new_errors)
         except Exception as exc:
             errors.append((route_hash, str(exc)))
     return saved, skipped, errors

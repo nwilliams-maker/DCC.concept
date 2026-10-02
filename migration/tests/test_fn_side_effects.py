@@ -71,7 +71,7 @@ with patch("fn_side_effects.requests.get") as mock_get:
     print("OK:", result["error"])
 
 print("\n=== create_onfleet_route: succeeds for an allowed team ===")
-with patch("fn_side_effects.requests.get") as mock_get, patch("fn_side_effects.requests.post") as mock_post:
+with patch("fn_side_effects.requests.get") as mock_get, patch("fn_side_effects.requests.post") as mock_post, patch("fn_side_effects.assert_tasks_available", return_value={}):
     mock_get.side_effect = [
         _resp(200, {"teams": ["t-orange"]}),
         _resp(200, [{"id": "t-orange", "name": "POD: Orange"}]),
@@ -92,13 +92,14 @@ print("\n=== assign_tasks_to_worker: matches by phone, assigns both tasks ===")
 fx._phone_map_cache["map"] = None  # reset in-process cache between tests
 with patch("fn_side_effects.requests.get") as mock_get, patch("fn_side_effects.requests.request") as mock_req:
     mock_get.return_value = _resp(200, [{"id": "worker-9", "phone": "+1 555-123-4567"}])
-    mock_req.return_value = _resp(200, {"ok": True})
+    mock_req.side_effect = lambda method, url, **kwargs: _resp(200, {"id": url.rsplit("/",1)[-1], "state": 0, "worker": None, "metadata": []}) if method == "get" else _resp(200, {"ok": True})
     result = fx.assign_tasks_to_worker("5551234567", "task1,task2", "WO-1", 100.0, "2026-10-01")
     assert result["success"] is True
     assert result["workerId"] == "worker-9"
     assert result["assignedCount"] == 2
-    # 2 tasks x 2 PUTs each (metadata + assignment) = 4 calls
-    assert mock_req.call_count == 4
+    # Two fresh checks plus two PUTs per task.
+    assert sum(c.args[0] == "put" for c in mock_req.call_args_list) == 4
+    assert sum(c.args[0] == "get" for c in mock_req.call_args_list) == 4
     print("OK:", result)
 
 print("\n=== assign_tasks_to_worker: unknown phone fails cleanly ===")
@@ -130,7 +131,7 @@ with patch("fn_side_effects.requests.get") as mock_get, patch("fn_side_effects.r
         _resp(200, {"teams": ["t-orange"]}),  # worker lookup for route creation
         _resp(200, [{"id": "t-orange", "name": "POD: Orange"}]),  # teams lookup
     ]
-    mock_req.return_value = _resp(200, {"ok": True})
+    mock_req.side_effect = lambda method, url, **kwargs: _resp(200, {"id": url.rsplit("/",1)[-1], "state": 0, "worker": None, "metadata": []}) if method == "get" else _resp(200, {"ok": True})
     mock_post.return_value = _resp(200, {"id": "rp-999"})
     result = fx.apply_onfleet_decision(decision="accept", task_ids="task1,task2", wo="WO-1", phone="5551234567", comp=200.0, due="2026-10-01")
     assert result["onfleetSuccess"] is True

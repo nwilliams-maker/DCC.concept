@@ -115,7 +115,7 @@ def _build_progress_display(pod):
         message = message.replace("📡 ", "").replace("🗺️ ", "")
         label = f"{count:,} OnFleet tasks downloaded. {message or 'Building routes...'}"
     elif phase == "failed":
-        label = "Task extraction failed. Check new tasks to retry."
+        label = "Task extraction failed. the Routes refresh icon to retry."
     else:
         label = "Connecting to OnFleet; waiting for the first task page..."
     return max(0.0, min(float(status.get("value", 0.02)), 1.0)), label
@@ -661,7 +661,7 @@ def _saved_status_group_label(route):
 
 def _route_list_heading(route, state, route_hash):
     """Put saved work orders first without changing route queues."""
-    if state not in ("Accepted", "Declined", "Finalized"):
+    if state not in ("Sent", "Accepted", "Declined", "Finalized"):
         return None
     fields = _saved_route_fields(route)
     ghost = fields["ghost"]
@@ -670,15 +670,142 @@ def _route_list_heading(route, state, route_hash):
         or st.session_state.get(f"route_state_{route_hash}") == "finalized"
     )
     display_status = "Finalized" if finalized else state
-    icon = {"Accepted": "✓", "Declined": "×", "Finalized": "✓"}[display_status]
+    icon = {"Sent": "→", "Accepted": "✓", "Declined": "×", "Finalized": "✓"}[display_status]
     wo = str(fields["wo"] or "").strip() or "Work order unavailable"
     city = route.get("city") or "Unknown city"
     return f"**{wo}** - {city}, {route.get('state', '')} - {icon} {display_status}"
 
 
-def _render_route_list(matching, status, fn_posted, fn_providers):
+@st.cache_resource(show_spinner=False)
+def _quiet_refresh_service():
+    from migration.quiet_task_refresh import QuietTaskRefresh
+    return QuietTaskRefresh()
+
+
+def _entry_matches(entry, status, search):
+    state, route, nearest = entry[2], entry[1], entry[4]
+    return ((status == "All" or state == status or
+             (status == "Over 50 mi" and nearest and nearest[1] > 50 and state in ("Ready", "Flagged")) or
+             (status == "CVS Removal" and state in ("Ready", "Flagged") and route.get("is_removal")) or
+             (status == "Selected" and st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))) and
+            (not search or search in _searchable(route)) and
+            (status == "CVS Removal" or state not in ("Ready", "Flagged") or not route.get("is_removal")))
+
+
+def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks):
+    """Workers build caches only; this fragment applies results to its session."""
+    from migration.quiet_task_refresh import reconcile_task_pool
+
+    def build(selected, refresh_source):
+        if refresh_source:
+            fetch_open_tasks.clear()
+        source = fetch_open_tasks()
+        if source.get('_hit_cap'):
+            raise RuntimeError('Incomplete OnFleet task download')
+        result = {}
+        for pod in selected:
+            with _pod_load_locks()[pod]:
+                ready = (process_digital_pool(warm_only=True) if pod == 'Digital'
+                         else process_pod(pod, warm_only=True))
+                if ready is not True:
+                    raise RuntimeError(f'{pod} task check failed')
+                result[pod] = cluster_store()[pod]['clusters']
+        return result
+
+    manual = st.button('↻', key='revamp_quiet_refresh', help='Check for new and assigned tasks',
+                       use_container_width=True)
+    future = _quiet_refresh_service().poll(pods, build, force=manual)
+    applied = st.session_state.setdefault('_revamp_quiet_applied', {})
+    key = tuple(sorted(pods))
+    if future.done() and applied.get(key) is not future:
+        applied[key] = future
+        try:
+            fresh = future.result()
+            total_added = total_removed = 0
+            sent_db = st.session_state.get('sent_db') or {}
+            def protected(route):
+                route_hash = _route_hash(route)
+                return (st.session_state.get(f'route_state_{route_hash}') in ('email_sent', 'field_nation', 'finalized')
+                        or any(str((sent_db.get(str(t['id']).strip()) or {}).get('status', '')).lower()
+                               in ('sent', 'accepted', 'finalized', 'field_nation') for t in route.get('data', [])))
+            for pod in pods:
+                store_key = 'global_digital_clusters' if pod == 'Digital' else f'clusters_{pod}'
+                current = st.session_state.get(store_key, [])
+                updated, added, removed = reconcile_task_pool(current, fresh[pod], protected)
+                if added or removed:
+                    st.session_state[store_key] = updated
+                    st.session_state['_revamp_quiet_revision'] = st.session_state.get('_revamp_quiet_revision', 0) + 1
+                total_added += added
+                total_removed += removed
+            if total_added or total_removed:
+                parts = []
+                if total_added: parts.append(f"{total_added} {'task' if total_added == 1 else 'tasks'} added")
+                if total_removed: parts.append(f"{total_removed} {'task' if total_removed == 1 else 'tasks'} removed")
+                st.session_state['_revamp_quiet_notice'] = (' · '.join(parts), time.monotonic())
+            st.session_state['_revamp_quiet_error'] = False
+            st.session_state['_last_sync_ts'] = datetime.now()
+        except Exception as exc:
+            print(f'[revamp/task-check] keeping existing routes: {type(exc).__name__}: {exc}', flush=True)
+            st.session_state['_revamp_quiet_error'] = True
+    return not future.done()
+
+
+@st.fragment(run_every=5)
+def _render_route_list(matching, status, fn_posted, fn_providers,
+                       quiet_context=None):
     """State toggles rerun only this list; route clicks refresh the detail pane."""
-    st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+    busy = False
+    if quiet_context:
+        pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, eligible_ics, haversine, search = quiet_context
+        title_col, check_col = st.columns([8, 1], vertical_alignment="center")
+        with check_col:
+            busy = _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks)
+        with title_col:
+            circle = '<span class="rv-task-spin"></span>' if busy else '<span class="rv-task-idle"></span>'
+            notice, when = st.session_state.get('_revamp_quiet_notice', ('', 0))
+            notice = notice if time.monotonic() - when < 30 else ''
+            if st.session_state.get('_revamp_quiet_error'):
+                notice = 'Check unavailable · retry ↻'
+            st.markdown('<style>@keyframes rv-task-spin{to{transform:rotate(360deg)}}'
+                        '.rv-task-spin,.rv-task-idle{display:inline-block;width:12px;height:12px;margin-left:8px;}'
+                        '.rv-task-spin{border:2px solid #e4e7ec;border-top-color:#667085;border-radius:50%;animation:rv-task-spin 0.8s linear infinite;}'
+                        '.rv-task-note{font-size:12px;font-weight:400;color:#667085;margin-left:8px;}</style>'
+                        f'<div class="revamp-panel-title">Routes{circle}<span class="rv-task-note">{html.escape(notice)}</span></div>',
+                        unsafe_allow_html=True)
+        # Rebuild only pending cards. Saved/history cards and the detail pane
+        # stay mounted. Dispatch actions independently verify every task live.
+        revision = (st.session_state.get('_revamp_quiet_revision', 0), tuple(pods), status, search)
+        cached = st.session_state.get('_revamp_quiet_pending')
+        if cached and cached[0] == revision:
+            pending = cached[1]
+        else:
+            pending = []
+            all_pending = []
+            for pod in pods:
+                store_key = 'global_digital_clusters' if pod == 'Digital' else f'clusters_{pod}'
+                route_pod = 'Global_Digital' if pod == 'Digital' else pod
+                for route in st.session_state.get(store_key, []):
+                    if bool(route.get('is_digital')) != (pod == 'Digital'):
+                        continue
+                    nearest = _nearest_ic(route, eligible_ics, haversine)
+                    route_hash = _route_hash(route)
+                    state = _route_status(route, st.session_state.get('sent_db') or {}, nearest[1] if nearest else None, route_pod)
+                    entry = (route_pod, route, state, route_hash, nearest)
+                    if state in ('Ready', 'Flagged'):
+                        all_pending.append(entry)
+                        if _entry_matches(entry, status, search):
+                            pending.append(entry)
+            st.session_state['_revamp_quiet_all_pending'] = (tuple(pods), all_pending)
+            st.session_state['_revamp_quiet_pending'] = (revision, pending)
+        # Existing order survives checks; newly discovered routes append.
+        by_key = {_route_entry_key(*entry[:4]): entry for entry in pending}
+        old_order = st.session_state.get('_revamp_quiet_list_order', [])
+        pending = [by_key.pop(key) for key in old_order if key in by_key] + list(by_key.values())
+        st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in pending]
+        matching = [entry for entry in matching if entry[2] not in ('Ready', 'Flagged')] + pending
+        st.session_state['_revamp_quiet_visible_keys'] = [f'{entry[0]}:{entry[3]}' for entry in pending]
+    else:
+        st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
     with st.container(height=680, border=False, key="revamp_route_scroll"):
         if not matching:
             st.info("No matching routes.")
@@ -887,12 +1014,54 @@ def _return_fn_route_to_regular(route, route_hash, pod, db_engine,
     return True
 
 
+@st.fragment(run_every=5)
+def _render_workspace_summary(all_routes, pod_choice, loaded):
+    current = st.session_state.get('_revamp_quiet_all_pending')
+    if current and current[0] == tuple(loaded):
+        all_routes = [entry for entry in all_routes if entry[2] not in ('Ready', 'Flagged')] + current[1]
+    counts = {status: sum(1 for entry in all_routes if entry[2] == status)
+              for status in STATUSES[1:]}
+    counts["Over 50 mi"] = sum(1 for entry in all_routes
+                                if entry[4] and entry[4][1] > 50 and
+                                entry[2] in ("Ready", "Flagged"))
+    counts["CVS Removal"] = sum(
+        1 for entry in all_routes
+        if entry[2] in ("Ready", "Flagged") and entry[1].get("is_removal")
+    )
+    counts["Selected"] = sum(1 for entry in all_routes
+                             if st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))
+    counts["All"] = len(all_routes)
+    total_tasks = sum(len(route.get("data", [])) or
+                      len((route.get("_ghost_record") or {}).get("task_ids") or [])
+                      for _, route, _, _, _ in all_routes)
+    last_sync = st.session_state.get("_last_sync_ts")
+    sync_age = "Sync available"
+    if isinstance(last_sync, datetime):
+        minutes = max(0, int((datetime.now() - last_sync).total_seconds() // 60))
+        sync_age = f"Synced {minutes}m ago"
+    unselected = sum(entry[2] in ("Ready", "Flagged") for entry in all_routes) - counts["Selected"]
+    st.markdown(
+        f'<span class="revamp-pill">Pod <b>{html.escape(str(pod_choice))}</b></span>'
+        f'<span class="revamp-pill">{html.escape(sync_age)}</span>'
+        f'<span class="revamp-pill">Routes <b>{len(all_routes)}</b></span>'
+        f'<span class="revamp-pill">Tasks <b>{total_tasks}</b></span>'
+        f'<span class="revamp-pill">Flagged <b>{counts["Flagged"]}</b></span>'
+        f'<span class="revamp-pill">Unselected <b>{max(0, unselected)}</b></span>'
+        f'<span class="revamp-pill">Field Nation <b>{counts["Field Nation"]}</b></span>'
+        f'<span class="revamp-pill">Sent <b>{counts["Sent"]}</b></span>'
+        f'<span class="revamp-pill">Accepted <b>{counts["Accepted"]}</b></span>'
+        f'<span class="revamp-pill">Finalized <b>{counts["Finalized"]}</b></span>',
+        unsafe_allow_html=True,
+    )
+
+
+
 def render_workspace(can_access_tab, process_pod, render_dispatch,
                      haversine, db_engine, assign_tasks_to_fn_team,
                      fetch_sent_records_from_sheet, default_due_days=14,
                      fn_ghost_to_cluster=None, saved_route_helpers=None,
                      merge_same_wo_ghosts=None, cluster_store=None,
-                     mapbox_geocode=None, process_digital_pool=None):
+                     mapbox_geocode=None, process_digital_pool=None, fetch_open_tasks=None):
     """Render one selected route while retaining the existing dispatch actions."""
     st.markdown("""
     <style>
@@ -1201,8 +1370,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     with filter_col:
         pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod", on_change=_remember_pod)
     selected_pods = accessible if pod_choice == "All my pods" else [pod_choice]
-    with refresh_col:
-        refresh_clicked = st.button("Check new tasks", key="revamp_sync", use_container_width=True)
+    refresh_clicked = False  # The small Routes control checks in its own fragment.
 
     # Contractor intake is separate from task extraction. The roster is in
     # Postgres, while new OnFleet workers used to be created only by the
@@ -1277,7 +1445,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 except Exception as exc:
                     print(f"[revamp/sync] Digital load failed: {type(exc).__name__}: {exc}", flush=True)
                     st.session_state[f"_revamp_load_attempted_{pod}"] = False
-                    st.error("Digital task extraction failed. Click Check new tasks to retry.")
+                    st.error("Digital task extraction failed. Click the Routes refresh icon to retry.")
                     continue
             else:
                 if cluster_store is not None:
@@ -1310,7 +1478,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                     finally:
                         indicator.empty()
                     if not ready:
-                        st.error("OnFleet task extraction failed. Click Check new tasks to retry.")
+                        st.error("OnFleet task extraction failed. Click the Routes refresh icon to retry.")
                         continue
                 with st.spinner(f"Finishing {pod} routes..."):
                     with _pod_load_locks()[pod]:
@@ -1348,11 +1516,20 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     loaded = [pod for pod in selected_pods if _cluster_key(pod) in st.session_state]
     if not loaded:
-        st.error("Routes could not be loaded. Click Check new tasks to retry.")
+        def retry_initial_load():
+            for pod in selected_pods:
+                st.session_state[f'_revamp_load_attempted_{pod}'] = False
+        title_col, refresh_col = st.columns([8, 1], vertical_alignment="center")
+        with title_col:
+            st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+            st.caption('Routes could not be loaded. Retry with ↻.')
+        with refresh_col:
+            st.button('↻', key='revamp_quiet_refresh', help='Retry loading routes',
+                      on_click=retry_initial_load, use_container_width=True)
         return
     missing = [pod for pod in selected_pods if pod not in loaded]
     if missing:
-        st.caption("Could not load: " + ", ".join(missing) + ". Click Check new tasks to retry.")
+        st.caption("Could not load: " + ", ".join(missing) + ". Click the Routes refresh icon to retry.")
 
     eligible_ics = _eligible_ics(st.session_state.get("ic_df"), mapbox_geocode)
     all_routes = []
@@ -1437,40 +1614,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     # Streamlit widget keys) coincide; keep one route before counts, selection,
     # bulk actions, and the visible list are derived.
     all_routes = _dedupe_route_entries(all_routes)
-    counts = {status: sum(1 for entry in all_routes if entry[2] == status)
-              for status in STATUSES[1:]}
-    counts["Over 50 mi"] = sum(1 for entry in all_routes
-                                if entry[4] and entry[4][1] > 50 and
-                                entry[2] in ("Ready", "Flagged"))
-    counts["CVS Removal"] = sum(
-        1 for entry in all_routes
-        if entry[2] in ("Ready", "Flagged") and entry[1].get("is_removal")
-    )
-    counts["Selected"] = sum(1 for entry in all_routes
-                             if st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))
-    counts["All"] = len(all_routes)
-    total_tasks = sum(len(route.get("data", [])) or
-                      len((route.get("_ghost_record") or {}).get("task_ids") or [])
-                      for _, route, _, _, _ in all_routes)
-    last_sync = st.session_state.get("_last_sync_ts")
-    sync_age = "Sync available"
-    if isinstance(last_sync, datetime):
-        minutes = max(0, int((datetime.now() - last_sync).total_seconds() // 60))
-        sync_age = f"Synced {minutes}m ago"
-    unselected = sum(entry[2] in ("Ready", "Flagged") for entry in all_routes) - counts["Selected"]
-    st.markdown(
-        f'<span class="revamp-pill">Pod <b>{html.escape(str(pod_choice))}</b></span>'
-        f'<span class="revamp-pill">{html.escape(sync_age)}</span>'
-        f'<span class="revamp-pill">Routes <b>{len(all_routes)}</b></span>'
-        f'<span class="revamp-pill">Tasks <b>{total_tasks}</b></span>'
-        f'<span class="revamp-pill">Flagged <b>{counts["Flagged"]}</b></span>'
-        f'<span class="revamp-pill">Unselected <b>{max(0, unselected)}</b></span>'
-        f'<span class="revamp-pill">Field Nation <b>{counts["Field Nation"]}</b></span>'
-        f'<span class="revamp-pill">Sent <b>{counts["Sent"]}</b></span>'
-        f'<span class="revamp-pill">Accepted <b>{counts["Accepted"]}</b></span>'
-        f'<span class="revamp-pill">Finalized <b>{counts["Finalized"]}</b></span>',
-        unsafe_allow_html=True,
-    )
+    _render_workspace_summary(all_routes, pod_choice, selected_pods)
 
     for key in st.session_state.pop("_revamp_fn_clear_next", []):
         st.session_state[f"revamp_fn_{key}"] = False
@@ -1524,7 +1668,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     def select_visible():
         # Field Nation bulk selection is intentionally Pending-only. Posted
         # and Assigned routes must be selected individually if needed.
-        keys_to_select = visible_keys
+        keys_to_select = (st.session_state.get('_revamp_quiet_visible_keys', visible_keys)
+                          if status != 'Field Nation' else visible_keys)
         if status == "Field Nation":
             keys_to_select = [
                 f"{entry[0]}:{entry[3]}" for entry in matching
@@ -1534,7 +1679,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         for key in keys_to_select:
             st.session_state[f"{selection_prefix}{key}"] = True
     def clear_visible():
-        for key in visible_keys:
+        keys = (st.session_state.get('_revamp_quiet_visible_keys', visible_keys)
+                if status != 'Field Nation' else visible_keys)
+        for key in keys:
             st.session_state[f"{selection_prefix}{key}"] = False
     if status != "Field Nation":
         with st.container(key="revamp_action_bar"):
@@ -1744,7 +1891,14 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     left, right = st.columns([1.75, 3.25], gap="large")
     with left:
-        _render_route_list(matching, status, fn_posted, fn_providers)
+        quiet_context = ((selected_pods, process_pod, process_digital_pool, cluster_store,
+                          fetch_open_tasks, eligible_ics, haversine, search)
+                         if cluster_store is not None and fetch_open_tasks is not None else None)
+        st.session_state.pop('_revamp_quiet_pending', None)
+        st.session_state.pop('_revamp_quiet_all_pending', None)
+        st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in matching
+                                                      if entry[2] in ('Ready', 'Flagged')]
+        _render_route_list(matching, status, fn_posted, fn_providers, quiet_context)
 
     with right:
         selection = st.session_state.get("revamp_selected_route")
