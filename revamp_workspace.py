@@ -676,6 +676,67 @@ def _route_list_heading(route, state, route_hash):
     return f"**{wo}** - {city}, {route.get('state', '')} - {icon} {display_status}"
 
 
+def _bundle_label(route, bundle_sets=()):
+    """Identify confirmed bundles, including saved orders after tasks leave the feed."""
+    ghost = route.get('_ghost_record') or {}
+    for value in (route.get('bundle_count'), ghost.get('bundle_count')):
+        try:
+            if int(value or 0) > 0:
+                return '🔗 Bundled'
+        except (TypeError, ValueError):
+            pass
+    try:
+        if int(ghost.get('_merged_count') or route.get('_merged_count') or 0) > 1:
+            return '🔗 Bundled'
+    except (TypeError, ValueError):
+        pass
+    ids = {str(t.get('id') or '').strip() for t in route.get('data', [])}
+    ids.update(str(tid).strip() for tid in ghost.get('task_ids', []))
+    if any(len(entry) > 1 and entry.issubset(ids) for entry in bundle_sets):
+        return '🔗 Bundled'
+    return ''
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_bundle_labels(_db_engine, pod):
+    """Read the existing shared bundle registry without changing route grouping."""
+    from migration.data_access import load_bundle_map
+    from migration.task_availability import task_ids
+    if _db_engine is None:
+        return []
+    try:
+        return [set(task_ids(entry)) for entry in (load_bundle_map(_db_engine, pod, '_shared') or [])]
+    except Exception as exc:
+        print(f'[revamp/bundle-label] registry unavailable for {pod}: {type(exc).__name__}', flush=True)
+        return []
+
+
+def _bundle_sets_for_pod(pod):
+    current = st.session_state.get('_bundle_map') or {}
+    if pod in current:
+        return current[pod]
+    return (st.session_state.get('_revamp_bundle_labels') or {}).get(pod, [])
+
+
+def _routes_refresh_style(busy=False):
+    # The same 12px circle is both the refresh control and the activity indicator.
+    animation = 'rv-task-spin 0.8s linear infinite' if busy else 'none'
+    st.markdown("""<style>
+    @keyframes rv-task-spin{to{transform:rotate(360deg)}}
+    .st-key-revamp_routes_heading [data-testid="stHorizontalBlock"]{gap:6px!important;align-items:center;}
+    .st-key-revamp_routes_heading [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(1){flex:0 0 auto!important;width:max-content!important;min-width:0!important;}
+    .st-key-revamp_routes_heading [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2){flex:0 0 20px!important;width:20px!important;min-width:20px!important;}
+    .st-key-revamp_routes_heading [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3){flex:1 1 0!important;min-width:0!important;}
+    .st-key-revamp_routes_heading .revamp-panel-title{margin:0!important;}
+    .st-key-revamp_quiet_control button{min-height:20px!important;height:20px!important;min-width:20px!important;width:20px!important;padding:2px!important;border:0!important;box-shadow:none!important;background:transparent!important;display:flex;align-items:center;justify-content:center;}
+    .st-key-revamp_quiet_control button p{font-size:0!important;margin:0!important;}
+    .st-key-revamp_quiet_control button::after{content:'';width:12px;height:12px;box-sizing:border-box;border:2px solid #e4e7ec;border-top-color:#667085;border-radius:50%;animation:""" + animation + ";}" + """
+    .st-key-revamp_quiet_control button:hover::after{border-top-color:#344054;}
+    .st-key-revamp_quiet_control button:focus-visible{outline:2px solid #98a2b3!important;outline-offset:2px;}
+    .rv-task-note{font-size:12px;font-weight:400;color:#667085;}
+    </style>""", unsafe_allow_html=True)
+
+
 @st.cache_resource(show_spinner=False)
 def _quiet_refresh_service():
     from migration.quiet_task_refresh import QuietTaskRefresh
@@ -712,7 +773,7 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
                 result[pod] = cluster_store()[pod]['clusters']
         return result
 
-    manual = st.button('↻', key='revamp_quiet_refresh', help='Check for new and assigned tasks',
+    manual = st.button('↻', key='revamp_quiet_refresh',
                        use_container_width=True)
     future = _quiet_refresh_service().poll(pods, build, force=manual)
     applied = st.session_state.setdefault('_revamp_quiet_applied', {})
@@ -757,21 +818,20 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
     busy = False
     if quiet_context:
         pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, eligible_ics, haversine, search = quiet_context
-        title_col, check_col = st.columns([8, 1], vertical_alignment="center")
-        with check_col:
-            busy = _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks)
-        with title_col:
-            circle = '<span class="rv-task-spin"></span>' if busy else '<span class="rv-task-idle"></span>'
-            notice, when = st.session_state.get('_revamp_quiet_notice', ('', 0))
-            notice = notice if time.monotonic() - when < 30 else ''
-            if st.session_state.get('_revamp_quiet_error'):
-                notice = 'Check unavailable · retry ↻'
-            st.markdown('<style>@keyframes rv-task-spin{to{transform:rotate(360deg)}}'
-                        '.rv-task-spin,.rv-task-idle{display:inline-block;width:12px;height:12px;margin-left:8px;}'
-                        '.rv-task-spin{border:2px solid #e4e7ec;border-top-color:#667085;border-radius:50%;animation:rv-task-spin 0.8s linear infinite;}'
-                        '.rv-task-note{font-size:12px;font-weight:400;color:#667085;margin-left:8px;}</style>'
-                        f'<div class="revamp-panel-title">Routes{circle}<span class="rv-task-note">{html.escape(notice)}</span></div>',
-                        unsafe_allow_html=True)
+        with st.container(key='revamp_routes_heading'):
+            title_col, check_col, notice_col = st.columns([58, 20, 300], vertical_alignment="center")
+            with title_col:
+                st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+            with check_col:
+                with st.container(key='revamp_quiet_control'):
+                    busy = _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks)
+            with notice_col:
+                notice, when = st.session_state.get('_revamp_quiet_notice', ('', 0))
+                notice = notice if time.monotonic() - when < 30 else ''
+                if st.session_state.get('_revamp_quiet_error'):
+                    notice = 'Check unavailable · retry'
+                st.markdown(f'<span class="rv-task-note">{html.escape(notice)}</span>', unsafe_allow_html=True)
+        _routes_refresh_style(busy)
         # Rebuild only pending cards. Saved/history cards and the detail pane
         # stay mounted. Dispatch actions independently verify every task live.
         revision = (st.session_state.get('_revamp_quiet_revision', 0), tuple(pods), status, search)
@@ -790,7 +850,8 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     nearest = _nearest_ic(route, eligible_ics, haversine)
                     route_hash = _route_hash(route)
                     state = _route_status(route, st.session_state.get('sent_db') or {}, nearest[1] if nearest else None, route_pod)
-                    entry = (route_pod, route, state, route_hash, nearest)
+                    display_route = {**route, '_bundle_label': _bundle_label(route, _bundle_sets_for_pod(route_pod))}
+                    entry = (route_pod, display_route, state, route_hash, nearest)
                     if state in ('Ready', 'Flagged'):
                         all_pending.append(entry)
                         if _entry_matches(entry, status, search):
@@ -867,6 +928,9 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                         heading += " · CVS Removal"
                     if heading is None:
                         heading = f"{city}, {route.get('state', '')}    {status_text}"
+                    bundle = route.get('_bundle_label') or _bundle_label(route, _bundle_sets_for_pod(pod))
+                    if bundle:
+                        heading += f" · {bundle}"
                     label = (f"{heading}\n"
                              f"{('Digital' if pod == 'Global_Digital' else pod)} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
                              f"{tasks} {'task' if tasks == 1 else 'tasks'}")
@@ -1519,18 +1583,26 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         def retry_initial_load():
             for pod in selected_pods:
                 st.session_state[f'_revamp_load_attempted_{pod}'] = False
-        title_col, refresh_col = st.columns([8, 1], vertical_alignment="center")
-        with title_col:
-            st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
-            st.caption('Routes could not be loaded. Retry with ↻.')
-        with refresh_col:
-            st.button('↻', key='revamp_quiet_refresh', help='Retry loading routes',
-                      on_click=retry_initial_load, use_container_width=True)
+        with st.container(key='revamp_routes_heading'):
+            title_col, refresh_col, notice_col = st.columns([58, 20, 300], vertical_alignment="center")
+            with title_col:
+                st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+            with refresh_col:
+                with st.container(key='revamp_quiet_control'):
+                    st.button('↻', key='revamp_quiet_refresh',
+                              on_click=retry_initial_load, use_container_width=True)
+            with notice_col:
+                st.caption('Routes could not be loaded. Click the circle to retry.')
+        _routes_refresh_style()
         return
     missing = [pod for pod in selected_pods if pod not in loaded]
     if missing:
         st.caption("Could not load: " + ", ".join(missing) + ". Click the Routes refresh icon to retry.")
 
+    label_sets = st.session_state.setdefault('_revamp_bundle_labels', {})
+    for pod in selected_pods:
+        route_pod = _route_pod_key(pod)
+        label_sets[route_pod] = _load_bundle_labels(db_engine, route_pod)
     eligible_ics = _eligible_ics(st.session_state.get("ic_df"), mapbox_geocode)
     all_routes = []
     seen_saved_routes = set()
@@ -1614,6 +1686,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     # Streamlit widget keys) coincide; keep one route before counts, selection,
     # bulk actions, and the visible list are derived.
     all_routes = _dedupe_route_entries(all_routes)
+    all_routes = [(pod, {**route, '_bundle_label': _bundle_label(route, _bundle_sets_for_pod(pod))}, state, route_hash, nearest)
+                  for pod, route, state, route_hash, nearest in all_routes]
     _render_workspace_summary(all_routes, pod_choice, selected_pods)
 
     for key in st.session_state.pop("_revamp_fn_clear_next", []):

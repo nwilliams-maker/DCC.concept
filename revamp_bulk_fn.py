@@ -54,6 +54,7 @@ def _payload(route, pod, due, work_order, route_hash):
     home = f"{center[0]},{center[1]}"
     return {
         "cluster_hash": route_hash,
+        "bundle_count": route.get('bundle_count', 0),
         "icn": "Field Nation",
         "pod": pod,
         "city": route.get("city", "Unknown"),

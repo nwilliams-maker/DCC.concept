@@ -7017,6 +7017,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     "pod": pod_name,
                     "city": cluster.get('city', 'Unknown'),
                     "state": cluster.get('state', 'Unknown'),
+                    "bundle_count": cluster.get('bundle_count', 0),
                     "due": str(due), "comp": final_pay, "lCnt": cluster['stops'], "mi": mi, "time": t_str,
                     "phone": str(ic.get('phone', '')),
                     # Dispatcher email priority: user-saved (Settings ✉️ pill) wins over
@@ -7252,6 +7253,7 @@ text-decoration:none;">📨 Default Mail</a>
                 "icn": "Field Nation",
                 "city": cluster.get('city', 'Unknown'),
                 "state": cluster.get('state', 'Unknown'),
+                "bundle_count": cluster.get('bundle_count', 0),
                 "taskIds": ",".join(task_ids),
                 # WO# unique per route. Was previously just FN-MMDDYYYY which gave every
                 # route created on the same day the same WO — fetch_sent_records_from_sheet
