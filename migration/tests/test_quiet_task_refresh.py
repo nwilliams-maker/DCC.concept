@@ -126,7 +126,7 @@ st.date_input('Due',key='due')
     assert not app.exception
     assert len(app.get('progress')) == 0
     assert app.button(key='revamp_quiet_refresh').label == '↻'
-    assert any('width:12px;height:12px' in m.value and 'animation:rv-task-spin 0.8s linear infinite' in m.value for m in app.markdown)
+    assert any('width:12px;height:12px' in m.value and 'animation:none' in m.value for m in app.markdown)
     assert any('border:0!important' in m.value and '.st-key-revamp_quiet_control button' in m.value for m in app.markdown)
     app.text_input(key='contractor').set_value('Michael').run()
     app.number_input(key='rate').set_value(30).run()
@@ -166,8 +166,9 @@ def _quiet_check_scope(source, session, cap=False, fail_pod=None):
             except Exception as exc: future.set_exception(exc)
             return future
     node = next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name == '_quiet_routes_check')
-    scope = {'st': SimpleNamespace(session_state=session,button=lambda *a,**k:False),
+    scope = {'st': SimpleNamespace(session_state=session,button=lambda *a,**k:True),
              '_quiet_refresh_service':ImmediateService, '_route_hash':lambda r:'hash',
+             '_routes_refresh_style':lambda *a:None,
              '_pod_load_locks':lambda:{'Blue':threading.Lock(),'Digital':threading.Lock()},
              'time': __import__('time'), 'datetime': __import__('datetime').datetime,
              'ZoneInfo': __import__('zoneinfo').ZoneInfo}
@@ -265,25 +266,34 @@ def test_bulk_field_nation_payload_keeps_bundle_identity():
 
 
 @pytest.mark.parametrize('manual', [False, True])
-def test_no_change_notice_waits_for_manual_check_completion(manual):
+def test_task_check_only_runs_on_click_and_timestamps_completion(manual):
     import revamp_workspace as w
     from concurrent.futures import Future
     from types import SimpleNamespace
     from unittest.mock import patch
     future = Future()
-    session = {'clusters_Blue': [], 'global_digital_clusters': []}
-    clicked = [manual]
-    fake_st = SimpleNamespace(session_state=session, button=lambda *a, **k: clicked[0])
-    service = SimpleNamespace(poll=lambda *a, **k: future)
-    with patch.object(w, 'st', fake_st), patch.object(w, '_quiet_refresh_service', lambda: service):
-        assert w._quiet_routes_check(['Blue'], None, None, None, None)
-        assert '_revamp_quiet_notice' not in session
-        clicked[0] = False
-        future.set_result({'Blue': []})
+    future.set_result({'Blue': []})
+    session = {'clusters_Blue': []}
+    calls = []
+    fake_st = SimpleNamespace(session_state=session, button=lambda *a, **k: manual)
+    def poll(*args, **kwargs):
+        calls.append(kwargs['force'])
+        return future
+    service = SimpleNamespace(poll=poll)
+    with patch.object(w, 'st', fake_st), patch.object(w, '_quiet_refresh_service', lambda: service), patch.object(w, '_routes_refresh_style'):
         assert not w._quiet_routes_check(['Blue'], None, None, None, None)
+    assert calls == ([True] if manual else [])
     if manual:
         assert session['_revamp_quiet_notice'][0].startswith('Up to date · ')
         assert session['_revamp_quiet_notice'][0].endswith(' CT')
     else:
         assert '_revamp_quiet_notice' not in session
-    assert not session['_revamp_quiet_manual']
+
+
+def test_routes_and_summary_have_no_scheduled_reruns():
+    import ast
+    from pathlib import Path
+    tree = ast.parse((Path(__file__).resolve().parents[2] / 'revamp_workspace.py').read_text())
+    for name in ('_render_route_list', '_render_workspace_summary'):
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+        assert [ast.unparse(d) for d in node.decorator_list] == ['st.fragment']

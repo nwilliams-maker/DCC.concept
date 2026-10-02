@@ -775,15 +775,14 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
 
     manual = st.button('↻', key='revamp_quiet_refresh',
                        use_container_width=True)
-    future = _quiet_refresh_service().poll(pods, build, force=manual)
+    if not manual:
+        return False
+    _routes_refresh_style(True)
+    future = _quiet_refresh_service().poll(pods, build, force=True)
     applied = st.session_state.setdefault('_revamp_quiet_applied', {})
     key = tuple(sorted(pods))
-    manual_checks = st.session_state.setdefault('_revamp_quiet_manual', {})
-    if manual:
-        manual_checks[key] = future
-    if future.done() and applied.get(key) is not future:
+    if applied.get(key) is not future:
         applied[key] = future
-        was_manual = manual_checks.pop(key, None) is future
         try:
             fresh = future.result()
             total_added = total_removed = 0
@@ -808,17 +807,17 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
                 if total_added: parts.append(f"{total_added} {'task' if total_added == 1 else 'tasks'} added")
                 if total_removed: parts.append(f"{total_removed} {'task' if total_removed == 1 else 'tasks'} removed")
                 st.session_state['_revamp_quiet_notice'] = (' · '.join(parts) + ' · ' + checked_at, time.monotonic())
-            elif was_manual:
+            else:
                 st.session_state['_revamp_quiet_notice'] = ('Up to date · ' + checked_at, time.monotonic())
             st.session_state['_revamp_quiet_error'] = False
             st.session_state['_last_sync_ts'] = datetime.now()
         except Exception as exc:
             print(f'[revamp/task-check] keeping existing routes: {type(exc).__name__}: {exc}', flush=True)
             st.session_state['_revamp_quiet_error'] = True
-    return not future.done()
+    return False
 
 
-@st.fragment(run_every=5)
+@st.fragment
 def _render_route_list(matching, status, fn_posted, fn_providers,
                        quiet_context=None):
     """State toggles rerun only this list; route clicks refresh the detail pane."""
@@ -1085,7 +1084,7 @@ def _return_fn_route_to_regular(route, route_hash, pod, db_engine,
     return True
 
 
-@st.fragment(run_every=5)
+@st.fragment
 def _render_workspace_summary(all_routes, pod_choice, loaded):
     current = st.session_state.get('_revamp_quiet_all_pending')
     if current and current[0] == tuple(loaded):
