@@ -140,6 +140,9 @@ st.date_input('Due',key='due')
     assert [t['id'] for r in app.session_state['clusters_Blue'] for t in r['data']] == ['new']
     assert any('1 task added · 1 task removed' in m.value for m in app.markdown)
     assert len(app.get('progress')) == 0
+    app.button(key='revamp_quiet_refresh').click().run()
+    assert not app.exception
+    assert any('Up to date' in m.value for m in app.markdown)
 
 
 def _quiet_check_scope(source, session, cap=False, fail_pod=None):
@@ -258,3 +261,27 @@ def test_bulk_field_nation_payload_keeps_bundle_identity():
     from revamp_bulk_fn import _payload
     payload=_payload({'bundle_count':2,'data':[]},'Blue','2026-10-10','WO','hash')
     assert payload['bundle_count']==2
+
+
+@pytest.mark.parametrize('manual', [False, True])
+def test_no_change_notice_waits_for_manual_check_completion(manual):
+    import revamp_workspace as w
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    future = Future()
+    session = {'clusters_Blue': [], 'global_digital_clusters': []}
+    clicked = [manual]
+    fake_st = SimpleNamespace(session_state=session, button=lambda *a, **k: clicked[0])
+    service = SimpleNamespace(poll=lambda *a, **k: future)
+    with patch.object(w, 'st', fake_st), patch.object(w, '_quiet_refresh_service', lambda: service):
+        assert w._quiet_routes_check(['Blue'], None, None, None, None)
+        assert '_revamp_quiet_notice' not in session
+        clicked[0] = False
+        future.set_result({'Blue': []})
+        assert not w._quiet_routes_check(['Blue'], None, None, None, None)
+    if manual:
+        assert session['_revamp_quiet_notice'][0] == 'Up to date'
+    else:
+        assert '_revamp_quiet_notice' not in session
+    assert not session['_revamp_quiet_manual']

@@ -778,8 +778,12 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
     future = _quiet_refresh_service().poll(pods, build, force=manual)
     applied = st.session_state.setdefault('_revamp_quiet_applied', {})
     key = tuple(sorted(pods))
+    manual_checks = st.session_state.setdefault('_revamp_quiet_manual', {})
+    if manual:
+        manual_checks[key] = future
     if future.done() and applied.get(key) is not future:
         applied[key] = future
+        was_manual = manual_checks.pop(key, None) is future
         try:
             fresh = future.result()
             total_added = total_removed = 0
@@ -803,6 +807,8 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
                 if total_added: parts.append(f"{total_added} {'task' if total_added == 1 else 'tasks'} added")
                 if total_removed: parts.append(f"{total_removed} {'task' if total_removed == 1 else 'tasks'} removed")
                 st.session_state['_revamp_quiet_notice'] = (' · '.join(parts), time.monotonic())
+            elif was_manual:
+                st.session_state['_revamp_quiet_notice'] = ('Up to date', time.monotonic())
             st.session_state['_revamp_quiet_error'] = False
             st.session_state['_last_sync_ts'] = datetime.now()
         except Exception as exc:
