@@ -367,7 +367,7 @@ def _outlook_route_url(route_hash, fields, ic_df=None, portal_base_url=None):
 def _render_saved_route_card(route, state, route_hash, pod, ghost,
                              make_venue_details, make_venue_details_ghost,
                              venue_section, render_finalization_checklist,
-                             move_to_dispatch, is_dispatch_associate):
+                             move_to_dispatch, is_dispatch_associate, email_db_engine=None):
     """Render the DCC route summary and actions only for the selected route."""
     fields = _saved_route_fields(route, ghost)
     fields["contractor"] = _display_contractor_name(route, state)
@@ -407,8 +407,8 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
     outlook_url = _outlook_route_url(route_hash, fields, st.session_state.get("ic_df")) if state != "Declined" else None
     if outlook_url:
         with st.container(key="revamp_outlook_action"):
-            st.link_button("Open Outlook", outlook_url, use_container_width=True,
-                           help="Open an Outlook draft for this route.")
+            from migration.email_dispatch_control import render_email_open
+            render_email_open(email_db_engine, "Open Outlook", outlook_url, f"saved_email_open_{pod}_{route_hash}")
     st.session_state[f"wo_{route_hash}"] = fields["wo"]
     if state == "Accepted" or (state == "Sent" and not is_ghost):
         render_finalization_checklist(
@@ -753,7 +753,7 @@ def _entry_matches(entry, status, search):
             (status == "CVS Removal" or state not in ("Ready", "Flagged") or not route.get("is_removal")))
 
 
-def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks):
+def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, notice_placeholder=None):
     """Workers build caches only; this fragment applies results to its session."""
     from migration.quiet_task_refresh import reconcile_task_pool
 
@@ -766,6 +766,10 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
         result = {}
         for pod in selected:
             with _pod_load_locks()[pod]:
+                # The old signature only counts task IDs. Assignment/team
+                # changes can keep those IDs unchanged, so rebuild on a check.
+                if pod in cluster_store():
+                    cluster_store()[pod].pop('sig', None)
                 ready = (process_digital_pool(warm_only=True) if pod == 'Digital'
                          else process_pod(pod, warm_only=True))
                 if ready is not True:
@@ -778,6 +782,8 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
     if not manual:
         return False
     _routes_refresh_style(True)
+    if notice_placeholder is not None:
+        notice_placeholder.markdown('<span class="rv-task-note">Checking tasks…</span>', unsafe_allow_html=True)
     future = _quiet_refresh_service().poll(pods, build, force=True)
     applied = st.session_state.setdefault('_revamp_quiet_applied', {})
     key = tuple(sorted(pods))
@@ -801,7 +807,7 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
                     st.session_state['_revamp_quiet_revision'] = st.session_state.get('_revamp_quiet_revision', 0) + 1
                 total_added += added
                 total_removed += removed
-            checked_at = datetime.now(ZoneInfo('America/Chicago')).strftime('%I:%M %p').lstrip('0') + ' CT'
+            checked_at = datetime.now(ZoneInfo('America/Chicago')).strftime('%I:%M:%S %p').lstrip('0') + ' CT'
             if total_added or total_removed:
                 parts = []
                 if total_added: parts.append(f"{total_added} {'task' if total_added == 1 else 'tasks'} added")
@@ -829,15 +835,16 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
             title_col, check_col, notice_col = st.columns([58, 20, 300], vertical_alignment="center")
             with title_col:
                 st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+            with notice_col:
+                notice_placeholder = st.empty()
             with check_col:
                 with st.container(key='revamp_quiet_control'):
-                    busy = _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks)
+                    busy = _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, notice_placeholder)
             with notice_col:
                 notice, when = st.session_state.get('_revamp_quiet_notice', ('', 0))
-                notice = notice if time.monotonic() - when < 30 else ''
                 if st.session_state.get('_revamp_quiet_error'):
                     notice = 'Check unavailable · retry'
-                st.markdown(f'<span class="rv-task-note">{html.escape(notice)}</span>', unsafe_allow_html=True)
+                notice_placeholder.markdown(f'<span class="rv-task-note">{html.escape(notice)}</span>', unsafe_allow_html=True)
         _routes_refresh_style(busy)
         completed = st.session_state.pop('_revamp_manual_check_complete', False)
         revision = (st.session_state.get('_revamp_quiet_revision', 0), tuple(pods), status, search)
