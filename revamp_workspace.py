@@ -814,6 +814,7 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
         except Exception as exc:
             print(f'[revamp/task-check] keeping existing routes: {type(exc).__name__}: {exc}', flush=True)
             st.session_state['_revamp_quiet_error'] = True
+    st.session_state['_revamp_manual_check_complete'] = True
     return False
 
 
@@ -838,39 +839,43 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     notice = 'Check unavailable · retry'
                 st.markdown(f'<span class="rv-task-note">{html.escape(notice)}</span>', unsafe_allow_html=True)
         _routes_refresh_style(busy)
-        # Rebuild only pending cards. Saved/history cards and the detail pane
-        # stay mounted. Dispatch actions independently verify every task live.
+        completed = st.session_state.pop('_revamp_manual_check_complete', False)
         revision = (st.session_state.get('_revamp_quiet_revision', 0), tuple(pods), status, search)
         cached = st.session_state.get('_revamp_quiet_pending')
-        if cached and cached[0] == revision:
-            pending = cached[1]
-        else:
-            pending = []
-            all_pending = []
-            for pod in pods:
-                store_key = 'global_digital_clusters' if pod == 'Digital' else f'clusters_{pod}'
-                route_pod = 'Global_Digital' if pod == 'Digital' else pod
-                for route in st.session_state.get(store_key, []):
-                    if bool(route.get('is_digital')) != (pod == 'Digital'):
-                        continue
-                    nearest = _nearest_ic(route, eligible_ics, haversine)
-                    route_hash = _route_hash(route)
-                    state = _route_status(route, st.session_state.get('sent_db') or {}, nearest[1] if nearest else None, route_pod)
-                    display_route = {**route, '_bundle_label': _bundle_label(route, _bundle_sets_for_pod(route_pod))}
-                    entry = (route_pod, display_route, state, route_hash, nearest)
-                    if state in ('Ready', 'Flagged'):
-                        all_pending.append(entry)
-                        if _entry_matches(entry, status, search):
-                            pending.append(entry)
-            st.session_state['_revamp_quiet_all_pending'] = (tuple(pods), all_pending)
-            st.session_state['_revamp_quiet_pending'] = (revision, pending)
-        # Existing order survives checks; newly discovered routes append.
-        by_key = {_route_entry_key(*entry[:4]): entry for entry in pending}
-        old_order = st.session_state.get('_revamp_quiet_list_order', [])
-        pending = [by_key.pop(key) for key in old_order if key in by_key] + list(by_key.values())
-        st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in pending]
-        matching = [entry for entry in matching if entry[2] not in ('Ready', 'Flagged')] + pending
-        st.session_state['_revamp_quiet_visible_keys'] = [f'{entry[0]}:{entry[3]}' for entry in pending]
+        # Initial and ordinary renders use the already-built main queue.
+        # Only a completed manual check may replace pending entries here.
+        if completed or (cached and cached[0] == revision):
+            # Rebuild only pending cards. Saved/history cards and the detail pane
+            # stay mounted. Dispatch actions independently verify every task live.
+            if cached and cached[0] == revision:
+                pending = cached[1]
+            else:
+                pending = []
+                all_pending = []
+                for pod in pods:
+                    store_key = 'global_digital_clusters' if pod == 'Digital' else f'clusters_{pod}'
+                    route_pod = 'Global_Digital' if pod == 'Digital' else pod
+                    for route in st.session_state.get(store_key, []):
+                        if bool(route.get('is_digital')) != (pod == 'Digital'):
+                            continue
+                        nearest = _nearest_ic(route, eligible_ics, haversine)
+                        route_hash = _route_hash(route)
+                        state = _route_status(route, st.session_state.get('sent_db') or {}, nearest[1] if nearest else None, route_pod)
+                        display_route = {**route, '_bundle_label': _bundle_label(route, _bundle_sets_for_pod(route_pod))}
+                        entry = (route_pod, display_route, state, route_hash, nearest)
+                        if state in ('Ready', 'Flagged'):
+                            all_pending.append(entry)
+                            if _entry_matches(entry, status, search):
+                                pending.append(entry)
+                st.session_state['_revamp_quiet_all_pending'] = (tuple(pods), all_pending)
+                st.session_state['_revamp_quiet_pending'] = (revision, pending)
+            # Existing order survives checks; newly discovered routes append.
+            by_key = {_route_entry_key(*entry[:4]): entry for entry in pending}
+            old_order = st.session_state.get('_revamp_quiet_list_order', [])
+            pending = [by_key.pop(key) for key in old_order if key in by_key] + list(by_key.values())
+            st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in pending]
+            matching = [entry for entry in matching if entry[2] not in ('Ready', 'Flagged')] + pending
+            st.session_state['_revamp_quiet_visible_keys'] = [f'{entry[0]}:{entry[3]}' for entry in pending]
     else:
         st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
     with st.container(height=680, border=False, key="revamp_route_scroll"):
@@ -1725,6 +1730,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 # queues and appear only when the CVS Removal filter is selected.
                 (status == "CVS Removal" or entry[2] not in ("Ready", "Flagged")
                  or not entry[1].get("is_removal"))]
+    if status in ('Ready', 'Flagged') and not matching:
+        print(f"[revamp/queue] pods={selected_pods} view={status} "
+              f"loaded={sum(len(st.session_state.get(_cluster_key(p), [])) for p in loaded)} "
+              f"states={ {s: sum(e[2] == s for e in all_routes) for s in STATUSES[1:]} } "
+              f"search_active={bool(search)}", flush=True)
     fn_posted = (ghost_db or {}).get("_fn_posted", {}) or {}
     fn_providers = (ghost_db or {}).get("_fn_provider", {}) or {}
     if status in ("Sent", "Accepted", "Declined", "Finalized"):
@@ -1974,6 +1984,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         quiet_context = ((selected_pods, process_pod, process_digital_pool, cluster_store,
                           fetch_open_tasks, eligible_ics, haversine, search)
                          if cluster_store is not None and fetch_open_tasks is not None else None)
+        st.session_state.pop('_revamp_quiet_visible_keys', None)
         st.session_state.pop('_revamp_quiet_pending', None)
         st.session_state.pop('_revamp_quiet_all_pending', None)
         st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in matching
