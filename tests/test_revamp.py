@@ -158,7 +158,7 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
         self.assertIn("$40", output)
         self.assertIn("2026-10-11", output)
         self.assertIn("Live venue", output)
-        self.assertTrue(any(item.label == "Open Outlook" for item in app.get("link_button")))
+        self.assertTrue(any(item.label == "Open Outlook" for item in app.button))
         self.assertFalse(app.exception)
 
     def test_sent_and_accepted_render_dcc_saved_card_for_selected_route(self):
@@ -196,14 +196,14 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
         app.radio(key="revamp_status").set_value("Sent").run()
         self.assertIn("WO-SENT", " ".join(markdown.value for markdown in app.markdown))
         self.assertIn("Site A", " ".join(markdown.value for markdown in app.markdown))
-        self.assertTrue(any(item.label == "Open Outlook" for item in app.get("link_button")))
+        self.assertTrue(any(item.label == "Open Outlook" for item in app.button))
         app.radio(key="revamp_status").set_value("Accepted").run()
         html_output = " ".join(markdown.value for markdown in app.markdown)
         self.assertIn("WO-ACCEPTED", html_output)
         self.assertIn("Site B", html_output)
         self.assertIn("Total Compensation", html_output)
         self.assertTrue(any("DCC checklist accepted-hash" in item.value for item in app.markdown))
-        self.assertTrue(any(item.label == "Open Outlook" for item in app.get("link_button")))
+        self.assertTrue(any(item.label == "Open Outlook" for item in app.button))
         self.assertFalse(app.exception)
 
     def test_route_geocodes_first_load_in_parallel_without_changing_result(self):

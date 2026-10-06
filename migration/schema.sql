@@ -11,6 +11,14 @@
 
 BEGIN;
 
+CREATE TABLE IF NOT EXISTS email_dispatch_control (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    paused BOOLEAN NOT NULL DEFAULT FALSE,
+    changed_by TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO email_dispatch_control (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
 CREATE TYPE route_status AS ENUM ('sent', 'accepted', 'declined', 'finalized', 'archived');
 CREATE TYPE fn_status AS ENUM ('posted', 'assigned');
 

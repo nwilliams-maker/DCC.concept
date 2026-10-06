@@ -107,6 +107,9 @@ def _log_err(context, exc):
 # (only after the staging verification pass in migration/README.md step 8)
 # is what turns this on -- nothing here changes today's behavior on its own.
 DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
+from migration.email_dispatch_control import (email_dispatch_paused, require_email_dispatch_enabled,
+    render_dev_email_control, render_email_open)
+
 DB_ENGINE = None
 if DATABASE_URL:
     try:
@@ -6917,6 +6920,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         else:
             email_body_content = sig_preview
 
+        _email_paused = email_dispatch_paused(DB_ENGINE)
+        if _email_paused:
+            st.caption("Email dispatch is paused.")
         # --- HIGH-SPEED DISPATCH BUTTON ---
         btn_label = "RESEND LINK & OPEN OUTLOOK" if is_already_sent else "GENERATE LINK & OPEN OUTLOOK"
         if is_fn:
@@ -6925,14 +6931,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # Generate Link button + FN checkbox paired into one row (May 23 2026).
         _disp_c1, _disp_c2 = st.columns([1.8, 1], vertical_alignment="center")
         with _disp_c1:
-            _gen_clicked = st.button(btn_label, type="primary", key=f"gbtn_{pod_name}_{cluster_hash}", disabled=not is_unlocked or is_fn or _in_preview, use_container_width=True, help=("Confirm or clear the bundle preview before dispatching." if _in_preview else None))
+            _gen_clicked = st.button(btn_label, type="primary", key=f"gbtn_{pod_name}_{cluster_hash}", disabled=not is_unlocked or is_fn or _in_preview or _email_paused, use_container_width=True, help=("Confirm or clear the bundle preview before dispatching." if _in_preview else None))
         with _disp_c2:
             if route_state != "email_sent":
                 fn_checked = st.checkbox("Assign to FN", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")
             else:
                 fn_checked = is_fn
         _resume_generate = st.session_state.pop(f"_resume_generate_{pod_name}_{cluster_hash}", False)
-        if _gen_clicked or (_resume_generate and is_unlocked and not is_fn and not _in_preview):
+        if (_gen_clicked or (_resume_generate and is_unlocked and not is_fn and not _in_preview)) and not email_dispatch_paused(DB_ENGINE):
             # 🛡️ STEP 0: POST-TIMEOUT RETRY SAFETY (Sep 2026 — Nick: "clicking
             # Generate Link again to retry makes it worse"). A saveRoute POST
             # that times out CLIENT-SIDE (25s) can still be running — or have
@@ -7080,6 +7086,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 try:
                     if DB_ENGINE is None:
                         raise RuntimeError("Railway database is unavailable")
+                    require_email_dispatch_enabled(DB_ENGINE)
                     _da.save_route(DB_ENGINE, wo_val, ic.get('name', 'Unknown'), payload)
                     _dispatch_result = {"success": True, "routeId": wo_val}
                 except _da._fx.TaskAssignmentConflict as e:
@@ -7165,7 +7172,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 _popup_key = f"_outlook_popup_once_{cluster_hash}"
                 st.session_state[_popup_key] = outlook_url
                 _popup_url = st.session_state.pop(_popup_key, None)
-                if _popup_url:
+                if _popup_url and not email_dispatch_paused(DB_ENGINE):
                     st.components.v1.html(
                         f"<script>if(window.screen.width>768){{try{{window.open({json.dumps(_popup_url)},'_blank');}}catch(e){{}}}}</script>",
                         height=0,
@@ -7200,19 +7207,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         _persisted_outlook = st.session_state.get(f"_persisted_outlook_{cluster_hash}")
         _persisted_mailto = st.session_state.get(f"_persisted_mailto_{cluster_hash}")
         if _persisted_outlook:
-            st.markdown(f"""<div style="display:flex;margin:6px 0;">
-<a href="{_persisted_outlook}" target="_blank" rel="noopener noreferrer"
-style="flex:1;text-align:center;background:#633094;color:#ffffff;border:1px solid #633094;
-padding:12px;border-radius:10px;font-weight:800;font-size:14px;
-text-decoration:none;">📬 Open Outlook</a>
-</div>""", unsafe_allow_html=True)
+            render_email_open(DB_ENGINE, "📬 Open Outlook", _persisted_outlook, f"email_open_{pod_name}_{cluster_hash}")
         if _persisted_mailto:
-            st.markdown(f"""<div style="display:flex;margin:6px 0;">
-<a href="{_persisted_mailto}"
-style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px solid #633094;
-padding:12px;border-radius:10px;font-weight:800;font-size:14px;
-text-decoration:none;">📨 Default Mail</a>
-</div>""", unsafe_allow_html=True)
+            render_email_open(DB_ENGINE, "📨 Default Mail", _persisted_mailto, f"email_mailto_{pod_name}_{cluster_hash}")
 
     # --- 🌐 FIELD NATION PERSISTENCE (CHECKBOX) ---
 
@@ -10207,17 +10204,9 @@ def run_pod_tab(pod_name):
                             _sent_outlook = st.session_state.get(f"_persisted_outlook_{cluster_hash}")
                             _sent_mailto = st.session_state.get(f"_persisted_mailto_{cluster_hash}")
                             if _sent_outlook:
-                                st.markdown(f"""<div style="display:flex;margin:8px 0 4px 0;">
-<a href="{_sent_outlook}" target="_blank" rel="noopener noreferrer"
-style="flex:1;text-align:center;background:#633094;color:#ffffff;border:1px solid #633094;
-padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:none;">📬 Open Outlook</a>
-</div>""", unsafe_allow_html=True)
+                                render_email_open(DB_ENGINE, "📬 Open Outlook", _sent_outlook, f"sent_email_open_{pod_name}_{cluster_hash}")
                             if _sent_mailto:
-                                st.markdown(f"""<div style="display:flex;margin:4px 0 8px 0;">
-<a href="{_sent_mailto}"
-style="flex:1;text-align:center;background:#ffffff;color:#633094;border:1px solid #633094;
-padding:10px;border-radius:8px;font-weight:800;font-size:13px;text-decoration:none;">📨 Default Mail</a>
-</div>""", unsafe_allow_html=True)
+                                render_email_open(DB_ENGINE, "📨 Default Mail", _sent_mailto, f"sent_email_mailto_{pod_name}_{cluster_hash}")
 
                             # Restore the Sent-route finalization checklist.
                             # Kiosk routes get the extra "Ordered Kiosk(s)" item,
@@ -11004,6 +10993,8 @@ st.session_state['_asc_ran_this_render'] = False
 # Isolated revamp deployment: show a single-route dispatch workspace by
 # default, while keeping every existing DCC screen and action under Full tools.
 # Production DCC never sets this flag and never imports the new UI module.
+render_dev_email_control(DB_ENGINE, st.session_state.get("_auth_user") or {})
+
 if os.environ.get("DCC_REVAMP_UI") == "1":
     from revamp_workspace import render_workspace
     render_workspace(_can_access_tab, process_pod, render_dispatch,
@@ -11017,6 +11008,7 @@ if os.environ.get("DCC_REVAMP_UI") == "1":
                          "render_finalization_checklist": render_finalization_checklist,
                          "move_to_dispatch": move_to_dispatch,
                          "is_dispatch_associate": _is_dispatch_associate,
+                         "email_db_engine": DB_ENGINE,
                      },
                      merge_same_wo_ghosts=_merge_same_wo_ghosts,
                      cluster_store=_pod_cluster_store,

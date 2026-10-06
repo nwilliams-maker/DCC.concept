@@ -151,11 +151,12 @@ def _quiet_check_scope(source, session, cap=False, fail_pod=None):
     from concurrent.futures import Future
     from types import SimpleNamespace
     calls = []
-    cache = {}
+    cache = {'Blue': {'sig': 'unchanged-ids', 'clusters': []}}
     def fetch(): return {'_hit_cap': cap}
     fetch.clear = lambda: calls.append('pull')
     def process(pod, warm_only=False):
         calls.append((pod, warm_only))
+        assert 'sig' not in cache.get(pod, {})
         if fail_pod == pod: return False
         cache[pod] = {'clusters': [route('new-' + pod)]}
         return True
@@ -173,7 +174,10 @@ def _quiet_check_scope(source, session, cap=False, fail_pod=None):
              'time': __import__('time'), 'datetime': __import__('datetime').datetime,
              'ZoneInfo': __import__('zoneinfo').ZoneInfo}
     exec(compile(ast.Module(body=[node], type_ignores=[]),'revamp_workspace.py','exec'),scope)
-    scope['_quiet_routes_check'](['Blue','Digital'],process,lambda warm_only:process('Digital',warm_only),lambda:cache,fetch)
+    notes = []
+    placeholder = SimpleNamespace(markdown=lambda text, **kw: notes.append(text))
+    scope['_quiet_routes_check'](['Blue','Digital'],process,lambda warm_only:process('Digital',warm_only),lambda:cache,fetch, placeholder)
+    assert 'Checking tasks' in notes[0]
     return calls
 
 
@@ -318,3 +322,14 @@ w._render_route_list([('Orange',route,{state!r},'loaded-hash',None)], {state!r},
     app = AppTest.from_string(source).run()
     assert not app.exception
     assert any('Phoenix, AZ' in b.label and state in b.label for b in app.button)
+
+
+def test_manual_check_rebuilds_same_id_cache_and_reports_completion():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[2] / 'revamp_workspace.py').read_text()
+    session = {'clusters_Blue': [route('old')], 'global_digital_clusters': []}
+    calls = _quiet_check_scope(source, session)
+    assert calls == ['pull', ('Blue', True), ('Digital', True)]
+    assert session['_revamp_quiet_notice'][0].endswith(' CT')
+    assert 'tasks added' in session['_revamp_quiet_notice'][0]
+    assert not session['_revamp_quiet_error']
