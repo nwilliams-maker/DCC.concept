@@ -297,3 +297,24 @@ def test_routes_and_summary_have_no_scheduled_reruns():
     for name in ('_render_route_list', '_render_workspace_summary'):
         node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
         assert [ast.unparse(d) for d in node.decorator_list] == ['st.fragment']
+
+
+@pytest.mark.parametrize('state', ['Ready', 'Flagged'])
+def test_loaded_pending_cards_survive_empty_secondary_pool(state):
+    from streamlit.testing.v1 import AppTest
+    from pathlib import Path
+    root = str(Path(__file__).resolve().parents[2])
+    source = f"""
+import sys
+sys.path.insert(0, {root!r})
+import streamlit as st
+import revamp_workspace as w
+route = {{'city':'Phoenix','state':'AZ','stops':1,'center':[1,2],
+          'data':[{{'id':'loaded','full':'Phoenix','lat':1,'lon':2}}]}}
+st.session_state['clusters_Orange'] = []
+w._render_route_list([('Orange',route,{state!r},'loaded-hash',None)], {state!r}, {{}}, {{}},
+    (['Orange'], None, None, lambda:{{}}, lambda:{{}}, [], lambda *a:0, ''))
+"""
+    app = AppTest.from_string(source).run()
+    assert not app.exception
+    assert any('Phoenix, AZ' in b.label and state in b.label for b in app.button)
