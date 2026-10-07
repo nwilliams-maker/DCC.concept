@@ -749,8 +749,7 @@ def _entry_matches(entry, status, search):
              (status == "Over 50 mi" and nearest and nearest[1] > 50 and state in ("Ready", "Flagged")) or
              (status == "CVS Removal" and state in ("Ready", "Flagged") and route.get("is_removal")) or
              (status == "Selected" and st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))) and
-            (not search or search in _searchable(route)) and
-            (status == "CVS Removal" or state not in ("Ready", "Flagged") or not route.get("is_removal")))
+            (not search or search in _searchable(route)))
 
 
 def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, notice_placeholder=None, fetch_saved_records=None):
@@ -1751,19 +1750,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     notice = st.session_state.pop("_revamp_notice", None)
     if notice:
         (st.warning if notice[0] == "warning" else st.success)(notice[1])
-    matching = [entry for entry in all_routes if
-                (status == "All" or entry[2] == status or
-                 (status == "Over 50 mi" and entry[4] and entry[4][1] > 50
-                  and entry[2] in ("Ready", "Flagged")) or
-                 (status == "CVS Removal" and entry[2] in ("Ready", "Flagged")
-                  and entry[1].get("is_removal")) or
-                 (status == "Selected" and
-                  st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))) and
-                (not search or search in _searchable(entry[1])) and
-                # CVS removals are hidden from the normal Ready/Flagged/All
-                # queues and appear only when the CVS Removal filter is selected.
-                (status == "CVS Removal" or entry[2] not in ("Ready", "Flagged")
-                 or not entry[1].get("is_removal"))]
+    matching = [entry for entry in all_routes if _entry_matches(entry, status, search)]
     if status in ('Ready', 'Flagged') and not matching:
         print(f"[revamp/queue] pods={selected_pods} view={status} "
               f"loaded={sum(len(st.session_state.get(_cluster_key(p), [])) for p in loaded)} "

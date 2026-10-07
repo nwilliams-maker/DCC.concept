@@ -30,6 +30,22 @@ def load_functions(filename, names, extra=None):
 
 
 class RevampTests(unittest.TestCase):
+    def test_pending_cvs_routes_stay_visible_under_their_status(self):
+        scope = load_functions("revamp_workspace.py", ["_entry_matches"],
+                               {"st": SimpleNamespace(session_state={}), "_searchable": lambda r: "phoenix"})
+        matches = scope["_entry_matches"]
+        for state in ("Ready", "Flagged"):
+            cvs = ("Orange", {"is_removal": True}, state, "cvs", ("IC", 65))
+            regular = ("Orange", {"is_removal": False}, state, "regular", ("IC", 65))
+            for view in ("All", state, "Over 50 mi"):
+                self.assertTrue(matches(cvs, view, ""))
+            self.assertTrue(matches(cvs, "CVS Removal", ""))
+            self.assertFalse(matches(regular, "CVS Removal", ""))
+            self.assertFalse(matches(cvs, "CVS Removal", "missing city"))
+        sent = ("Orange", {"is_removal": True}, "Sent", "sent", None)
+        self.assertFalse(matches(sent, "Ready", ""))
+        self.assertFalse(matches(sent, "CVS Removal", ""))
+
     def test_saved_card_headings_use_work_order_for_sent_and_other_statuses(self):
         scope = load_functions("revamp_workspace.py", ["_route_list_heading", "_saved_route_fields"],
                                {"st": SimpleNamespace(session_state={})})

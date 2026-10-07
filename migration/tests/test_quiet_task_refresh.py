@@ -355,7 +355,7 @@ def test_manual_check_rebuilds_same_id_cache_and_reports_completion():
     assert not session['_revamp_quiet_error']
 
 
-def test_same_id_reclassification_restores_ready_card_after_manual_check():
+def test_same_id_reclassification_updates_ready_card_after_manual_check():
     from streamlit.testing.v1 import AppTest
     from pathlib import Path
     root = str(Path(__file__).resolve().parents[2])
