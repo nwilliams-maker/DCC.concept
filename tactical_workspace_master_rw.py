@@ -107,6 +107,7 @@ def _log_err(context, exc):
 # (only after the staging verification pass in migration/README.md step 8)
 # is what turns this on -- nothing here changes today's behavior on its own.
 DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
+from migration.task_classification import is_cvs_kiosk_removal, dispatch_task_state
 from migration.email_dispatch_control import (email_dispatch_paused, require_email_dispatch_enabled,
     render_dev_email_control, render_email_open)
 
@@ -4345,7 +4346,7 @@ def process_digital_pool(master_bar=None, warm_only=False):
             continue
 
         addr = t.get('destination', {}).get('address', {})
-        stt = normalize_state(addr.get('state', ''))
+        stt = dispatch_task_state(t, STATE_MAP)
         is_esc = (c_type == 'TEAM' and container.get('team') in esc_team_ids)
         
         # --- 🔍 STRICT CLASSIFICATION ENGINE (v4 - Final) ---
@@ -4813,7 +4814,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                     continue
 
                 addr = t.get('destination', {}).get('address', {})
-                stt = normalize_state(addr.get('state', ''))
+                stt = dispatch_task_state(t, STATE_MAP)
                 is_esc = (c_type == 'TEAM' and container.get('team') in esc_team_ids)
             
                 # --- 🔍 STRICT CLASSIFICATION ENGINE (v5) ---
@@ -4901,7 +4902,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 if stt in config['states']:
                     _remov_keywords = ["kiosk removal", "remove kiosk"]
                     _is_cvs_team = (c_type == 'TEAM' and container.get('team') in cvs_remov_team_ids)
-                    _is_removal = _is_cvs_team and any(kw in f"{native_details} {custom_task_type}".lower() for kw in _remov_keywords)
+                    _is_removal = is_cvs_kiosk_removal(task_type=custom_task_type, container_type=c_type,
+                        team_id=container.get("team"), removal_team_ids=cvs_remov_team_ids, native_details=native_details)
                     pool.append({
                         "id": t['id'], 
                         "city": addr.get('city', 'Unknown'), 
@@ -5103,6 +5105,14 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 })
                 pool = rem
 
+            if os.environ.get("DCC_REVAMP_UI") == "1":
+                _pending_types = {kind: sum(len(r["data"]) for r in clusters
+                    if str(r.get("status", "")).lower() in ("ready", "flagged", "declined")
+                    and ("digital" if r.get("is_digital") else "cvs_removal" if r.get("is_removal") else "regular") == kind)
+                    for kind in ("regular", "cvs_removal", "digital")}
+                print(f"[revamp/pool] {pod_name}: source={len(all_tasks)} pool={total_pool} pending_tasks={_pending_types} "
+                      f"assigned={_skipped_assigned} excluded_team={_skipped_wrong_team} "
+                      f"missing_state={_skipped_no_state_cf} other_states={_skipped_out_of_pod_states}", flush=True)
             _clu_store[pod_name] = {
                 'sig': _clu_sig,
                 'clusters': _copy.deepcopy(clusters),
@@ -7753,7 +7763,7 @@ def smart_sync_pod(pod_name):
             continue
 
         addr = t.get('destination', {}).get('address', {})
-        stt = normalize_state(addr.get('state', ''))
+        stt = dispatch_task_state(t, STATE_MAP)
         if stt not in config['states']:
             continue
 
@@ -7825,7 +7835,8 @@ def smart_sync_pod(pod_name):
         # inherit the 20-stop limit instead of the 10-stop CVS limit.
         _remov_keywords = ["kiosk removal", "remove kiosk"]
         _is_cvs_team = (c_type == 'TEAM' and container.get('team') in cvs_remov_team_ids)
-        _is_removal = _is_cvs_team and any(kw in f"{native_details} {custom_task_type}".lower() for kw in _remov_keywords)
+        _is_removal = is_cvs_kiosk_removal(task_type=custom_task_type, container_type=c_type,
+            team_id=container.get("team"), removal_team_ids=cvs_remov_team_ids, native_details=native_details)
 
         new_pool.append({
             "id": t['id'],
