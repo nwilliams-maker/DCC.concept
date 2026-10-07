@@ -176,13 +176,27 @@ def _route_status(route, sent_db, nearest_miles=None, pod=None):
 
 
 def _dedupe_route_entries(entries):
-    """Render each pod/route hash once so its selection widget is unique."""
+    """Show one saved work order, even when its tasks span live clusters."""
     unique = {}
     for entry in entries:
         key = _route_entry_key(*entry[:4])
         previous = unique.get(key)
         if previous is None:
             unique[key] = entry
+        elif entry[2] in ("Sent", "Accepted", "Declined", "Finalized"):
+            # A persisted bundle has the complete stop/task list. Live
+            # fragments can inherit its WO through sent_db while retaining
+            # their own hashes; those are views of the same order, not new
+            # work orders. Prefer the saved card before deriving counts or
+            # exposing actions for either fragment.
+            def completeness(item):
+                route = item[1]
+                ghost = route.get("_ghost_record") or {}
+                return (bool(route.get("_is_ghost") and ghost),
+                        bool(ghost), len(ghost.get("task_ids") or []),
+                        len(route.get("data") or []))
+            if completeness(entry) > completeness(previous):
+                unique[key] = entry
         elif previous[2] == "Ready" and entry[2] == "Flagged":
             # Identical task sets can arrive as separate live clusters. Keep
             # the review requirement if either copy was flagged.
@@ -197,7 +211,10 @@ def _route_entry_key(pod, route, state, route_hash):
     if state in ("Sent", "Accepted", "Declined", "Finalized"):
         wo = str(_saved_route_fields(route)["wo"] or "").strip()
         if wo:
-            key += ":" + hashlib.sha256(wo.encode()).hexdigest()[:16]
+            # A saved order's identity is its WO, not the current live
+            # clustering of its task IDs. Keep different historical WOs
+            # and statuses separate, including finalized history.
+            key = f"{pod}:saved:{state}:" + hashlib.sha256(wo.encode()).hexdigest()[:16]
     return key
 
 
