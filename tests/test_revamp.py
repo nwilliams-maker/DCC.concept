@@ -323,6 +323,21 @@ render_workspace(lambda pod: pod in ("Blue", "Green"), process,
         self.assertEqual(scope["_route_status"](
             route, {"t1": {"status": "accepted"}}, 50.1), "Accepted")
 
+    def test_fresh_unassigned_task_escapes_stale_finalized_flag(self):
+        session = {}
+        scope = load_functions("revamp_workspace.py", ["_route_hash", "_route_status"],
+                               {"hashlib": hashlib, "HIGH_RATE_FLAG_THRESHOLD": 25.00,
+                                "st": SimpleNamespace(session_state=session)})
+        route = {"data": [{"id": "task", "_onfleet_unassigned": True}]}
+        key = "route_state_" + scope["_route_hash"](route)
+        for miles, expected in ((10, "Ready"), (61, "Flagged")):
+            session[key] = "finalized"
+            self.assertEqual(scope["_route_status"](route, {"task": {"status": "finalized"}}, miles), expected)
+            self.assertNotIn(key, session)
+        for active, expected in (("sent", "Sent"), ("accepted", "Accepted"), ("field_nation", "Field Nation")):
+            session[key] = "finalized"
+            self.assertEqual(scope["_route_status"](route, {"task": {"status": active}}, 10), expected)
+
     def test_autocalculated_rate_over_2499_moves_card_to_flagged(self):
         session = {}
         scope = load_functions("revamp_workspace.py", ["_route_hash", "_route_status"],

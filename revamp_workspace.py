@@ -129,6 +129,12 @@ def _route_hash(route):
 def _route_status(route, sent_db, nearest_miles=None, pod=None):
     route_hash = _route_hash(route)
     local = st.session_state.get(f"route_state_{route_hash}")
+    if local == "finalized" and route.get("data") and all(
+            task.get("_onfleet_unassigned") for task in route["data"]):
+        # A fresh unassigned task can be worked again; retain its old WO as
+        # a separate Finalized card rather than pinning the live task there.
+        local = None
+        st.session_state.pop(f"route_state_{route_hash}", None)
     persisted_status = ""
     if not st.session_state.get(f"reverted_{route_hash}"):
         match = next(
@@ -138,7 +144,8 @@ def _route_status(route, sent_db, nearest_miles=None, pod=None):
         )
         if match:
             persisted_status = str(match.get("status", "")).lower()
-    if persisted_status == "finalized":
+    if persisted_status == "finalized" and not (route.get("data") and all(
+            task.get("_onfleet_unassigned") for task in route["data"])):
         return "Finalized"
     if persisted_status == "accepted":
         return "Accepted"
@@ -797,7 +804,7 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
                     ids = [str(t['id']).strip() for t in route.get('data', [])]
                     released = any((previous_sent.get(tid) or {}).get('wo') in archived for tid in ids)
                     reserved = any(str((sent.get(tid) or {}).get('status', '')).lower()
-                                   in ('sent', 'accepted', 'finalized', 'field_nation') for tid in ids)
+                                   in ('sent', 'accepted', 'field_nation') for tid in ids)
                     if released and not reserved:
                         st.session_state.pop(f'route_state_{_route_hash(route)}', None)
             st.session_state.update(sent_db=sent, ghost_db=ghosts, archived_wos=archived, _history_db=history)
@@ -815,11 +822,18 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
             total_added = total_removed = 0
             pending_changed = False
             sent_db = st.session_state.get('sent_db') or {}
+            fresh_available = {str(t['id']).strip() for routes in fresh.values()
+                               for route in routes for t in route.get('data', [])
+                               if t.get('_onfleet_unassigned')}
             def protected(route):
                 route_hash = _route_hash(route)
-                return (st.session_state.get(f'route_state_{route_hash}') in ('email_sent', 'field_nation', 'finalized')
+                ids = {str(t['id']).strip() for t in route.get('data', [])}
+                if (st.session_state.get(f'route_state_{route_hash}') == 'finalized'
+                        and ids and ids <= fresh_available):
+                    st.session_state.pop(f'route_state_{route_hash}', None)
+                return (st.session_state.get(f'route_state_{route_hash}') in ('email_sent', 'field_nation')
                         or any(str((sent_db.get(str(t['id']).strip()) or {}).get('status', '')).lower()
-                               in ('sent', 'accepted', 'finalized', 'field_nation') for t in route.get('data', [])))
+                               in ('sent', 'accepted', 'field_nation') for t in route.get('data', [])))
             for pod in pods:
                 store_key = 'global_digital_clusters' if pod == 'Digital' else f'clusters_{pod}'
                 current = st.session_state.get(store_key, [])
@@ -1659,7 +1673,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     saved_by_hash = {
         (pod, str(ghost.get("hash") or "")): ghost
         for pod, ghosts in ghosts_by_pod.items() for ghost in ghosts
-        if ghost.get("hash")
+        if ghost.get("hash") and str(ghost.get("status") or "").lower() != "finalized"
     }
     for pod in loaded:
         route_pod = _route_pod_key(pod)
