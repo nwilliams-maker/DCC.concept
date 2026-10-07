@@ -749,7 +749,8 @@ def _entry_matches(entry, status, search):
              (status == "Over 50 mi" and nearest and nearest[1] > 50 and state in ("Ready", "Flagged")) or
              (status == "CVS Removal" and state in ("Ready", "Flagged") and route.get("is_removal")) or
              (status == "Selected" and st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))) and
-            (not search or search in _searchable(route)))
+            (not search or search in _searchable(route)) and
+            (status == "CVS Removal" or state not in ("Ready", "Flagged") or not route.get("is_removal")))
 
 
 def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, notice_placeholder=None, fetch_saved_records=None):
