@@ -4439,6 +4439,7 @@ def process_digital_pool(master_bar=None, warm_only=False):
         
         pool.append({
             "id": t['id'], "city": addr.get('city', 'Unknown'), "state": stt,
+            "_onfleet_unassigned": t.get('state') == 0 and not t.get('worker') and c_type != 'WORKER',
             "full": f"{addr.get('number','')} {addr.get('street','')}, {addr.get('city','')}, {stt}",
             "zip": destination_zip(addr),
             "lat": t['destination']['location'][1], "lon": t['destination']['location'][0],
@@ -4906,6 +4907,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                         team_id=container.get("team"), removal_team_ids=cvs_remov_team_ids, native_details=native_details)
                     pool.append({
                         "id": t['id'], 
+                        "_onfleet_unassigned": t.get('state') == 0 and not t.get('worker') and c_type != 'WORKER',
                         "city": addr.get('city', 'Unknown'), 
                         "state": stt,
                         "full": f"{addr.get('number','')} {addr.get('street','')}, {addr.get('city','')}, {stt}",
@@ -6973,7 +6975,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
             # 🛡️ STEP 1: FAST COLLISION CHECK — only block active sent routes (not revoked/declined)
             local_sent_db = st.session_state.get('sent_db', {})
-            _active_statuses = ('sent', 'accepted', 'finalized', 'field_nation')
+            _active_statuses = ('sent', 'accepted', 'field_nation')
             collision = next(
                 (tid for tid in task_ids
                  if tid in local_sent_db
@@ -7840,6 +7842,7 @@ def smart_sync_pod(pod_name):
 
         new_pool.append({
             "id": t['id'],
+            "_onfleet_unassigned": t.get('state') == 0 and not t.get('worker') and c_type != 'WORKER',
             "city": addr.get('city', 'Unknown'),
             "state": stt,
             "full": f"{addr.get('number','')} {addr.get('street','')}, {addr.get('city','')}, {stt}",
@@ -8892,6 +8895,8 @@ def run_pod_tab(pod_name):
             _awaiting_tids.add(str(_tid).strip())
     # (2) ghost_db for THIS pod — task IDs from any non-revoked ghost route.
     for _g in ghost_db.get(pod_name, []):
+        if str(_g.get('status') or '').lower() == 'finalized':
+            continue  # Historical work orders do not reserve current tasks.
         _g_hash = _g.get('hash') or ''
         if _g_hash and st.session_state.get(f"reverted_{_g_hash}", False):
             continue  # Dispatcher explicitly revoked — let the route flow back to Ready
@@ -8922,6 +8927,9 @@ def run_pod_tab(pod_name):
         if st.session_state.get(f"reverted_{_c_hash}", False):
             continue
         _c_route_state = st.session_state.get(f"route_state_{_c_hash}")
+        if _c_route_state == 'finalized' and all(t.get('_onfleet_unassigned') for t in _c['data']):
+            st.session_state.pop(f"route_state_{_c_hash}", None)
+            _c_route_state = None
         if _c_route_state in ('field_nation', 'email_sent', 'finalized'):
             for _gt in _c_tids:
                 _awaiting_tids.add(_gt)

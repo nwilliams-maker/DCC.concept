@@ -100,7 +100,7 @@ def test_task_assigned_after_initial_check_is_not_overwritten(assignment, monkey
     assert writes == []
 
 
-@pytest.mark.parametrize('table,status,wo_col', [('routes','sent','wo'),('routes','accepted','wo'),('routes','finalized','wo'),('field_nation_orders','posted','work_order'),('field_nation_orders','assigned','work_order')])
+@pytest.mark.parametrize('table,status,wo_col', [('routes','sent','wo'),('routes','accepted','wo'),('field_nation_orders','posted','work_order'),('field_nation_orders','assigned','work_order')])
 def test_database_reservations_block_other_routes(table,status,wo_col):
     engine=sa.create_engine('sqlite://')
     with engine.begin() as conn:
@@ -111,6 +111,17 @@ def test_database_reservations_block_other_routes(table,status,wo_col):
             da._assert_tasks_not_reserved(conn,['b'],'WO')
         da._assert_tasks_not_reserved(conn,['b'],'OTHER')
         da._assert_tasks_not_reserved(conn,['c'],'WO')
+
+
+def test_finalized_history_does_not_reserve_reopened_tasks():
+    engine = sa.create_engine('sqlite://')
+    with engine.begin() as conn:
+        conn.execute(sa.text('CREATE TABLE routes (wo TEXT, status TEXT, payload TEXT)'))
+        conn.execute(sa.text('CREATE TABLE field_nation_orders (work_order TEXT, status TEXT, payload TEXT)'))
+        conn.execute(sa.text("INSERT INTO routes VALUES ('OLD-WO','finalized',:payload)"),
+                     {'payload': json.dumps({'taskIds': 'a,b'})})
+        da._assert_tasks_not_reserved(conn, ['b'], 'NEW-WO')
+        assert conn.execute(sa.text("SELECT status FROM routes WHERE wo='OLD-WO'")).scalar() == 'finalized'
 
 
 def test_blocked_acceptance_keeps_route_sent(monkeypatch):

@@ -173,7 +173,7 @@ def _assert_tasks_not_reserved(conn, ids, wo):
                     if conn.dialect.name == "postgresql" else "payload")
     rows = conn.execute(sa.text(f"""
         SELECT wo, {payload_expr} AS payload FROM routes WHERE wo != :wo
-          AND CAST(status AS TEXT) IN ('sent','accepted','finalized')
+          AND CAST(status AS TEXT) IN ('sent','accepted')
         UNION ALL
         SELECT work_order AS wo, {payload_expr} AS payload FROM field_nation_orders WHERE work_order != :wo
           AND status IN ('posted','assigned')
@@ -893,7 +893,7 @@ def _ingest_sent_record(
 
     for tid in tids:
         display_name = "Field Nation" if status_label == "field_nation" else c_name
-        sent_dict[tid] = {
+        reservation = {
             "name": display_name,
             "status": status_label,
             "time": ts_display,
@@ -903,6 +903,11 @@ def _ingest_sent_record(
             "raw_ts": dt_obj,
             "status_ts_iso": status_ts_iso or (dt_obj.tz_localize("America/Chicago", ambiguous=True).isoformat() if hasattr(dt_obj, "tz_localize") else ""),
         }
+        # Finalized work is history, not an active task reservation. Keeping
+        # it in this index hid reopened OnFleet tasks and could overwrite a
+        # newer active offer using the same task IDs.
+        if status_label != "finalized":
+            sent_dict[tid] = reservation
         history_db.setdefault(tid, []).append({
             "status": status_label,
             "name": display_name,
