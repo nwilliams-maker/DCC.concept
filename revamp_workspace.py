@@ -753,7 +753,7 @@ def _entry_matches(entry, status, search):
             (status == "CVS Removal" or state not in ("Ready", "Flagged") or not route.get("is_removal")))
 
 
-def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, notice_placeholder=None):
+def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, notice_placeholder=None, fetch_saved_records=None):
     """Workers build caches only; this fragment applies results to its session."""
     from migration.quiet_task_refresh import reconcile_task_pool
 
@@ -784,6 +784,27 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
     _routes_refresh_style(True)
     if notice_placeholder is not None:
         notice_placeholder.markdown('<span class="rv-task-note">Checking tasks…</span>', unsafe_allow_html=True)
+    if fetch_saved_records is not None:
+        try:
+            fetch_saved_records.clear()
+            sent, ghosts, archived, history = fetch_saved_records()
+            previous_sent = st.session_state.get('sent_db') or {}
+            # Revoking/rerouting in another session must clear this session's
+            # old Sent/FN flag, but only after the DB explicitly archives it.
+            for pod in pods:
+                store_key = 'global_digital_clusters' if pod == 'Digital' else f'clusters_{pod}'
+                for route in st.session_state.get(store_key, []):
+                    ids = [str(t['id']).strip() for t in route.get('data', [])]
+                    released = any((previous_sent.get(tid) or {}).get('wo') in archived for tid in ids)
+                    reserved = any(str((sent.get(tid) or {}).get('status', '')).lower()
+                                   in ('sent', 'accepted', 'finalized', 'field_nation') for tid in ids)
+                    if released and not reserved:
+                        st.session_state.pop(f'route_state_{_route_hash(route)}', None)
+            st.session_state.update(sent_db=sent, ghost_db=ghosts, archived_wos=archived, _history_db=history)
+        except Exception as exc:
+            print(f'[revamp/task-check] saved status check failed: {type(exc).__name__}', flush=True)
+            st.session_state['_revamp_quiet_error'] = True
+            return False
     future = _quiet_refresh_service().poll(pods, build, force=True)
     applied = st.session_state.setdefault('_revamp_quiet_applied', {})
     key = tuple(sorted(pods))
@@ -792,6 +813,7 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
         try:
             fresh = future.result()
             total_added = total_removed = 0
+            pending_changed = False
             sent_db = st.session_state.get('sent_db') or {}
             def protected(route):
                 route_hash = _route_hash(route)
@@ -802,16 +824,20 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
                 store_key = 'global_digital_clusters' if pod == 'Digital' else f'clusters_{pod}'
                 current = st.session_state.get(store_key, [])
                 updated, added, removed = reconcile_task_pool(current, fresh[pod], protected)
-                if added or removed:
-                    st.session_state[store_key] = updated
-                    st.session_state['_revamp_quiet_revision'] = st.session_state.get('_revamp_quiet_revision', 0) + 1
+                pending_changed = pending_changed or updated != current
+                st.session_state[store_key] = updated
                 total_added += added
                 total_removed += removed
+            # A classification/status change matters even if IDs are identical.
+            st.session_state['_revamp_quiet_revision'] = st.session_state.get('_revamp_quiet_revision', 0) + 1
+            print(f'[revamp/task-check] pods={pods} added={total_added} removed={total_removed} '
+                  f'routes={ {pod: len(fresh[pod]) for pod in pods} }', flush=True)
             checked_at = datetime.now(ZoneInfo('America/Chicago')).strftime('%I:%M:%S %p').lstrip('0') + ' CT'
-            if total_added or total_removed:
+            if total_added or total_removed or pending_changed:
                 parts = []
                 if total_added: parts.append(f"{total_added} {'task' if total_added == 1 else 'tasks'} added")
                 if total_removed: parts.append(f"{total_removed} {'task' if total_removed == 1 else 'tasks'} removed")
+                if not parts: parts.append('Routes updated')
                 st.session_state['_revamp_quiet_notice'] = (' · '.join(parts) + ' · ' + checked_at, time.monotonic())
             else:
                 st.session_state['_revamp_quiet_notice'] = ('Up to date · ' + checked_at, time.monotonic())
@@ -830,7 +856,8 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
     """State toggles rerun only this list; route clicks refresh the detail pane."""
     busy = False
     if quiet_context:
-        pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, eligible_ics, haversine, search = quiet_context
+        pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, eligible_ics, haversine, search = quiet_context[:8]
+        fetch_saved_records = quiet_context[8] if len(quiet_context) > 8 else None
         with st.container(key='revamp_routes_heading'):
             title_col, check_col, notice_col = st.columns([58, 20, 300], vertical_alignment="center")
             with title_col:
@@ -839,7 +866,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                 notice_placeholder = st.empty()
             with check_col:
                 with st.container(key='revamp_quiet_control'):
-                    busy = _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, notice_placeholder)
+                    busy = _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, notice_placeholder, fetch_saved_records)
             with notice_col:
                 notice, when = st.session_state.get('_revamp_quiet_notice', ('', 0))
                 if st.session_state.get('_revamp_quiet_error'):
@@ -1989,7 +2016,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     left, right = st.columns([1.75, 3.25], gap="large")
     with left:
         quiet_context = ((selected_pods, process_pod, process_digital_pool, cluster_store,
-                          fetch_open_tasks, eligible_ics, haversine, search)
+                          fetch_open_tasks, eligible_ics, haversine, search, fetch_sent_records_from_sheet)
                          if cluster_store is not None and fetch_open_tasks is not None else None)
         st.session_state.pop('_revamp_quiet_visible_keys', None)
         st.session_state.pop('_revamp_quiet_pending', None)

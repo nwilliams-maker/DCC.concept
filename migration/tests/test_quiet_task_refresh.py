@@ -41,6 +41,26 @@ def test_unchanged_pool_has_zero_counts_and_same_objects():
     assert (added, removed) == (0, 0)
 
 
+def test_same_ids_correct_classification_and_split_mixed_bundle():
+    original = {**route('ad', 'removal'), 'is_removal': True, 'bundle_count': 2}
+    ad = {**route('ad'), 'is_removal': False}
+    ad['data'][0]['task_type'] = 'New Ad'
+    removal = {**route('removal'), 'is_removal': True}
+    removal['data'][0]['task_type'] = 'Remove Kiosk'
+    result, added, removed = reconcile_task_pool([original], [ad, removal])
+    assert (added, removed) == (0, 0)
+    assert [[t['id'] for t in r['data']] for r in result] == [['ad'], ['removal']]
+    assert [r['is_removal'] for r in result] == [False, True]
+    assert result[0]['remov_count'] == 0 and result[1]['remov_count'] == 1
+    assert len(original['data']) == 2
+
+
+def test_protected_offer_keeps_original_tasks_and_classification():
+    original = {**route('a'), 'is_removal': True}
+    fresh = {**route('a'), 'is_removal': False}
+    assert reconcile_task_pool([original], [fresh], protected=lambda _: True)[0] == [original]
+
+
 def test_duplicate_new_ids_are_added_once():
     result, added, removed = reconcile_task_pool([], [route('a', 'b'), route('a', 'c')])
     assert [t['id'] for r in result for t in r['data']] == ['a', 'b', 'c']
@@ -145,7 +165,7 @@ st.date_input('Due',key='due')
     assert any('Up to date' in m.value for m in app.markdown)
 
 
-def _quiet_check_scope(source, session, cap=False, fail_pod=None):
+def _quiet_check_scope(source, session, cap=False, fail_pod=None, saved_records=None):
     import ast
     import threading
     from concurrent.futures import Future
@@ -176,7 +196,7 @@ def _quiet_check_scope(source, session, cap=False, fail_pod=None):
     exec(compile(ast.Module(body=[node], type_ignores=[]),'revamp_workspace.py','exec'),scope)
     notes = []
     placeholder = SimpleNamespace(markdown=lambda text, **kw: notes.append(text))
-    scope['_quiet_routes_check'](['Blue','Digital'],process,lambda warm_only:process('Digital',warm_only),lambda:cache,fetch, placeholder)
+    scope['_quiet_routes_check'](['Blue','Digital'],process,lambda warm_only:process('Digital',warm_only),lambda:cache,fetch, placeholder, saved_records)
     assert 'Checking tasks' in notes[0]
     return calls
 
@@ -333,3 +353,58 @@ def test_manual_check_rebuilds_same_id_cache_and_reports_completion():
     assert session['_revamp_quiet_notice'][0].endswith(' CT')
     assert 'tasks added' in session['_revamp_quiet_notice'][0]
     assert not session['_revamp_quiet_error']
+
+
+def test_same_id_reclassification_restores_ready_card_after_manual_check():
+    from streamlit.testing.v1 import AppTest
+    from pathlib import Path
+    root = str(Path(__file__).resolve().parents[2])
+    app = AppTest.from_string(f'''
+import sys
+sys.path.insert(0, {root!r})
+import streamlit as st
+import revamp_workspace as w
+from concurrent.futures import Future
+def route(removal):
+    return {{'city':'Phoenix','state':'AZ','center':[1,2], 'stops':1,
+        'is_removal':removal,'data':[{{'id':'same-id','full':'101 Main St',
+        'task_type':'New Ad','lat':1,'lon':2,'city':'Phoenix','state':'AZ'}}]}}
+class Service:
+    def poll(self, pods, build, force=False):
+        future = Future()
+        future.set_result({{'Orange':[route(False)]}})
+        return future
+w._quiet_refresh_service = Service
+st.session_state.setdefault('clusters_Orange',[route(True)])
+w._render_route_list([], 'Ready', {{}}, {{}},
+    (['Orange'],None,None,lambda:{{}},lambda:{{}},[('IC',1,2)],lambda *a:0,''))
+st.text_input('Contractor', key='contractor')
+''').run()
+    assert not app.exception
+    assert app.info[0].value == 'No matching routes.'
+    app.text_input(key='contractor').set_value('Michael').run()
+    app.button(key='revamp_quiet_refresh').click().run()
+    assert not app.exception
+    assert app.text_input(key='contractor').value == 'Michael'
+    assert any('Phoenix, AZ' in b.label and 'Ready' in b.label for b in app.button)
+    assert not app.session_state['clusters_Orange'][0]['is_removal']
+    assert any('Routes updated' in m.value for m in app.markdown)
+
+
+@pytest.mark.parametrize('still_reserved', [False, True])
+def test_manual_refresh_reads_archives_before_protecting_old_routes(still_reserved):
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[2] / 'revamp_workspace.py').read_text()
+    record = {'wo': 'OLD-WO', 'status': 'sent'}
+    session = {'clusters_Blue': [route('old')], 'route_state_hash': 'email_sent',
+               'sent_db': {'old': record}}
+    def saved():
+        return ({'old': record} if still_reserved else {}), {}, {'OLD-WO'}, {}
+    saved.clear = lambda: None
+    _quiet_check_scope(source, session, saved_records=saved)
+    if still_reserved:
+        assert session['route_state_hash'] == 'email_sent'
+        assert session['clusters_Blue'][0]['data'][0]['id'] == 'old'
+    else:
+        assert 'route_state_hash' not in session
+        assert all(t['id'] != 'old' for r in session['clusters_Blue'] for t in r['data'])
