@@ -246,13 +246,15 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
 
         def route_response(url, timeout):
             return SimpleNamespace(json=lambda: {"code": "Ok", "trips": [{"distance": 1609.344,
-                "duration": 3600}], "waypoints": [{"waypoint_index": i} for i in range(10)]})
+                "duration": 3600}], "routes": [{"distance": 1609.344, "duration": 3600}], "waypoints": [{"waypoint_index": i} for i in range(10)]})
 
         scope = load_functions("tactical_workspace_master_rw.py", ["get_gmaps"], {
             "time": time, "ThreadPoolExecutor": ThreadPoolExecutor, "MAPBOX_TOKEN": "test",
             "_mapbox_geocode_cache": lambda: cache, "_gmaps_route_cache": lambda: {},
             "_mapbox_geocode": geocode,
             "requests": SimpleNamespace(get=route_response), "_log_err": lambda *args: None,
+            "plan_round_trip": __import__("route_planning").plan_round_trip,
+            "task_stop_locations": __import__("route_planning").task_stop_locations,
         })
         result = scope["get_gmaps"]("home", tuple(f"stop-{i}" for i in range(8)))
         self.assertGreater(peak[0], 1)
