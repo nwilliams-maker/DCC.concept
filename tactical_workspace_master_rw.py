@@ -1358,38 +1358,24 @@ def _render_login_form():
             _password = st.text_input("Password", type="password", key="_login_pw_input", autocomplete="current-password")
             _submitted = st.form_submit_button("Sign in", use_container_width=True, type="primary")
             if _submitted:
-                # \U0001F512 Login throttling (security audit M2) — exponential
-                # backoff after repeated failures, tracked per session.
-                _now_ts = time.time()
-                _lock_until = float(st.session_state.get('_login_lock_until', 0) or 0)
-                if _now_ts < _lock_until:
-                    _wait = int(_lock_until - _now_ts) + 1
-                    st.error(f"Too many failed attempts. Please wait {_wait} second(s) before trying again.")
+                # Clear legacy session lockouts; every submission checks credentials.
+                st.session_state.pop('_login_fails', None)
+                st.session_state.pop('_login_lock_until', None)
+                _rec = _check_password(_username, _password)
+                if _rec:
+                    _u_clean = str(_username).lower().strip()
+                    st.session_state['_auth_user'] = {**_rec, 'username': _u_clean}
+                    # ?auth=TOKEN lets this tab survive a Railway redeploy.
+                    # Skipped silently if stay-signed-in is disabled (no STAY_SALT).
+                    try:
+                        _tok = _stay_token_for(_u_clean)
+                        if _tok:
+                            st.query_params['auth'] = _tok
+                    except Exception:
+                        pass
+                    st.rerun()
                 else:
-                    _rec = _check_password(_username, _password)
-                    if _rec:
-                        st.session_state['_login_fails'] = 0
-                        st.session_state['_login_lock_until'] = 0
-                        _u_clean = str(_username).lower().strip()
-                        st.session_state['_auth_user'] = {**_rec, 'username': _u_clean}
-                        # ?auth=TOKEN lets this tab survive a Railway redeploy.
-                        # Skipped silently if stay-signed-in is disabled (no STAY_SALT).
-                        try:
-                            _tok = _stay_token_for(_u_clean)
-                            if _tok:
-                                st.query_params['auth'] = _tok
-                        except Exception:
-                            pass
-                        st.rerun()
-                    else:
-                        _fails = int(st.session_state.get('_login_fails', 0) or 0) + 1
-                        st.session_state['_login_fails'] = _fails
-                        if _fails >= 5:
-                            _delay = min(600, 30 * (2 ** (_fails - 5)))
-                            st.session_state['_login_lock_until'] = _now_ts + _delay
-                            st.error(f"Too many failed attempts. Locked for {_delay} second(s).")
-                        else:
-                            st.error(f"Invalid username or password. {5 - _fails} attempt(s) left before lockout.")
+                    st.error("Invalid username or password.")
 
 # --- PINNED TOP-LEFT LOGO ---
 # Function to convert the local image into web-safe code
