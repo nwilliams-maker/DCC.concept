@@ -15,6 +15,7 @@ import os
 import re
 import html as _html
 from task_addresses import destination_zip, address_with_zip, task_location_address
+from route_planning import plan_round_trip, task_stop_locations, ordered_route_task_ids
 
 # --- CONFIG & CREDENTIALS ---
 # We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash.
@@ -3925,25 +3926,14 @@ def _gmaps_route_cache():
     return {}
 
 
-def get_gmaps(home, waypoints):
-    """Drop-in replacement for the previous Google Directions optimize:true call.
-    Returns the same (miles, total_hours, "Xh Ym", waypoint_order) tuple shape
-    so call sites need no changes. Internally uses Mapbox Optimization API V1.
-
-    Mapbox V1 has a hard cap of 12 coordinates per request — and BOTH the
-    source AND destination home pins count toward that cap. To support
-    bundled routes that consistently run >10 stops, we chunk the waypoints
-    into batches of ≤10 stops (12 total coords - 2 home pins), optimize each
-    batch independently, and sum the totals. Order is preserved across
-    batches; the optimizer still runs within each batch so per-chunk routing
-    remains efficient.
-
-    Per-request cost: $0 within Mapbox's 100k/month free tier, $2/1000 after.
-    A 30-stop bundled route makes 3 chunked calls (10 + 10 + 10), all cached
-    together under the original (home, waypoints) key for 24 hours.
+def get_gmaps(home, waypoints, tasks=None):
+    """One continuous home-to-stops-to-home trip, with ten minutes per stop.
+    Road mileage/time and dispatched stop order share the same full route.
+    Large routes get a global geographic seed followed by road refinement.
     """
     _wp_tuple = tuple(waypoints) if waypoints else ()
-    _key = (home, _wp_tuple)
+    _known_pins = task_stop_locations(tasks or [], _wp_tuple)
+    _key = ("continuous-v2", home, _wp_tuple, _known_pins)
     _now = time.time()
     _cache = _gmaps_route_cache()
     _entry = _cache.get(_key)
@@ -3965,85 +3955,26 @@ def get_gmaps(home, waypoints):
     # Resolve distinct misses concurrently while retaining the same Mapbox
     # results and shared address cache. Worker threads do not call Streamlit.
     geocode_cache = _mapbox_geocode_cache()
-    uncached = list(dict.fromkeys(w for w in waypoints if str(w).strip() not in geocode_cache))
+    uncached = list(dict.fromkeys(w for w, pin in zip(waypoints, _known_pins)
+                                   if pin is None and str(w).strip() not in geocode_cache))
     if len(uncached) > 1:
         with ThreadPoolExecutor(max_workers=min(8, len(uncached))) as executor:
             resolved = dict(zip(uncached, executor.map(
                 lambda address: _mapbox_geocode(address, cache=geocode_cache), uncached)))
     else:
         resolved = {w: _mapbox_geocode(w, cache=geocode_cache) for w in uncached}
-    wp_lls = [geocode_cache.get(str(w).strip()) or resolved.get(w) for w in waypoints]
+    wp_lls = [pin or geocode_cache.get(str(w).strip()) or resolved.get(w)
+              for w, pin in zip(waypoints, _known_pins)]
     if any(c is None for c in wp_lls):
         return 0, 0, "0h 0m", []
 
-    # Helper: optimize one ≤11-stop chunk against `home`. Returns
-    # (miles, drive_hours, ordered_global_indices) or None on Mapbox error.
-    # `chunk_indices` is the list of indices into the original `waypoints`
-    # list — used to translate Mapbox's local optimization back to global
-    # positions for the combined waypoint_order result.
-    def _optimize_chunk(chunk_indices):
-        chunk_lls = [wp_lls[i] for i in chunk_indices]
-        # Submit as [home, wp1, wp2, ..., wpN, home] then ask Mapbox to optimize
-        # the middle waypoints (source=first, destination=last fixes both ends).
-        coord_list = [home_ll] + chunk_lls + [home_ll]
-        coords_str = ";".join(f"{lng},{lat}" for lng, lat in coord_list)
-        url = (
-            f"https://api.mapbox.com/optimized-trips/v1/mapbox/driving-traffic/{coords_str}"
-            f"?source=first&destination=last&roundtrip=false"
-            f"&access_token={MAPBOX_TOKEN}"
-        )
-        try:
-            res = requests.get(url, timeout=15).json()
-            if res.get('code') == 'Ok' and res.get('trips'):
-                trip = res['trips'][0]
-                _mi = trip['distance'] * 0.000621371
-                _hrs = trip['duration'] / 3600
-                # Mapbox returns each input waypoint with a `waypoint_index` field —
-                # the position it ended up in the optimized trip. Indexes 0 and last
-                # are the fixed home pinned via source=first / destination=last.
-                wps = res.get('waypoints', [])
-                try:
-                    middle = wps[1:-1]
-                    ordered_pairs = sorted(
-                        enumerate(middle),
-                        key=lambda p: p[1].get('waypoint_index', p[0])
-                    )
-                    # Translate Mapbox's local indices back to global indices.
-                    chunk_order = [chunk_indices[local_idx] for local_idx, _ in ordered_pairs]
-                except Exception:
-                    chunk_order = list(chunk_indices)
-                return _mi, _hrs, chunk_order
-            else:
-                _log_err(
-                    "get_gmaps",
-                    f"Mapbox code: {res.get('code')} / msg: {res.get('message','')[:200]}",
-                )
-        except Exception as e:
-            _log_err("get_gmaps", e)
-        return None
-
-    # Mapbox V1 cap: 12 coords per request, period. The request body is
-    # [home, wp1, ..., wpN, home] — both home pins count toward the cap, so
-    # the maximum N is 12 - 2 = 10. Earlier off-by-one had this at 11, which
-    # produced 13-coord requests that Mapbox rejected with "Too many
-    # coordinates" — silently failing every chunk for any bundle ≥12 stops.
-    CHUNK = 10
-    total_mi = 0.0
-    total_drive_hrs = 0.0  # service hours added once at the end after all chunks
-    waypoint_order = []
-    all_indices = list(range(len(waypoints)))
-
-    for i in range(0, len(all_indices), CHUNK):
-        chunk = all_indices[i:i + CHUNK]
-        result = _optimize_chunk(chunk)
-        # Any chunk failure aborts the whole call — we'd rather show "—" than
-        # a partially-summed drive time that's wrong by minutes-to-hours.
-        if result is None:
-            return 0, 0, "0h 0m", []
-        _mi, _hrs, _order = result
-        total_mi += _mi
-        total_drive_hrs += _hrs
-        waypoint_order.extend(_order)
+    try:
+        total_mi, total_drive_hrs, waypoint_order = plan_round_trip(
+            home_ll, wp_lls, MAPBOX_TOKEN, requests.get)
+    except Exception as e:
+        # Do not cache or use partial mileage/order when any road request fails.
+        _log_err("get_gmaps", type(e).__name__)
+        return 0, 0, "0h 0m", []
 
     service_hrs = len(waypoints) * (10 / 60)
     total_hrs = total_drive_hrs + service_hrs
@@ -4523,8 +4454,8 @@ def process_digital_pool(master_bar=None, warm_only=False):
             if not has_ic or ic_dist > 40:
                 status = "Flagged"
             else:
-                ic_loc_d = f"{anc['lat']},{anc['lon']}"
-                _, d_hrs, _, _ = get_gmaps(ic_loc_d, tuple(list(unique_stops)[:25]))
+                ic_loc_d = _ic_home_loc(best_ic, f"{anc['lat']},{anc['lon']}")
+                _, d_hrs, _, _ = get_gmaps(ic_loc_d, tuple(sorted(unique_stops)), tasks=group)
                 d_pay = round(d_hrs * 25.0, 2)
                 d_rate = round(d_pay / len(unique_stops), 2) if unique_stops else 0
                 if d_rate >= HIGH_RATE_FLAG_THRESHOLD:
@@ -5040,8 +4971,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                     if not u_locs: return 0, 0
                 
                     # 🚀 OPTIMIZATION: Reverted back to real Google Maps!
-                    # Wrapping u_locs[:25] in a tuple() makes Streamlit's cache process it instantly.
-                    _, hrs, _, _ = get_gmaps(closest_ic_loc, tuple(u_locs[:25]))
+                    # Include every unique stop in the viability calculation.
+                    _, hrs, _, _ = get_gmaps(closest_ic_loc, tuple(u_locs), tasks=grp)
                     pay = round(hrs * 25.0, 2) # 🌟 STRICTLY HOURLY ($25/hr)
                     return round(pay / len(u_locs), 2), len(u_locs)
             
@@ -5141,11 +5072,11 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                         continue
                     _wstops = tuple(dict.fromkeys(_t['full'] for _t in _wc.get('data', []) if _t.get('full')))
                     if _wstops:
-                        _warm_pairs.append((_wloc, _wstops))
+                        _warm_pairs.append((_wloc, _wstops, _wc.get("data", [])))
             def _warm_route_gmaps(_pairs):
-                for _wloc, _wstops in _pairs:
+                for _wloc, _wstops, _wtasks in _pairs:
                     try:
-                        get_gmaps(_wloc, _wstops)
+                        get_gmaps(_wloc, _wstops, tasks=_wtasks)
                     except Exception as _we:
                         _log_err("warm_route_gmaps", _we)
             # Security audit M12 - skip the warm spawn if a warm pass for
@@ -6230,7 +6161,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 # fires. Preserve pay; the render asks for a new selection.
                 return
             st.session_state[f"_route_fa_{pod_name}_{cluster_hash}"] = _is_fa_employee(ic_new)
-            _, h, _, _ = get_gmaps(_ic_home_loc(ic_new, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
+            _, h, _, _ = get_gmaps(_ic_home_loc(ic_new, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()), tasks=cluster["data"])
             new_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
             # 🌟 BUGFIX: Apply same $20/stop floor used in init logic. Without this, when
             # gmaps fails (network error, bad IC location, etc.) the comp/rate fields zero out
@@ -6265,13 +6196,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         elif default_label:
             # Calculate from the Contractor's Home
             ic_init = ic_opts[default_label]
-            _, h, _, _ = get_gmaps(_ic_home_loc(ic_init, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()))
+            _, h, _, _ = get_gmaps(_ic_home_loc(ic_init, f"{cluster['center'][0]},{cluster['center'][1]}"), tuple(stop_metrics.keys()), tasks=cluster["data"])
             initial_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
             st.session_state[sel_key] = default_label
             st.session_state[last_sel_key] = default_label
         else:
             # 🌟 THE FIX: If no IC is found, calculate the hourly rate from the cluster's center!
-            _, h, _, _ = get_gmaps(f"{cluster['center'][0]},{cluster['center'][1]}", tuple(stop_metrics.keys()))
+            _, h, _, _ = get_gmaps(f"{cluster['center'][0]},{cluster['center'][1]}", tuple(stop_metrics.keys()), tasks=cluster["data"])
             initial_pay = float(round(h * 25.0, 2)) # 🌟 STRICTLY HOURLY
 
         # 🌟 Floor: if Maps returned 0 (fail/no IC), seed from $20/stop default
@@ -6293,6 +6224,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     # Default ic for FN routes — overridden below if not is_fn
     ic = {"name": "Field Nation", "location": f"{cluster['center'][0]},{cluster['center'][1]}", "d": 0}
     mi, hrs, t_str = 0, 0, "N/A"  # defaults for FN routes
+    _wp_order = []
+    _ordered_route_addrs = list(stop_metrics)
+    ordered_stop_metrics = stop_metrics
     is_unlocked = True
 
     if not is_fn:
@@ -6327,7 +6261,10 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.session_state[f"_route_fa_{pod_name}_{cluster_hash}"] = is_fa
 
         ic_location = ic_location_tmp
-        mi, hrs, t_str, _wp_order = get_gmaps(ic_location, tuple(stop_metrics.keys()))
+        mi, hrs, t_str, _wp_order = get_gmaps(ic_location, tuple(stop_metrics.keys()), tasks=cluster["data"])
+        _route_addrs = list(stop_metrics)
+        _ordered_route_addrs = [_route_addrs[idx] for idx in _wp_order] if _wp_order else _route_addrs
+        ordered_stop_metrics = {addr: stop_metrics[addr] for addr in _ordered_route_addrs}
 
         curr_rate = 0.0 if is_fa else st.session_state.get(_rate_master_key, 0.0)
         ic_dist = ic.get('d', 0)
@@ -6403,7 +6340,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         st.markdown(
             f"<div style='font-size:11px; color:#64748b; margin:4px 0 8px 0;'>"
             f"{_comp_segment}"
-            f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;{_t_display} drive"
+            f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;{_t_display} incl. service"
             f"&nbsp;&nbsp;<span style='color:#cbd5e1;'>|</span>&nbsp;&nbsp;{_mi_display} round trip"
             f"</div>",
             unsafe_allow_html=True,
@@ -6416,7 +6353,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
         # Build expandable stop rows with task pills in summary + campaign in expansion
         _dispatch_rows = []
-        for addr, metrics in stop_metrics.items():
+        for addr, metrics in ordered_stop_metrics.items():
             # Icons only for address row summary (kiosk install gets its own green pill below
             # to match the right column's make_venue_details styling — was previously a plain
             # "🛠️ 1" inline icon with no color treatment).
@@ -6951,6 +6888,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 fn_checked = is_fn
         _resume_generate = st.session_state.pop(f"_resume_generate_{pod_name}_{cluster_hash}", False)
         if (_gen_clicked or (_resume_generate and is_unlocked and not is_fn and not _in_preview)) and not email_dispatch_paused(DB_ENGINE):
+            if not is_already_sent and not _wp_order:
+                st.error("The road route could not be calculated. Retry before sending so mileage and pay use a complete route.")
+                return
             # 🛡️ STEP 0: POST-TIMEOUT RETRY SAFETY (Sep 2026 — Nick: "clicking
             # Generate Link again to retry makes it worse"). A saveRoute POST
             # that times out CLIENT-SIDE (25s) can still be running — or have
@@ -7018,14 +6958,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             _dispatch_result = {}
             with st.spinner("Generating link..."):
                 home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
-                # Build ordered task IDs from Google Maps waypoint order
-                _addr_list = list(stop_metrics.keys())
-                _ordered_addrs = [_addr_list[i] for i in _wp_order] if _wp_order else _addr_list
-                _stop_order_ids = []
-                for _oa in _ordered_addrs:
-                    for _t in cluster['data']:
-                        if _t.get('full') == _oa:
-                            _stop_order_ids.append(_t['id'])
+                _stop_order_ids = ordered_route_task_ids(cluster['data'], _ordered_route_addrs)
 
                 payload = {
                     "cluster_hash": cluster_hash,
@@ -7049,8 +6982,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         or ''
                     ).strip(),
                     "dispatcherName": str(st.session_state.get('_auth_user', {}).get('name', '') or '').strip(),
-                    "locs": " | ".join([home] + list(stop_metrics.keys()) + [home]),
-                    "taskIds": ",".join(task_ids),
+                    "locs": " | ".join([home] + _ordered_route_addrs + [home]),
+                    "taskIds": ",".join(_stop_order_ids),
                     # Apr 27 2026 — list of task IDs that are digital, used by GAS
                     # assignTasksToWorker to SKIP setting completeAfter for those tasks
                     # (digital tasks should keep their original Onfleet start time;
@@ -7093,7 +7026,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                         "artFile": next((str(t.get("art_file","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("art_file","")).strip()), ""),
                         "zip": next((str(t.get("zip","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("zip","")).strip()), ""),
                         "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
-                    } for addr, metrics in stop_metrics.items()])
+                    } for addr, metrics in ordered_stop_metrics.items()])
                 }
                 try:
                     if DB_ENGINE is None:
@@ -7228,6 +7161,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     if route_state != "email_sent":
         # Reuse the checkbox rendered above for assignment and revocation.
         if fn_checked and not is_fn:
+            if not _wp_order:
+                st.error("The road route could not be calculated. Retry before assigning so mileage and pay use a complete route.")
+                return
             # Persist the FN route before changing the local UI state.
             home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
             _fn_due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
@@ -7263,7 +7199,8 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 "city": cluster.get('city', 'Unknown'),
                 "state": cluster.get('state', 'Unknown'),
                 "bundle_count": cluster.get('bundle_count', 0),
-                "taskIds": ",".join(task_ids),
+                "taskIds": ",".join(ordered_route_task_ids(cluster['data'], _ordered_route_addrs)),
+                "stopOrder": ",".join(ordered_route_task_ids(cluster['data'], _ordered_route_addrs)),
                 # WO# unique per route. Was previously just FN-MMDDYYYY which gave every
                 # route created on the same day the same WO — fetch_sent_records_from_sheet
                 # then collapsed them into one ghost route on refresh. Suffix with the
@@ -7273,7 +7210,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 "lCnt": cluster['stops'],
                 "tCnt": len(task_ids),
                 "kCnt": cluster.get('inst_count', 0),
-                "locs": " | ".join([home] + list(stop_metrics.keys()) + [home]),
+                "locs": " | ".join([home] + _ordered_route_addrs + [home]),
                 # 🌟 FN-stopData fix (May 2026):
                 # Previously this payload had no stopData, so FN sheet rows landed
                 # with empty stop_data. _fn_ghost_to_cluster then reconstructed every
@@ -7308,7 +7245,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     "artFile": next((str(t.get("art_file","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("art_file","")).strip()), ""),
                     "zip": next((str(t.get("zip","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("zip","")).strip()), ""),
                     "sio": next((str(t.get("sio","")).strip() for t in cluster["data"] if t.get("full")==addr and str(t.get("sio","")).strip()), ""),
-                } for addr, metrics in stop_metrics.items()]),
+                } for addr, metrics in ordered_stop_metrics.items()]),
             }
 
             # Commit to the source this app reads before moving the card.
@@ -7408,7 +7345,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         # lines ~4737-4837) instead of calling make_venue_details so we get
         # the exact pill order + display_addr "+" prefix behavior.
         _fn_dispatch_rows = []
-        for _addr, _metrics in stop_metrics.items():
+        for _addr, _metrics in ordered_stop_metrics.items():
             _ip = []
             if _metrics['n_ad']    > 0: _ip.append("🆕")
             if _metrics['c_ad']    > 0: _ip.append("🔄")
@@ -9582,7 +9519,7 @@ def run_pod_tab(pod_name):
                                     axis=1
                                 )
                                 closest_ic = v_ics.sort_values('d').iloc[0]
-                                _, hrs, _, _ = get_gmaps(_ic_home_loc(closest_ic, f"{c['center'][0]},{c['center'][1]}"), [t['full'] for t in c['data'][:25]])
+                                _, hrs, _, _ = get_gmaps(_ic_home_loc(closest_ic, f"{c['center'][0]},{c['center'][1]}"), tuple(dict.fromkeys(t['full'] for t in c['data'])), tasks=c['data'])
                                 est_pay = hrs * 25.0 # 🌟 STRICTLY HOURLY
                                 est_rate = est_pay / c['stops'] if c['stops'] > 0 else 0
                                 if closest_ic['d'] > 60: badges += " 📡"
