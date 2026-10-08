@@ -1323,6 +1323,28 @@ def _can_access_tab(tab_pod: str) -> bool:
         return False
     return str(user.get('pod', '')) == tab_pod
 
+def _signed_in_header_html(user):
+    """Keep optional header fields inside one uninterrupted HTML block."""
+    from html import escape
+    name = str(user.get("name") or "?")
+    pod = str(user.get("pod") or "?")
+    role = str(user.get("role") or "")
+    label = name if user.get("scope") == "field_nation" else f"{name} · {pod}" + (f" {role}" if role else "")
+    email = str(user.get("email") or "").strip()
+    email_html = (f'<div style="font-size:11px;color:#64748b;font-weight:600;margin:0 0 4px;">{escape(email)}</div>' if email else "")
+    return (
+        '<div style="position:fixed;top:14px;right:64px;z-index:999999;text-align:right;'
+        'font-family:Inter,sans-serif;line-height:1.2;">'
+        '<div style="font-size:10px;color:#94a3b8;font-weight:700;letter-spacing:.06em;text-transform:uppercase;">Signed in as</div>'
+        f'<div style="font-size:13px;color:#0f172a;font-weight:800;margin:1px 0;">{escape(label)}</div>'
+        + email_html
+        + '<span style="display:inline-flex;gap:6px;align-items:center;justify-content:flex-end;">'
+        '<a href="?logout=1" target="_self" style="display:inline-block;padding:3px 10px;background:#fff;'
+        'border:1px solid #cbd5e1;border-radius:6px;text-decoration:none;font-size:11px;font-weight:700;'
+        'line-height:1.4;color:#475569;">Sign out</a></span></div>'
+    )
+
+
 def _render_login_form():
     """Renders the login form and stops the script if not authenticated."""
     # Login title block — pulled up into the upper third of the viewport.
@@ -10624,35 +10646,8 @@ if os.environ.get("DCC_REVAMP_UI") != "1" and '_worker_counts' not in st.session
 # as the Terraboost logo top-left). Sign out is a styled <a> that hits
 # ?logout=1 → handled by the LOGOUT URL HANDLER block above.
 _u = st.session_state.get('_auth_user', {})
-# Role label: "Pod · Role" when a role is set (e.g. "Blue · Associate"),
-# otherwise just the pod (e.g. "ADMIN").
-_pod_label = _u.get('pod', '?')
-_role_label = _u.get('role')
-_signin_line = f"{_u.get('name','?')} · {_pod_label}" + (f" {_role_label}" if _role_label else "")
 _user_email = str(_u.get('email', '') or '').strip()
-
-# Header markdown — pinned info + Sign out pill. The dispatcher email used for
-# IC accept/decline notifications now comes from each user's login record
-# (USERS dict), so no manual entry / pill is needed.
-_pill_base = ("display: inline-block; padding: 3px 10px; background: #ffffff;"
-              " border: 1px solid #cbd5e1; border-radius: 6px; text-decoration: none;"
-              " font-size: 11px; font-weight: 700; line-height: 1.4; cursor: pointer;")
-_email_line_html = (f'<div style="font-size: 11px; color: #64748b; font-weight: 600; margin: 0 0 4px 0;">{_user_email}</div>'
-                    if _user_email else '')
-st.markdown(
-    f"""
-    <div style="position: fixed; top: 14px; right: 64px; z-index: 999999; text-align: right;
-                font-family: 'Inter', sans-serif; line-height: 1.2;">
-        <div style="font-size: 10px; color: #94a3b8; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Signed in as</div>
-        <div style="font-size: 13px; color: #0f172a; font-weight: 800; margin: 1px 0 1px 0;">{_signin_line}</div>
-        {_email_line_html}
-        <span style="display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end;">
-          <a href="?logout=1" target="_self" style="{_pill_base} color: #475569;">Sign out</a>
-        </span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown(_signed_in_header_html(_u), unsafe_allow_html=True)
 
 st.markdown("<h1 style='color: #633094; text-align: center; margin-top: 0;'>Terraboost Media: Dispatch Command Center</h1>", unsafe_allow_html=True)
 
