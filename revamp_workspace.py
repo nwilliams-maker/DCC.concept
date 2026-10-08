@@ -22,7 +22,7 @@ import streamlit as st
 from task_addresses import address_with_zip
 
 
-STATUSES = ("All", "Routes", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Finalized")
+STATUSES = ("All", "Routes", "CVS Removal", "Field Nation", "Sent", "Accepted", "Declined", "Finalized")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red", "Digital")
 HIGH_RATE_FLAG_THRESHOLD = 25.00  # Matches the dispatch card's $24.99 cutoff.
 
@@ -1935,9 +1935,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     for key in st.session_state.pop("_revamp_fn_clear_next", []):
         st.session_state[f"revamp_fn_{key}"] = False
     remembered_status = st.query_params.get("view")
-    if remembered_status in ("Ready", "Flagged", "Over 50 mi"):
+    if remembered_status in ("Ready", "Flagged", "Over 50 mi", "Selected"):
         remembered_status = "Routes"
-    if st.session_state.get("revamp_status") in ("Ready", "Flagged", "Over 50 mi"):
+    if st.session_state.get("revamp_status") in ("Ready", "Flagged", "Over 50 mi", "Selected"):
         st.session_state["revamp_status"] = "Routes"
     allowed_statuses = _workspace_statuses(auth_user)
     if st.session_state.get("revamp_status") not in allowed_statuses:
