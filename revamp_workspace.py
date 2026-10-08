@@ -22,7 +22,7 @@ import streamlit as st
 from task_addresses import address_with_zip
 
 
-STATUSES = ("All", "Ready", "Flagged", "Over 50 mi", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Finalized")
+STATUSES = ("All", "Routes", "CVS Removal", "Selected", "Field Nation", "Sent", "Accepted", "Declined", "Finalized")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red", "Digital")
 HIGH_RATE_FLAG_THRESHOLD = 25.00  # Matches the dispatch card's $24.99 cutoff.
 
@@ -770,6 +770,7 @@ def _quiet_refresh_service():
 def _entry_matches(entry, status, search):
     state, route, nearest = entry[2], entry[1], entry[4]
     return ((status == "All" or state == status or
+             (status == "Routes" and state in ("Ready", "Flagged")) or
              (status == "Over 50 mi" and nearest and nearest[1] > 50 and state in ("Ready", "Flagged")) or
              (status == "CVS Removal" and state in ("Ready", "Flagged") and route.get("is_removal")) or
              (status == "Selected" and st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False))) and
@@ -881,6 +882,26 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
     return False
 
 
+def _route_list_groups(matching, status):
+    """Field Nation uses Pod → State; saved routes keep their date groups."""
+    grouped = {}
+    for entry in matching:
+        if status == "Field Nation":
+            pod = "Digital" if entry[0] == "Global_Digital" else entry[0]
+            group = (pod, str(entry[1].get("state") or "Unknown state").strip().upper())
+        else:
+            group = ("", _saved_status_group_label(entry[1])
+                     if status in ("Sent", "Accepted", "Declined", "Finalized")
+                     else str(entry[1].get("state") or "Unknown state").strip().upper())
+        grouped.setdefault(group, []).append(entry)
+    return dict(sorted(grouped.items())) if status == "Field Nation" else grouped
+
+
+def _workspace_statuses(user):
+    # Enforce on every render, including old sessions and URL view parameters.
+    return ("Field Nation",) if user.get("tier") == "guest" or user.get("scope") == "field_nation" or str(user.get("role", "")).lower() == "associate" else STATUSES
+
+
 @st.fragment
 def _render_route_list(matching, status, fn_posted, fn_providers,
                        quiet_context=None):
@@ -942,24 +963,24 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
             matching = [entry for entry in matching if entry[2] not in ('Ready', 'Flagged')] + pending
             st.session_state['_revamp_quiet_visible_keys'] = [f'{entry[0]}:{entry[3]}' for entry in pending]
     else:
-        st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+        heading_col, refresh_col = st.columns([12, 1], vertical_alignment="center")
+        with heading_col:
+            st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+        if status == "Field Nation":
+            with refresh_col:
+                if st.button("↻", key="revamp_fn_saved_refresh", help="Refresh Field Nation routes"):
+                    st.session_state["_revamp_fn_refresh_saved"] = True
+                    st.rerun()
     with st.container(height=680, border=False, key="revamp_route_scroll"):
         if not matching:
             st.info("No matching routes.")
-        grouped = {}
-        saved_date_view = status in ("Sent", "Accepted", "Declined", "Finalized")
-        for entry in matching:
-            stage = _fn_stage(entry[3], fn_posted, fn_providers) if status == "Field Nation" else ""
-            if saved_date_view:
-                group_label = _saved_status_group_label(entry[1])
-            else:
-                group_label = str(entry[1].get("state") or "Unknown state").strip().upper()
-            grouped.setdefault((stage, group_label), []).append(entry)
-        last_stage = None
-        for group_index, ((stage, group_label), entries) in enumerate(grouped.items()):
-            if status == "Field Nation" and stage != last_stage:
-                st.markdown(f"**{stage}**")
-                last_stage = stage
+        grouped = _route_list_groups(matching, status)
+        last_pod = None
+        for group_index, ((group_pod, group_label), entries) in enumerate(grouped.items()):
+            if status == "Field Nation" and group_pod != last_pod:
+                st.markdown(f"**{group_pod} Pod**")
+                last_pod = group_pod
+            stage = group_pod  # Include the pod in state-toggle keys.
             safe_group = re.sub(r"[^A-Za-z0-9_-]+", "_", group_label)
             group_key = f"_revamp_group_{status}_{stage}_{safe_group}"
             st.session_state.setdefault(group_key, group_index == 0)
@@ -971,6 +992,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
             if not is_open:
                 continue
             for pod, route, state, route_hash, nearest in entries:
+                stage = _fn_stage(route_hash, fn_posted, fn_providers) if status == "Field Nation" else ""
                 key = _route_entry_key(pod, route, state, route_hash)
                 city = route.get("city") or "Unknown city"
                 select_col, card_col = st.columns([.09, .91], gap="small", vertical_alignment="center")
@@ -1160,7 +1182,7 @@ def _render_workspace_summary(all_routes, pod_choice, loaded):
     if current and current[0] == tuple(loaded):
         all_routes = [entry for entry in all_routes if entry[2] not in ('Ready', 'Flagged')] + current[1]
     counts = {status: sum(1 for entry in all_routes if entry[2] == status)
-              for status in STATUSES[1:]}
+              for status in (*STATUSES[1:], "Ready", "Flagged")}
     counts["Over 50 mi"] = sum(1 for entry in all_routes
                                 if entry[4] and entry[4][1] > 50 and
                                 entry[2] in ("Ready", "Flagged"))
@@ -1483,7 +1505,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     heading, search_col = st.columns([1.6, 3], vertical_alignment="center")
     with heading:
-        st.markdown('<div class="revamp-heading">Dispatch</div>', unsafe_allow_html=True)
+        st.markdown('<div class="revamp-heading">' + ("Field Nation" if _workspace_statuses(st.session_state.get("_auth_user") or {}) == ("Field Nation",) else "Dispatch") + "</div>", unsafe_allow_html=True)
     with search_col:
         search = st.text_input(
             "Search routes", placeholder="Search client, contractor, venue, WO, task or stop",
@@ -1491,6 +1513,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         ).strip().lower()
 
     auth_user = st.session_state.get("_auth_user") or {}
+    fn_only = _workspace_statuses(auth_user) == ("Field Nation",)
     auth_email = str(auth_user.get("email", "") or "").strip().lower()
     accessible = [
         pod for pod in PODS
@@ -1505,7 +1528,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     pod_options = accessible + (["All my pods"] if len(accessible) > 1 else [])
     remembered_pod = st.query_params.get("pod")
     if st.session_state.get("revamp_pod") not in pod_options:
-        st.session_state["revamp_pod"] = remembered_pod if remembered_pod in accessible else accessible[0]
+        st.session_state["revamp_pod"] = remembered_pod if remembered_pod in pod_options else ("All my pods" if auth_user.get("scope") == "field_nation" else accessible[0])
     filter_col, _, refresh_col = st.columns([1.4, 4.5, 1.5], vertical_alignment="bottom")
     with filter_col:
         pod_choice = st.selectbox("Pod", pod_options, key="revamp_pod", on_change=_remember_pod)
@@ -1561,7 +1584,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     def _route_pod_key(pod):
         return "Global_Digital" if pod == "Digital" else pod
 
-    pending_pods = [pod for pod in selected_pods if
+    pending_pods = [] if fn_only else [pod for pod in selected_pods if
                     _cluster_key(pod) not in st.session_state and
                     not st.session_state.get(f"_revamp_load_attempted_{pod}")]
     if refresh_clicked or pending_pods:
@@ -1648,13 +1671,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 st.session_state["_revamp_saved_event_version"] = version
         except Exception as exc:
             print(f"[revamp/status] event check failed: {type(exc).__name__}", flush=True)
+    if st.session_state.pop("_revamp_fn_refresh_saved", False):
+        fetch_sent_records_from_sheet.clear()
     sent_db, ghost_db, archived_wos, history_db = fetch_sent_records_from_sheet()
     st.session_state["sent_db"] = sent_db
     st.session_state["ghost_db"] = ghost_db
     st.session_state["archived_wos"] = archived_wos
     st.session_state["_history_db"] = history_db
 
-    loaded = [pod for pod in selected_pods if _cluster_key(pod) in st.session_state]
+    loaded = list(selected_pods) if fn_only else [pod for pod in selected_pods if _cluster_key(pod) in st.session_state]
     if not loaded:
         def retry_initial_load():
             for pod in selected_pods:
@@ -1679,7 +1704,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     for pod in selected_pods:
         route_pod = _route_pod_key(pod)
         label_sets[route_pod] = _load_bundle_labels(db_engine, route_pod)
-    eligible_ics = _eligible_ics(st.session_state.get("ic_df"), mapbox_geocode)
+    eligible_ics = [] if fn_only else _eligible_ics(st.session_state.get("ic_df"), mapbox_geocode)
     all_routes = []
     seen_saved_routes = set()
     ghosts_by_pod = {
@@ -1694,7 +1719,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     }
     for pod in loaded:
         route_pod = _route_pod_key(pod)
-        for route in st.session_state.get(_cluster_key(pod), []):
+        for route in ([] if fn_only else st.session_state.get(_cluster_key(pod), [])):
             if pod != "Digital" and route.get("is_digital"):
                 continue
             if pod == "Digital" and not route.get("is_digital"):
@@ -1764,20 +1789,28 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     all_routes = _dedupe_route_entries(all_routes)
     all_routes = [(pod, {**route, '_bundle_label': _bundle_label(route, _bundle_sets_for_pod(pod))}, state, route_hash, nearest)
                   for pod, route, state, route_hash, nearest in all_routes]
-    _render_workspace_summary(all_routes, pod_choice, selected_pods)
+    if fn_only:
+        all_routes = [entry for entry in all_routes if entry[2] == "Field Nation"]
+    else:
+        _render_workspace_summary(all_routes, pod_choice, selected_pods)
 
     for key in st.session_state.pop("_revamp_fn_clear_next", []):
         st.session_state[f"revamp_fn_{key}"] = False
     remembered_status = st.query_params.get("view")
-    if st.session_state.get("revamp_status") not in STATUSES:
-        st.session_state["revamp_status"] = remembered_status if remembered_status in STATUSES else "All"
+    if remembered_status in ("Ready", "Flagged", "Over 50 mi"):
+        remembered_status = "Routes"
+    if st.session_state.get("revamp_status") in ("Ready", "Flagged", "Over 50 mi"):
+        st.session_state["revamp_status"] = "Routes"
+    allowed_statuses = _workspace_statuses(auth_user)
+    if st.session_state.get("revamp_status") not in allowed_statuses:
+        st.session_state["revamp_status"] = remembered_status if remembered_status in allowed_statuses else allowed_statuses[0]
     if st.session_state.pop("_revamp_show_fn_next", False):
         st.session_state["revamp_status"] = "Field Nation"
         _remember_view()
-    if st.session_state.pop("_revamp_show_accepted_next", False):
+    if st.session_state.pop("_revamp_show_accepted_next", False) and not fn_only:
         st.session_state["revamp_status"] = "Accepted"
         _remember_view()
-    status = st.radio("Route status", STATUSES, horizontal=True,
+    status = st.radio("Route status", allowed_statuses, horizontal=True,
                       label_visibility="collapsed", key="revamp_status", on_change=_remember_view)
     notice = st.session_state.pop("_revamp_notice", None)
     if notice:
@@ -1799,11 +1832,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             reverse=True,
         )
     else:
-        matching.sort(key=lambda entry: (({"Pending": 0, "Posted": 1, "Assigned": 2}[
-                                          _fn_stage(entry[3], fn_posted, fn_providers)]
-                                          if status == "Field Nation" else 0),
-                                         str(entry[1].get("state") or "").upper(),
-                                         str(entry[1].get("city") or "").lower(), entry[0]))
+        matching.sort(key=lambda entry: (
+            entry[0] if status == "Field Nation" else "",
+            str(entry[1].get("state") or "").upper(),
+            {"Pending": 0, "Posted": 1, "Assigned": 2}[_fn_stage(entry[3], fn_posted, fn_providers)] if status == "Field Nation" else 0,
+            str(entry[1].get("city") or "").lower(), entry[0]))
     selection_prefix = "revamp_fn_" if status == "Field Nation" else "revamp_bulk_"
     visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
                     if entry[2] == "Field Nation" or
@@ -1885,13 +1918,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 posted_clicked = st.button(f"Mark Posted ({len(pending)})",
                                            disabled=not pending or db_engine is None,
                                            use_container_width=True, key="revamp_fn_posted")
-            with return_col:
-                bulk_return_clicked = st.button(
-                    f"Return selected ({len(fn_selected)})",
-                    key="revamp_fn_return_selected",
-                    disabled=not fn_selected or db_engine is None,
-                    use_container_width=True,
-                )
+            bulk_return_clicked = False
+            if not fn_only:
+                with return_col:
+                    bulk_return_clicked = st.button(
+                        f"Return selected ({len(fn_selected)})",
+                        key="revamp_fn_return_selected",
+                        disabled=fn_only or not fn_selected or db_engine is None,
+                        use_container_width=True,
+                    )
             with link_col:
                 st.link_button("Open Field Nation", "https://app.fieldnation.com/projects",
                                use_container_width=True)
@@ -1904,7 +1939,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         if bulk_return_clicked:
             st.session_state["_revamp_fn_bulk_return_confirm"] = True
 
-        if st.session_state.get("_revamp_fn_bulk_return_confirm"):
+        if not fn_only and st.session_state.get("_revamp_fn_bulk_return_confirm"):
             with st.container(border=True):
                 st.warning(
                     f"Return {len(fn_selected)} selected Field Nation route"
@@ -2036,7 +2071,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     with left:
         quiet_context = ((selected_pods, process_pod, process_digital_pool, cluster_store,
                           fetch_open_tasks, eligible_ics, haversine, search, fetch_sent_records_from_sheet)
-                         if cluster_store is not None and fetch_open_tasks is not None else None)
+                         if not fn_only and cluster_store is not None and fetch_open_tasks is not None else None)
         st.session_state.pop('_revamp_quiet_visible_keys', None)
         st.session_state.pop('_revamp_quiet_pending', None)
         st.session_state.pop('_revamp_quiet_all_pending', None)
@@ -2150,30 +2185,31 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 if len(stop_data) > 12:
                     st.caption(f"+ {len(stop_data) - 12} more stops")
 
-            with st.popover("Return to regular routes", use_container_width=True):
-                st.warning(
-                    "This will remove the route from Field Nation tracking and "
-                    "unassign its OnFleet tasks so they return to normal dispatch."
-                )
-                if st.button(
-                    "Confirm return to regular routes",
-                    key=f"revamp_fn_return_one_{pod}_{route_hash}",
-                    type="primary",
-                    disabled=db_engine is None,
-                    use_container_width=True,
-                ):
-                    try:
-                        _return_fn_route_to_regular(
-                            route, route_hash, pod, db_engine,
-                            move_to_dispatch, fetch_sent_records_from_sheet,
-                        )
-                        st.session_state["_revamp_notice"] = (
-                            "success",
-                            f"{title} returned to regular dispatch.",
-                        )
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Could not return route: {exc}")
+            if not fn_only:
+                with st.popover("Return to regular routes", use_container_width=True):
+                    st.warning(
+                        "This will remove the route from Field Nation tracking and "
+                        "unassign its OnFleet tasks so they return to normal dispatch."
+                    )
+                    if st.button(
+                        "Confirm return to regular routes",
+                        key=f"revamp_fn_return_one_{pod}_{route_hash}",
+                        type="primary",
+                        disabled=db_engine is None,
+                        use_container_width=True,
+                    ):
+                        try:
+                            _return_fn_route_to_regular(
+                                route, route_hash, pod, db_engine,
+                                move_to_dispatch, fetch_sent_records_from_sheet,
+                            )
+                            st.session_state["_revamp_notice"] = (
+                                "success",
+                                f"{title} returned to regular dispatch.",
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Could not return route: {exc}")
 
             if stage == "Pending":
                 st.info("Select this route on the left, download the FN CSV, post it in Field Nation, then click Mark Posted.")
