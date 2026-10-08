@@ -991,8 +991,13 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                       use_container_width=True)
             if not is_open:
                 continue
+            last_card_stage = None
             for pod, route, state, route_hash, nearest in entries:
                 stage = _fn_stage(route_hash, fn_posted, fn_providers) if status == "Field Nation" else ""
+                if status == "Field Nation" and stage != last_card_stage:
+                    stage_count = sum(_fn_stage(entry[3], fn_posted, fn_providers) == stage for entry in entries)
+                    st.markdown(f"**{stage}** · {stage_count} {'route' if stage_count == 1 else 'routes'}")
+                    last_card_stage = stage
                 key = _route_entry_key(pod, route, state, route_hash)
                 city = route.get("city") or "Unknown city"
                 select_col, card_col = st.columns([.09, .91], gap="small", vertical_alignment="center")

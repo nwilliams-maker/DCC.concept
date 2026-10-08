@@ -132,3 +132,23 @@ rw.render_workspace(lambda pod: pod == 'Orange', lambda *a: None, lambda *a: Non
     assert not app.exception
     cards = [button for button in app.button if button.key.startswith('revamp_route_')]
     assert len(cards) == 1 and 'Austin' in cards[0].label
+
+
+def test_fn_workflow_sections_render_within_each_pod_state():
+    source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import revamp_workspace as rw
+entries = [('Orange', {{'city': city, 'state': 'TX', 'stops': 1, 'data': [{{'id': key}}]}}, 'Field Nation', key, None) for city, key in [('Houston', 'pending'), ('Austin', 'posted'), ('Dallas', 'assigned')]]
+rw._render_route_list(entries, 'Field Nation', {{'posted': '2026-10-08'}}, {{'assigned': 'Installer'}})
+'''
+    app = AppTest.from_string(source).run()
+    assert not app.exception
+    headings = [item.value for item in app.markdown if item.value.startswith('**')]
+    assert headings == ['**Orange Pod**', '**Pending** · 1 route', '**Posted** · 1 route', '**Assigned** · 1 route']
+    assert app.button(key='revamp_group_toggle_Field Nation_Orange_TX')
+    assert len([button for button in app.button if button.key.startswith('revamp_route_')]) == 3
+    app.button(key='revamp_group_toggle_Field Nation_Orange_TX').click().run()
+    assert not app.exception
+    assert not any(item.value.startswith('**Pending**') for item in app.markdown)
