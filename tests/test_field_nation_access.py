@@ -319,3 +319,59 @@ rw.render_workspace(lambda p: p == {pod!r}, lambda *a: None, lambda *a: None,
     assert len(selected) == 2
     app.radio(key='revamp_status').set_value('Field Nation').run()
     assert not any(button.key == 'revamp_select_flagged' for button in app.button)
+
+
+def test_bulk_fn_settles_original_and_changed_hashes_and_preserves_failures():
+    import revamp_workspace as rw
+    moved = {'data': [{'id': 'remaining'}]}
+    existing = {'data': [{'id': 'existing'}]}
+    failed = {'data': [{'id': 'failed'}]}
+    moved_hash, existing_hash, failed_hash = map(rw._route_hash, (moved, existing, failed))
+    session = {f'revamp_bulk_Orange:{h}': True for h in ('original', existing_hash, failed_hash)}
+    session.update(revamp_selected_route='Orange:original', _revamp_quiet_pending='stale')
+    st = SimpleNamespace(session_state=session)
+    scope = load_functions('revamp_workspace.py', ['_clear_selection', '_apply_bulk_fn_results'], {'st': st, '_route_hash': rw._route_hash})
+    chosen = [('Orange', moved, 'Flagged', 'original', None), ('Orange', existing, 'Flagged', existing_hash, None), ('Orange', failed, 'Flagged', failed_hash, None)]
+    scope['_apply_bulk_fn_results'](chosen, [(moved_hash, 'FN-new')], [(existing_hash, 'FN-existing')])
+    assert session['revamp_bulk_Orange:original'] is False
+    assert session[f'revamp_bulk_Orange:{existing_hash}'] is False
+    assert session[f'revamp_bulk_Orange:{failed_hash}'] is True
+    for h in ('original', moved_hash, existing_hash):
+        assert session[f'route_state_{h}'] == 'field_nation'
+    assert 'revamp_selected_route' not in session
+    assert '_revamp_quiet_pending' not in session
+
+
+def test_successful_bulk_send_changes_view_and_clears_selection(monkeypatch):
+    import revamp_bulk_fn
+    import revamp_workspace as rw
+    monkeypatch.setattr(revamp_bulk_fn, 'bulk_assign', lambda engine, routes, *args: ([(rw._route_hash(route), 'FN-test') for _, route in routes], [], []))
+    source = f"""
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import revamp_workspace as rw
+st.session_state['_auth_user'] = {{'pod': 'Orange', 'tier': 'user'}}
+st.session_state.setdefault('revamp_status', 'Routes')
+st.session_state['revamp_pod'] = 'Orange'
+st.session_state['clusters_Orange'] = [{{'city': 'Houston', 'state': 'TX', 'stops': 1, 'data': [{{'id': 'one', 'full': 'Houston'}}]}}]
+st.session_state['_fn_team_id'] = 'team'
+st.session_state['_fn_worker_id'] = 'worker'
+rw._eligible_ics = lambda *a: []
+rw._load_bundle_labels = lambda *a: []
+def records():
+    return {{}}, {{}}, set(), {{}}
+records.clear = lambda: None
+rw.render_workspace(lambda p: p == 'Orange', lambda *a: None, lambda *a: None,
+                    lambda *a: 0, object(), lambda *a: None, records)
+"""
+    app = AppTest.from_string(source).run()
+    app.button(key='revamp_select_flagged').click().run()
+    app.button(key='revamp_assign_fn').click().run()
+    assert not app.exception
+    assert app.radio(key='revamp_status').value == 'Field Nation'
+    assert not any(value is True for key, value in app.session_state.filtered_state.items() if key.startswith('revamp_bulk_'))
+    assert any('Houston' in button.label for button in app.button)
+    app.radio(key='revamp_status').set_value('Routes').run()
+    assert not any(button.key == 'revamp_assign_fn' for button in app.button)
+    assert not any('Houston' in button.label for button in app.button)
