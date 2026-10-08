@@ -882,19 +882,23 @@ def _quiet_routes_check(pods, process_pod, process_digital_pool, cluster_store, 
     return False
 
 
-def _route_list_groups(matching, status):
-    """Field Nation uses Pod → State; saved routes keep their date groups."""
+def _route_list_groups(matching, status, fn_posted=None, fn_providers=None):
+    """Field Nation uses Pod → Workflow → State; saved routes use dates."""
     grouped = {}
     for entry in matching:
         if status == "Field Nation":
             pod = "Digital" if entry[0] == "Global_Digital" else entry[0]
-            group = (pod, str(entry[1].get("state") or "Unknown state").strip().upper())
+            stage = _fn_stage(entry[3], fn_posted or {}, fn_providers or {})
+            group = (pod, stage, str(entry[1].get("state") or "Unknown state").strip().upper())
         else:
-            group = ("", _saved_status_group_label(entry[1])
+            group = ("", "", _saved_status_group_label(entry[1])
                      if status in ("Sent", "Accepted", "Declined", "Finalized")
                      else str(entry[1].get("state") or "Unknown state").strip().upper())
         grouped.setdefault(group, []).append(entry)
-    return dict(sorted(grouped.items())) if status == "Field Nation" else grouped
+    if status == "Field Nation":
+        rank = {"Pending": 0, "Posted": 1, "Assigned": 2}
+        return dict(sorted(grouped.items(), key=lambda item: (item[0][0], rank[item[0][1]], item[0][2])))
+    return grouped
 
 
 def _workspace_statuses(user):
@@ -974,13 +978,19 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
     with st.container(height=680, border=False, key="revamp_route_scroll"):
         if not matching:
             st.info("No matching routes.")
-        grouped = _route_list_groups(matching, status)
+        grouped = _route_list_groups(matching, status, fn_posted, fn_providers)
         last_pod = None
-        for group_index, ((group_pod, group_label), entries) in enumerate(grouped.items()):
-            if status == "Field Nation" and group_pod != last_pod:
-                st.markdown(f"**{group_pod} Pod**")
-                last_pod = group_pod
-            stage = group_pod  # Include the pod in state-toggle keys.
+        last_stage = None
+        for group_index, ((group_pod, workflow_stage, group_label), entries) in enumerate(grouped.items()):
+            if status == "Field Nation":
+                if group_pod != last_pod:
+                    st.markdown(f"**{group_pod} Pod**")
+                    last_pod = group_pod
+                    last_stage = None
+                if workflow_stage != last_stage:
+                    st.markdown(f"**{workflow_stage}**")
+                    last_stage = workflow_stage
+            stage = f"{group_pod}_{workflow_stage}" if status == "Field Nation" else ""
             safe_group = re.sub(r"[^A-Za-z0-9_-]+", "_", group_label)
             group_key = f"_revamp_group_{status}_{stage}_{safe_group}"
             st.session_state.setdefault(group_key, group_index == 0)
@@ -991,13 +1001,8 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                       use_container_width=True)
             if not is_open:
                 continue
-            last_card_stage = None
             for pod, route, state, route_hash, nearest in entries:
                 stage = _fn_stage(route_hash, fn_posted, fn_providers) if status == "Field Nation" else ""
-                if status == "Field Nation" and stage != last_card_stage:
-                    stage_count = sum(_fn_stage(entry[3], fn_posted, fn_providers) == stage for entry in entries)
-                    st.markdown(f"**{stage}** · {stage_count} {'route' if stage_count == 1 else 'routes'}")
-                    last_card_stage = stage
                 key = _route_entry_key(pod, route, state, route_hash)
                 city = route.get("city") or "Unknown city"
                 select_col, card_col = st.columns([.09, .91], gap="small", vertical_alignment="center")
