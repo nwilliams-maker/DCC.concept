@@ -1124,6 +1124,16 @@ USERS = {
         "role": "Dispatcher",
         "tier": "user",
     },
+    "fn_assoc": {
+        "name": "Field Nation Dispatch Associate",
+        "salt": os.environ.get("FN_ASSOC_SALT", ""),
+        "password_hash": os.environ.get("FN_ASSOC_PASSWORD_HASH", ""),
+        "email": "",
+        "pod": "Field Nation",
+        "role": "Field Nation Dispatch Associate",
+        "tier": "guest",
+        "scope": "field_nation",
+    },
     "blue_assoc": {
         "name": "Blue Dispatch Associate",
         "salt": "1d30d368b6490b38b945b7d3a45c0483",
@@ -1300,6 +1310,8 @@ def _can_access_tab(tab_pod: str) -> bool:
     user = st.session_state.get('_auth_user')
     if not user:
         return False
+    if user.get('scope') == 'field_nation':
+        return tab_pod in ('Blue', 'Green', 'Orange', 'Purple', 'Red', 'Digital')
     user_pod = str(user.get('pod', '')).upper()
     # ADMIN and MANAGER both get full access. ALL is kept as a legacy alias.
     if user_pod in ('ADMIN', 'MANAGER', 'ALL'):
@@ -10937,7 +10949,8 @@ st.session_state['_asc_ran_this_render'] = False
 # Production DCC never sets this flag and never imports the new UI module.
 render_dev_email_control(DB_ENGINE, st.session_state.get("_auth_user") or {})
 
-if os.environ.get("DCC_REVAMP_UI") == "1":
+if (os.environ.get("DCC_REVAMP_UI") == "1"
+        or st.session_state.get("_auth_user", {}).get("scope") == "field_nation"):
     from revamp_workspace import render_workspace
     render_workspace(_can_access_tab, process_pod, render_dispatch,
                      haversine, DB_ENGINE, assign_tasks_to_fn_team,

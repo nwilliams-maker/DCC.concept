@@ -61,7 +61,7 @@ w.render_workspace(lambda pod: pod == 'Blue', lambda pod: None,
 '''
     app = AppTest.from_string(source).run()
     assert not app.exception
-    app.radio(key='revamp_status').set_value('Ready').run()
+    app.radio(key='revamp_status').set_value('Routes').run()
     assert not app.exception
     assert any('Chicago, IL' in b.label and 'Ready' in b.label for b in app.button)
     app.radio(key='revamp_status').set_value('Finalized').run()
