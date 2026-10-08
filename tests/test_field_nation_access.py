@@ -375,3 +375,48 @@ rw.render_workspace(lambda p: p == 'Orange', lambda *a: None, lambda *a: None,
     app.radio(key='revamp_status').set_value('Routes').run()
     assert not any(button.key == 'revamp_assign_fn' for button in app.button)
     assert not any('Houston' in button.label for button in app.button)
+
+
+@pytest.mark.parametrize('mode', ['individual', 'bulk'])
+def test_fn_return_uses_supplied_dispatch_callback(monkeypatch, mode):
+    from migration import data_access as fn_data
+    monkeypatch.setattr(fn_data, 'mirror_remove_field_nation_by_cluster_hash', lambda *a: {'success': True})
+    source = f"""
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import revamp_workspace as rw
+st.session_state['_auth_user'] = {{'pod': 'Orange', 'tier': 'user'}}
+st.session_state.setdefault('revamp_status', 'Field Nation')
+st.session_state['revamp_pod'] = 'Orange'
+st.session_state['clusters_Orange'] = []
+rw._eligible_ics = lambda *a: []
+rw._load_bundle_labels = lambda *a: []
+def records():
+    ghosts = [] if st.session_state.get('_returned') else [{{'hash': 'route', 'wo': 'FN-test', 'status': 'field_nation', 'city': 'Gardena', 'state': 'CA', 'stops': 1, 'task_ids': ['one']}}]
+    return {{}}, {{'Orange': ghosts}}, set(), {{}}
+records.clear = lambda: None
+def dispatch(route_hash, name, pod, **kwargs):
+    st.session_state['_returned'] = (route_hash, name, pod, kwargs)
+rw.render_workspace(lambda p: p == 'Orange', lambda *a: None, lambda *a: None,
+    lambda *a: 0, object(), lambda *a: None, records,
+    saved_route_helpers={{'move_to_dispatch': dispatch}})
+"""
+    app = AppTest.from_string(source).run()
+    if mode == 'individual':
+        next(button for button in app.button if 'Gardena' in button.label).click().run()
+        app.button(key='revamp_fn_return_one_Orange_route').click().run()
+    else:
+        app.button(key='revamp_fn_select_all').click().run()
+        app.button(key='revamp_fn_return_selected').click().run()
+        app.button(key='revamp_fn_bulk_return_confirm_btn').click().run()
+    assert not app.exception
+    assert not app.error
+    returned = app.session_state['_returned']
+    assert returned[:3] == ('route', 'Field Nation', 'Orange')
+    assert returned[3]['check_onfleet'] and returned[3]['check_completed']
+    assert returned[3]['cluster_data']['task_ids'] == ['one']
+    assert app.session_state['ghost_db']['Orange'] == []
+    assert app.session_state.filtered_state.get('revamp_selected_route') is None
+    if mode == 'bulk':
+        assert not any('Gardena' in button.label for button in app.button)

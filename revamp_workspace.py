@@ -1250,6 +1250,8 @@ def _return_fn_route_to_regular(route, route_hash, pod, db_engine,
     """Remove FN tracking and push its OnFleet tasks back to normal dispatch."""
     if db_engine is None:
         raise RuntimeError("Railway database is unavailable")
+    if not callable(move_to_dispatch):
+        raise RuntimeError("The return-to-dispatch action is unavailable")
 
     from migration import data_access as _fn_data
 
@@ -1282,6 +1284,10 @@ def _return_fn_route_to_regular(route, route_hash, pod, db_engine,
 
     st.session_state.pop(f"revamp_fn_{pod}:{route_hash}", None)
     st.session_state.pop(f"route_state_{route_hash}", None)
+    if st.session_state.get("revamp_selected_route") == f"{pod}:{route_hash}":
+        st.session_state.pop("revamp_selected_route", None)
+    for key in ("_revamp_quiet_pending", "_revamp_quiet_all_pending", "_revamp_fn_checked_entries"):
+        st.session_state.pop(key, None)
     return True
 
 
@@ -1334,6 +1340,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      merge_same_wo_ghosts=None, cluster_store=None,
                      mapbox_geocode=None, process_digital_pool=None, fetch_open_tasks=None):
     """Render one selected route while retaining the existing dispatch actions."""
+    move_to_dispatch = (saved_route_helpers or {}).get("move_to_dispatch")
     st.markdown("""
     <style>
     /* ── DCC Revamp visual system ─────────────────────────────────────────
