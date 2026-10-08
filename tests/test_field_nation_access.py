@@ -281,3 +281,41 @@ rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden,
     assert not app.exception
     assert len(app.session_state['_revamp_fn_new_routes']) == 1
     assert len([button for button in app.button if ':green-background[NEW]' in button.label]) == 1
+
+
+@pytest.mark.parametrize('pod', ['Blue', 'Green', 'Orange', 'Purple', 'Red', 'Digital'])
+def test_select_all_flagged_excludes_ready_and_selects_collapsed_states(pod):
+    source = f"""
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import revamp_workspace as rw
+st.session_state['_auth_user'] = {{'pod': {pod!r}, 'tier': 'user'}}
+st.session_state.setdefault('revamp_status', 'Routes')
+st.session_state['revamp_pod'] = {pod!r}
+st.session_state[{'global_digital_clusters' if pod == 'Digital' else 'clusters_' + pod!r}] = [
+    {{'city': city, 'state': state, 'status': status, 'is_digital': {pod == 'Digital'!r}, 'stops': 1,
+      'data': [{{'id': city, 'full': city}}]}}
+    for city, state, status in [('Ready City', 'AL', 'Ready'), ('Flagged One', 'TX', 'Flagged'), ('Flagged Two', 'TN', 'Flagged')]
+]
+rw._route_status = lambda route, *a: route['status']
+rw._eligible_ics = lambda *a: []
+rw._load_bundle_labels = lambda *a: []
+def records():
+    return {{}}, {{}}, set(), {{}}
+records.clear = lambda: None
+rw.render_workspace(lambda p: p == {pod!r}, lambda *a: None, lambda *a: None,
+                    lambda *a: 0, object(), lambda *a: None, records)
+"""
+    app = AppTest.from_string(source).run()
+    assert not app.exception
+    app.button(key='revamp_select_visible').click().run()
+    assert app.button(key='revamp_assign_fn').label == 'Send 3 to Field Nation'
+    app.button(key='revamp_select_flagged').click().run()
+    assert not app.exception
+    assert app.button(key='revamp_assign_fn').label == 'Send 2 to Field Nation'
+    selected = [key for key, value in app.session_state.filtered_state.items()
+                if key.startswith('revamp_bulk_') and value is True]
+    assert len(selected) == 2
+    app.radio(key='revamp_status').set_value('Field Nation').run()
+    assert not any(button.key == 'revamp_select_flagged' for button in app.button)

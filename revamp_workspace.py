@@ -1961,6 +1961,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             ]
         for key in keys_to_select:
             st.session_state[f"{selection_prefix}{key}"] = True
+    def select_flagged():
+        # Use the latest manual-check results, including collapsed state groups.
+        current = st.session_state.get('_revamp_quiet_all_pending')
+        candidates = current[1] if current and current[0] == tuple(selected_pods) else all_routes
+        for entry in candidates:
+            if entry[2] in ("Ready", "Flagged"):
+                st.session_state[f"revamp_bulk_{entry[0]}:{entry[3]}"] = (
+                    entry[2] == "Flagged" and _entry_matches(entry, status, search)
+                )
     def clear_visible():
         keys = (st.session_state.get('_revamp_quiet_visible_keys', visible_keys)
                 if status != 'Field Nation' else visible_keys)
@@ -1968,12 +1977,17 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             st.session_state[f"{selection_prefix}{key}"] = False
     if status != "Field Nation":
         with st.container(key="revamp_action_bar"):
-            count_col, select_col, clear_col = st.columns([3.2, 1.35, 1.15], vertical_alignment="center")
+            count_col, select_col, flagged_col, clear_col = st.columns([3.2, 1.35, 1.8, 1.15], vertical_alignment="center")
             with count_col:
                 st.caption(f"{len(matching)} route{'s' if len(matching) != 1 else ''} shown")
             with select_col:
                 st.button("Select all", key="revamp_select_visible",
                           on_click=select_visible, disabled=not visible_keys,
+                          use_container_width=True)
+            with flagged_col:
+                st.button("Select all Flagged", key="revamp_select_flagged",
+                          on_click=select_flagged,
+                          disabled=not any(entry[2] == "Flagged" for entry in matching),
                           use_container_width=True)
             with clear_col:
                 st.button("Clear", key="revamp_clear_selection", on_click=clear_visible,
