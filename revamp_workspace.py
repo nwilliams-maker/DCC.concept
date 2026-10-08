@@ -984,9 +984,17 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
         for group_index, ((group_pod, workflow_stage, group_label), entries) in enumerate(grouped.items()):
             if status == "Field Nation":
                 if group_pod != last_pod:
-                    st.markdown(f"**{group_pod} Pod**")
+                    pod_key = f"_revamp_fn_pod_open_{group_pod}"
+                    st.session_state.setdefault(pod_key, True)
+                    pod_count = sum(len(routes) for group, routes in grouped.items() if group[0] == group_pod)
+                    st.button(f"{group_pod} Pod · {pod_count} {'route' if pod_count == 1 else 'routes'} {'−' if st.session_state[pod_key] else '+'}",
+                              key=f"revamp_fn_pod_toggle_{group_pod}",
+                              on_click=_toggle_state_group, args=(pod_key,),
+                              use_container_width=True)
                     last_pod = group_pod
                     last_stage = None
+                if not st.session_state[f"_revamp_fn_pod_open_{group_pod}"]:
+                    continue
                 if workflow_stage != last_stage:
                     st.markdown(f"**{workflow_stage}**")
                     last_stage = workflow_stage

@@ -147,7 +147,8 @@ rw._render_route_list(entries, 'Field Nation', {{'posted': '2026-10-08'}}, {{'as
     app = AppTest.from_string(source).run()
     assert not app.exception
     headings = [item.value for item in app.markdown if item.value.startswith('**')]
-    assert headings == ['**Orange Pod**', '**Pending**', '**Posted**', '**Assigned**']
+    assert headings == ['**Pending**', '**Posted**', '**Assigned**']
+    assert app.button(key='revamp_fn_pod_toggle_Orange').label == 'Orange Pod · 3 routes −'
     assert app.button(key='revamp_group_toggle_Field Nation_Orange_Pending_TX')
     app.button(key='revamp_group_toggle_Field Nation_Orange_Posted_TX').click().run()
     app.button(key='revamp_group_toggle_Field Nation_Orange_Assigned_TX').click().run()
@@ -200,3 +201,30 @@ rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden,
     assert app.session_state['_assignment_calls'] == [('save', 'route', 'Installer'), ('assign', 'FN10082026-1')]
     assert app.session_state['_saved_cleared']
     assert app.success[0].value == 'Assigned to Installer. Onfleet route named Installer-10082026-1.'
+
+
+
+def test_fn_pods_collapse_independently_and_keep_inner_state_openings():
+    source = f"""
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import revamp_workspace as rw
+entries = [(pod, {{'city': city, 'state': 'TX', 'stops': 1, 'data': [{{'id': key}}]}}, 'Field Nation', key, None) for pod, city, key in [('Orange', 'Houston', 'pending'), ('Orange', 'Austin', 'posted'), ('Purple', 'Dallas', 'assigned')]]
+rw._render_route_list(entries, 'Field Nation', {{'posted': True}}, {{'assigned': 'Installer'}})
+"""
+    app = AppTest.from_string(source).run()
+    assert not app.exception
+    app.button(key='revamp_group_toggle_Field Nation_Orange_Posted_TX').click().run()
+    app.button(key='revamp_group_toggle_Field Nation_Purple_Assigned_TX').click().run()
+    assert len([button for button in app.button if button.key.startswith('revamp_route_')]) == 3
+    app.button(key='revamp_fn_pod_toggle_Orange').click().run()
+    assert not app.exception
+    assert app.button(key='revamp_fn_pod_toggle_Orange').label == 'Orange Pod · 2 routes +'
+    assert all('Orange' not in button.key for button in app.button if button.key.startswith('revamp_group_toggle_'))
+    cards = [button for button in app.button if button.key.startswith('revamp_route_')]
+    assert len(cards) == 1 and 'Dallas' in cards[0].label
+    app.button(key='revamp_fn_pod_toggle_Orange').click().run()
+    assert not app.exception
+    assert len([button for button in app.button if button.key.startswith('revamp_route_')]) == 3
+    assert app.session_state['_revamp_group_Field Nation_Orange_Posted_TX']
