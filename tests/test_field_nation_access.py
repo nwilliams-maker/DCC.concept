@@ -228,3 +228,55 @@ rw._render_route_list(entries, 'Field Nation', {{'posted': True}}, {{'assigned':
     assert not app.exception
     assert len([button for button in app.button if button.key.startswith('revamp_route_')]) == 3
     assert app.session_state['_revamp_group_Field Nation_Orange_Posted_TX']
+
+
+def test_fn_refresh_uses_small_circle_counts_new_work_orders_without_extra_app_rerun():
+    source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import revamp_workspace as rw
+st.session_state['_auth_user'] = {{'pod': 'Field Nation', 'scope': 'field_nation', 'tier': 'guest'}}
+st.session_state['_main_runs'] = st.session_state.get('_main_runs', 0) + 1
+def forbidden(*a, **k):
+    raise AssertionError('Refresh must not build regular task pools')
+def records():
+    step = st.session_state.get('_fetch_step', 0)
+    ghosts = [{{'hash': 'old-changed' if step else 'old', 'wo': 'Existing-WO', 'status': 'field_nation', 'city': 'Houston', 'state': 'TX', 'stops': 1, 'task_ids': ['old-task']}}]
+    if step:
+        ghosts += [{{'hash': key, 'wo': 'New-WO-' + key, 'status': 'field_nation', 'city': 'Houston', 'state': 'TX', 'stops': 1, 'task_ids': [key]}} for key in ['new-one', 'new-two']]
+    return {{}}, {{'Orange': ghosts, '_fn_posted': {{'old-changed': True}} if step else {{}}}}, set(), {{}}
+records.clear = lambda: st.session_state.update(_fetch_step=st.session_state.get('_fetch_step', 0) + 1)
+rw._load_bundle_labels = lambda *a: []
+rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden, None, forbidden, records)
+'''
+    app = AppTest.from_string(source).run()
+    assert not app.exception
+    assert app.session_state['_main_runs'] == 1
+    assert len([button for button in app.button if button.key.startswith('revamp_route_')]) == 1
+    app.button(key='revamp_fn_saved_refresh').click().run()
+    assert not app.exception
+    assert app.session_state['_main_runs'] == 2
+    assert app.session_state['_fetch_step'] == 1
+    assert '2 new routes added' in app.session_state['_revamp_fn_refresh_notice']
+    assert app.session_state['_revamp_fn_refresh_notice'].endswith(' CT')
+    assert any('2 new routes added' in item.value for item in app.markdown)
+    assert any('width:12px;height:12px' in item.value for item in app.markdown)
+    assert any('Houston' in button.label for button in app.button if button.key.startswith('revamp_route_'))
+    assert len([button for button in app.button if ':green-background[NEW]' in button.label]) == 2
+    assert len(app.session_state['_revamp_fn_new_routes']) == 2
+    app.button(key='revamp_fn_saved_refresh').click().run()
+    assert not app.exception
+    assert app.session_state['_main_runs'] == 3
+    assert '0 new routes added' in app.session_state['_revamp_fn_refresh_notice']
+    assert len([button for button in app.button if ':green-background[NEW]' in button.label]) == 2
+    app.button(key='revamp_fn_pod_toggle_Orange').click().run()
+    app.button(key='revamp_fn_pod_toggle_Orange').click().run()
+    assert not app.exception
+    assert app.session_state['_fetch_step'] == 2
+    assert app.button(key='revamp_fn_pod_toggle_Orange').label == 'Orange Pod · 3 routes −'
+    new_card = next(button for button in app.button if ':green-background[NEW]' in button.label)
+    new_card.click().run()
+    assert not app.exception
+    assert len(app.session_state['_revamp_fn_new_routes']) == 1
+    assert len([button for button in app.button if ':green-background[NEW]' in button.label]) == 1

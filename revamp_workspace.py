@@ -906,9 +906,78 @@ def _workspace_statuses(user):
     return ("Field Nation",) if user.get("tier") == "guest" or user.get("scope") == "field_nation" or str(user.get("role", "")).lower() == "associate" else STATUSES
 
 
+def _fn_saved_entries(ghost_db, pods, merge_same_wo_ghosts=None):
+    entries = []
+    for pod in pods:
+        route_pod = "Global_Digital" if pod == "Digital" else pod
+        ghosts = (ghost_db or {}).get(route_pod, [])
+        if merge_same_wo_ghosts:
+            ghosts = merge_same_wo_ghosts(ghosts)
+        for ghost in ghosts:
+            route_hash = str(ghost.get("hash") or "")
+            if not route_hash or str(ghost.get("status") or "").lower() not in ("field_nation", "posted"):
+                continue
+            if st.session_state.get(f"reverted_{route_hash}", False):
+                continue
+            route = {"_is_ghost": True, "wo": ghost.get("wo", ""), "_ghost_record": ghost,
+                     "city": ghost.get("city", "Unknown"), "state": ghost.get("state", ""),
+                     "stops": ghost.get("stops", ghost.get("lCnt", 0)), "data": _fn_ghost_tasks(ghost)}
+            route["_bundle_label"] = _bundle_label(route, _bundle_sets_for_pod(route_pod))
+            entries.append((route_pod, route, "Field Nation", route_hash, None))
+    return _dedupe_route_entries(entries)
+
+
+def _fn_route_identities(entries):
+    # Changing workflow or task hashes on the same WO is not a new route.
+    return {(entry[0], str(entry[1].get("wo") or entry[3])) for entry in entries}
+
+
+def _refresh_fn_route_list(matching, posted, providers, context):
+    fetch_records, pods, search, merge = context
+    signature = (tuple(pods), search)
+    checked = st.session_state.get("_revamp_fn_checked_entries")
+    if checked and checked[0] == signature:
+        matching, posted, providers = checked[1:]
+    with st.container(key="revamp_routes_heading"):
+        title_col, check_col, notice_col = st.columns([58, 20, 300], vertical_alignment="center")
+        with title_col:
+            st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
+        with notice_col:
+            notice_placeholder = st.empty()
+        with check_col:
+            with st.container(key="revamp_quiet_control"):
+                manual = st.button("↻", key="revamp_fn_saved_refresh", help="Refresh Field Nation routes", use_container_width=True)
+        if manual:
+            _routes_refresh_style(True)
+            notice_placeholder.markdown('<span class="rv-task-note">Checking routes…</span>', unsafe_allow_html=True)
+            try:
+                old_ids = _fn_route_identities(_fn_saved_entries(st.session_state.get("ghost_db"), pods, merge))
+                fetch_records.clear()
+                sent, ghosts, archived, history = fetch_records()
+                entries = _fn_saved_entries(ghosts, pods, merge)
+                new_ids = _fn_route_identities(entries) - old_ids
+                added = len(new_ids)
+                st.session_state.setdefault("_revamp_fn_new_routes", set()).update(new_ids)
+                matching = [entry for entry in entries if _entry_matches(entry, "Field Nation", search)]
+                posted = (ghosts or {}).get("_fn_posted", {}) or {}
+                providers = (ghosts or {}).get("_fn_provider", {}) or {}
+                st.session_state.update(sent_db=sent, ghost_db=ghosts, archived_wos=archived, _history_db=history)
+                st.session_state["_revamp_fn_checked_entries"] = (signature, matching, posted, providers)
+                when = datetime.now(ZoneInfo("America/Chicago")).strftime("%I:%M:%S %p").lstrip("0") + " CT"
+                st.session_state["_revamp_fn_refresh_notice"] = f"{added} new {'route' if added == 1 else 'routes'} added · {when}"
+            except Exception as exc:
+                print(f"[revamp/fn-check] keeping existing routes: {type(exc).__name__}", flush=True)
+                st.session_state["_revamp_fn_refresh_notice"] = "Check unavailable · retry"
+        with notice_col:
+            notice = st.session_state.get("_revamp_fn_refresh_notice", "")
+            notice_placeholder.markdown(f'<span class="rv-task-note">{html.escape(notice)}</span>', unsafe_allow_html=True)
+    _routes_refresh_style(False)
+    return matching, posted, providers
+
+
 @st.fragment
 def _render_route_list(matching, status, fn_posted, fn_providers,
-                       quiet_context=None):
+                       quiet_context=None, fn_refresh_context=None):
     """State toggles rerun only this list; route clicks refresh the detail pane."""
     busy = False
     if quiet_context:
@@ -966,15 +1035,10 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
             st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in pending]
             matching = [entry for entry in matching if entry[2] not in ('Ready', 'Flagged')] + pending
             st.session_state['_revamp_quiet_visible_keys'] = [f'{entry[0]}:{entry[3]}' for entry in pending]
+    elif fn_refresh_context:
+        matching, fn_posted, fn_providers = _refresh_fn_route_list(matching, fn_posted, fn_providers, fn_refresh_context)
     else:
-        heading_col, refresh_col = st.columns([12, 1], vertical_alignment="center")
-        with heading_col:
-            st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
-        if status == "Field Nation":
-            with refresh_col:
-                if st.button("↻", key="revamp_fn_saved_refresh", help="Refresh Field Nation routes"):
-                    st.session_state["_revamp_fn_refresh_saved"] = True
-                    st.rerun()
+        st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
     with st.container(height=680, border=False, key="revamp_route_scroll"):
         if not matching:
             st.info("No matching routes.")
@@ -1047,6 +1111,8 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     bundle = route.get('_bundle_label') or _bundle_label(route, _bundle_sets_for_pod(pod))
                     if bundle:
                         heading += f" · {bundle}"
+                    if status == "Field Nation" and (pod, str(route.get("wo") or route_hash)) in st.session_state.get("_revamp_fn_new_routes", set()):
+                        heading += " · :green-background[NEW]"
                     label = (f"{heading}\n"
                              f"{('Digital' if pod == 'Global_Digital' else pod)} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
                              f"{tasks} {'task' if tasks == 1 else 'tasks'}")
@@ -1075,6 +1141,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     if st.button(label, key=f"revamp_route_{state_key}_{key}",
                                  type="primary" if selected else "secondary",
                                  use_container_width=True):
+                        st.session_state.get("_revamp_fn_new_routes", set()).discard((pod, str(route.get("wo") or route_hash)))
                         st.session_state["revamp_selected_route"] = key
                         st.rerun(scope="app")
     if st.session_state.pop("_revamp_refresh_bulk_actions", False):
@@ -1689,8 +1756,6 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 st.session_state["_revamp_saved_event_version"] = version
         except Exception as exc:
             print(f"[revamp/status] event check failed: {type(exc).__name__}", flush=True)
-    if st.session_state.pop("_revamp_fn_refresh_saved", False):
-        fetch_sent_records_from_sheet.clear()
     sent_db, ghost_db, archived_wos, history_db = fetch_sent_records_from_sheet()
     st.session_state["sent_db"] = sent_db
     st.session_state["ghost_db"] = ghost_db
@@ -2095,7 +2160,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         st.session_state.pop('_revamp_quiet_all_pending', None)
         st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in matching
                                                       if entry[2] in ('Ready', 'Flagged')]
-        _render_route_list(matching, status, fn_posted, fn_providers, quiet_context)
+        st.session_state.pop("_revamp_fn_checked_entries", None)
+        fn_refresh_context = (fetch_sent_records_from_sheet, selected_pods, search, merge_same_wo_ghosts) if fn_only else None
+        _render_route_list(matching, status, fn_posted, fn_providers, quiet_context, fn_refresh_context)
 
     with right:
         selection = st.session_state.get("revamp_selected_route")
