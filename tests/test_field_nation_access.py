@@ -80,7 +80,7 @@ rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden,
     assert app.radio[0].options == ['Field Nation']
     assert app.radio[0].value == 'Field Nation'
     assert app.selectbox[0].value == 'All my pods'
-    assert not any('Return' in button.label for button in app.button)
+    assert app.button(key='revamp_fn_return_selected').disabled
     buttons = {button.key: button for button in app.button}
     assert 'revamp_group_toggle_Field Nation_Orange_Pending_TX' in buttons
     assert 'revamp_group_toggle_Field Nation_Purple_Pending_TX' in buttons
@@ -386,7 +386,7 @@ import sys
 sys.path.insert(0, {str(ROOT)!r})
 import streamlit as st
 import revamp_workspace as rw
-st.session_state['_auth_user'] = {{'pod': 'Orange', 'tier': 'user'}}
+st.session_state['_auth_user'] = {{'pod': 'Field Nation', 'tier': 'guest', 'scope': 'field_nation'}}
 st.session_state.setdefault('revamp_status', 'Field Nation')
 st.session_state['revamp_pod'] = 'Orange'
 st.session_state['clusters_Orange'] = []

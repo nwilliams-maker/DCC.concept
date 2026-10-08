@@ -1654,6 +1654,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     auth_user = st.session_state.get("_auth_user") or {}
     fn_only = _workspace_statuses(auth_user) == ("Field Nation",)
+    can_return_fn = not fn_only or auth_user.get("scope") == "field_nation"
     auth_email = str(auth_user.get("email", "") or "").strip().lower()
     accessible = [
         pod for pod in PODS
@@ -2071,12 +2072,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                            disabled=not pending or db_engine is None,
                                            use_container_width=True, key="revamp_fn_posted")
             bulk_return_clicked = False
-            if not fn_only:
+            if can_return_fn:
                 with return_col:
                     bulk_return_clicked = st.button(
                         f"Return selected ({len(fn_selected)})",
                         key="revamp_fn_return_selected",
-                        disabled=fn_only or not fn_selected or db_engine is None,
+                        disabled=not can_return_fn or not fn_selected or db_engine is None,
                         use_container_width=True,
                     )
             with link_col:
@@ -2091,7 +2092,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         if bulk_return_clicked:
             st.session_state["_revamp_fn_bulk_return_confirm"] = True
 
-        if not fn_only and st.session_state.get("_revamp_fn_bulk_return_confirm"):
+        if can_return_fn and st.session_state.get("_revamp_fn_bulk_return_confirm"):
             with st.container(border=True):
                 st.warning(
                     f"Return {len(fn_selected)} selected Field Nation route"
@@ -2338,7 +2339,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 if len(stop_data) > 12:
                     st.caption(f"+ {len(stop_data) - 12} more stops")
 
-            if not fn_only:
+            if can_return_fn:
                 with st.popover("Return to regular routes", use_container_width=True):
                     st.warning(
                         "This will remove the route from Field Nation tracking and "
