@@ -769,6 +769,8 @@ def _quiet_refresh_service():
 
 def _entry_matches(entry, status, search):
     state, route, nearest = entry[2], entry[1], entry[4]
+    if status == "Routes" and (st.session_state.get("_auth_user") or {}).get("scope") == "field_nation" and state != "Flagged":
+        return False
     return ((status == "All" or state == status or
              (status == "Routes" and state in ("Ready", "Flagged")) or
              (status == "Over 50 mi" and nearest and nearest[1] > 50 and state in ("Ready", "Flagged")) or
@@ -903,7 +905,9 @@ def _route_list_groups(matching, status, fn_posted=None, fn_providers=None):
 
 def _workspace_statuses(user):
     # Enforce on every render, including old sessions and URL view parameters.
-    return ("Field Nation",) if user.get("tier") == "guest" or user.get("scope") == "field_nation" or str(user.get("role", "")).lower() == "associate" else STATUSES
+    if user.get("scope") == "field_nation":
+        return ("Field Nation", "Routes")
+    return ("Field Nation",) if user.get("tier") == "guest" or str(user.get("role", "")).lower() == "associate" else STATUSES
 
 
 def _fn_saved_entries(ghost_db, pods, merge_same_wo_ghosts=None):
@@ -1039,7 +1043,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
         matching, fn_posted, fn_providers = _refresh_fn_route_list(matching, fn_posted, fn_providers, fn_refresh_context)
     else:
         st.markdown('<div class="revamp-panel-title">Routes</div>', unsafe_allow_html=True)
-    with st.container(height=680, border=False, key="revamp_route_scroll"):
+    with st.container(height=680, border=False, key="revamp_route_scroll_fn" if status == "Field Nation" else "revamp_route_scroll"):
         if not matching:
             st.info("No matching routes.")
         grouped = _route_list_groups(matching, status, fn_posted, fn_providers)
@@ -1060,7 +1064,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                 if not st.session_state[f"_revamp_fn_pod_open_{group_pod}"]:
                     continue
                 if workflow_stage != last_stage:
-                    st.markdown(f"**{workflow_stage}**")
+                    st.markdown(f'<div class="fn-workflow-heading fn-workflow-{workflow_stage.lower()}">{workflow_stage}</div>', unsafe_allow_html=True)
                     last_stage = workflow_stage
             stage = f"{group_pod}_{workflow_stage}" if status == "Field Nation" else ""
             safe_group = re.sub(r"[^A-Za-z0-9_-]+", "_", group_label)
@@ -1488,6 +1492,30 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
       transform:none!important;
     }
 
+    /* FN inbox: distinguish hierarchy and override inherited large block gaps. */
+    .st-key-revamp_route_scroll_fn {background:#f8fafc!important;padding:6px!important;}
+    .st-key-revamp_route_scroll_fn [data-testid="stVerticalBlock"] {gap:4px!important;}
+    .st-key-revamp_route_scroll_fn [data-testid="stElementContainer"] {margin:0!important;}
+    .st-key-revamp_route_scroll_fn [data-testid="stHorizontalBlock"] {margin:0 0 2px 18px!important;gap:6px!important;}
+    .st-key-revamp_route_scroll_fn [class*="st-key-revamp_fn_pod_toggle_"] button {
+      min-height:32px!important;padding:5px 9px!important;margin:7px 0 2px!important;
+      background:#e8edf3!important;border:1px solid #d6dee8!important;border-radius:6px!important;
+      box-shadow:none!important;justify-content:flex-start!important;color:#23354d!important;
+    }
+    .st-key-revamp_route_scroll_fn [class*="st-key-revamp_fn_pod_toggle_"] button p {font-size:12px!important;font-weight:750!important;}
+    .st-key-revamp_route_scroll_fn [class*="st-key-revamp_group_toggle_"] button {
+      min-height:25px!important;padding:3px 8px!important;margin:0 0 0 12px!important;width:calc(100% - 12px)!important;
+      background:transparent!important;border:0!important;border-bottom:1px solid #e6eaf0!important;border-radius:0!important;
+      box-shadow:none!important;justify-content:flex-start!important;color:#516079!important;
+    }
+    .st-key-revamp_route_scroll_fn [class*="st-key-revamp_group_toggle_"] button p {font-size:11px!important;font-weight:650!important;}
+    .fn-workflow-heading {font-size:10px;font-weight:750;letter-spacing:.055em;text-transform:uppercase;margin:6px 0 0 12px;padding:3px 0;color:#64748b;}
+    .fn-workflow-heading::before {content:'';display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px;vertical-align:1px;background:#94a3b8;}
+    .fn-workflow-posted::before {background:#c69b37;}
+    .fn-workflow-assigned::before {background:#4d9272;}
+    .st-key-revamp_route_scroll_fn [class*="st-key-revamp_route_"] button {min-height:0!important;margin:0!important;padding:7px 9px!important;box-shadow:none!important;}
+    .st-key-revamp_route_scroll_fn [class*="st-key-revamp_route_"] button:hover {transform:none!important;box-shadow:none!important;background:#fff!important;}
+
     /* Meaningful route colors only */
     div[class*="st-key-revamp_route_Ready_"] button {border-left:4px solid var(--rv-green)!important}
     div[class*="st-key-revamp_route_Flagged_"] button {border-left:4px solid var(--rv-red)!important;background:#fffafa!important}
@@ -1598,7 +1626,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         ).strip().lower()
 
     auth_user = st.session_state.get("_auth_user") or {}
-    fn_only = _workspace_statuses(auth_user) == ("Field Nation",)
+    fn_only = _workspace_statuses(auth_user) != STATUSES
+    fn_routes_view = auth_user.get("scope") == "field_nation" and st.session_state.get("revamp_status", st.query_params.get("view")) in ("Routes", "Ready", "Flagged", "Over 50 mi")
+    load_pending = not fn_only or fn_routes_view
     auth_email = str(auth_user.get("email", "") or "").strip().lower()
     accessible = [
         pod for pod in PODS
@@ -1669,7 +1699,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     def _route_pod_key(pod):
         return "Global_Digital" if pod == "Digital" else pod
 
-    pending_pods = [] if fn_only else [pod for pod in selected_pods if
+    pending_pods = [] if not load_pending else [pod for pod in selected_pods if
                     _cluster_key(pod) not in st.session_state and
                     not st.session_state.get(f"_revamp_load_attempted_{pod}")]
     if refresh_clicked or pending_pods:
@@ -1762,7 +1792,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     st.session_state["archived_wos"] = archived_wos
     st.session_state["_history_db"] = history_db
 
-    loaded = list(selected_pods) if fn_only else [pod for pod in selected_pods if _cluster_key(pod) in st.session_state]
+    loaded = list(selected_pods) if not load_pending else [pod for pod in selected_pods if _cluster_key(pod) in st.session_state]
     if not loaded:
         def retry_initial_load():
             for pod in selected_pods:
@@ -1787,7 +1817,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     for pod in selected_pods:
         route_pod = _route_pod_key(pod)
         label_sets[route_pod] = _load_bundle_labels(db_engine, route_pod)
-    eligible_ics = [] if fn_only else _eligible_ics(st.session_state.get("ic_df"), mapbox_geocode)
+    eligible_ics = [] if not load_pending else _eligible_ics(st.session_state.get("ic_df"), mapbox_geocode)
     all_routes = []
     seen_saved_routes = set()
     ghosts_by_pod = {
@@ -1802,7 +1832,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     }
     for pod in loaded:
         route_pod = _route_pod_key(pod)
-        for route in ([] if fn_only else st.session_state.get(_cluster_key(pod), [])):
+        for route in ([] if not load_pending else st.session_state.get(_cluster_key(pod), [])):
             if pod != "Digital" and route.get("is_digital"):
                 continue
             if pod == "Digital" and not route.get("is_digital"):
@@ -1873,7 +1903,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     all_routes = [(pod, {**route, '_bundle_label': _bundle_label(route, _bundle_sets_for_pod(pod))}, state, route_hash, nearest)
                   for pod, route, state, route_hash, nearest in all_routes]
     if fn_only:
-        all_routes = [entry for entry in all_routes if entry[2] == "Field Nation"]
+        all_routes = [entry for entry in all_routes if entry[2] == ("Flagged" if fn_routes_view else "Field Nation")]
     else:
         _render_workspace_summary(all_routes, pod_choice, selected_pods)
 
@@ -2154,14 +2184,14 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     with left:
         quiet_context = ((selected_pods, process_pod, process_digital_pool, cluster_store,
                           fetch_open_tasks, eligible_ics, haversine, search, fetch_sent_records_from_sheet)
-                         if not fn_only and cluster_store is not None and fetch_open_tasks is not None else None)
+                         if load_pending and cluster_store is not None and fetch_open_tasks is not None else None)
         st.session_state.pop('_revamp_quiet_visible_keys', None)
         st.session_state.pop('_revamp_quiet_pending', None)
         st.session_state.pop('_revamp_quiet_all_pending', None)
         st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in matching
                                                       if entry[2] in ('Ready', 'Flagged')]
         st.session_state.pop("_revamp_fn_checked_entries", None)
-        fn_refresh_context = (fetch_sent_records_from_sheet, selected_pods, search, merge_same_wo_ghosts) if fn_only else None
+        fn_refresh_context = (fetch_sent_records_from_sheet, selected_pods, search, merge_same_wo_ghosts) if fn_only and status == "Field Nation" else None
         _render_route_list(matching, status, fn_posted, fn_providers, quiet_context, fn_refresh_context)
 
     with right:
@@ -2195,6 +2225,15 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                        f"{_detail_tasks} tasks")
         if nearest:
             st.caption(f"Closest eligible IC: {nearest[0]} · {nearest[1]:.1f} mi")
+        if fn_routes_view and state == "Flagged":
+            st.caption("Select routes on the left to send them to Field Nation.")
+            stops = {}
+            for task in route.get("data", []):
+                address = str(task.get("full") or task.get("addr") or "Unknown address")
+                row = stops.setdefault(address, {"Location": task.get("venue_name") or "Location", "Address": address, "Tasks": 0})
+                row["Tasks"] += 1
+            st.dataframe(list(stops.values()), hide_index=True, use_container_width=True)
+            return
         if state in ("Ready", "Flagged"):
             # Reuse the existing contractor, compensation, routing, FN,
             # bundling and link-generation logic for the selected live route.
