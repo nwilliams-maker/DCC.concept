@@ -955,7 +955,9 @@ def _refresh_fn_route_list(matching, posted, providers, context):
                 fetch_records.clear()
                 sent, ghosts, archived, history = fetch_records()
                 entries = _fn_saved_entries(ghosts, pods, merge)
-                added = len(_fn_route_identities(entries) - old_ids)
+                new_ids = _fn_route_identities(entries) - old_ids
+                added = len(new_ids)
+                st.session_state.setdefault("_revamp_fn_new_routes", set()).update(new_ids)
                 matching = [entry for entry in entries if _entry_matches(entry, "Field Nation", search)]
                 posted = (ghosts or {}).get("_fn_posted", {}) or {}
                 providers = (ghosts or {}).get("_fn_provider", {}) or {}
@@ -1109,6 +1111,8 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     bundle = route.get('_bundle_label') or _bundle_label(route, _bundle_sets_for_pod(pod))
                     if bundle:
                         heading += f" · {bundle}"
+                    if status == "Field Nation" and (pod, str(route.get("wo") or route_hash)) in st.session_state.get("_revamp_fn_new_routes", set()):
+                        heading += " · :green-background[NEW]"
                     label = (f"{heading}\n"
                              f"{('Digital' if pod == 'Global_Digital' else pod)} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
                              f"{tasks} {'task' if tasks == 1 else 'tasks'}")
@@ -1137,6 +1141,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     if st.button(label, key=f"revamp_route_{state_key}_{key}",
                                  type="primary" if selected else "secondary",
                                  use_container_width=True):
+                        st.session_state.get("_revamp_fn_new_routes", set()).discard((pod, str(route.get("wo") or route_hash)))
                         st.session_state["revamp_selected_route"] = key
                         st.rerun(scope="app")
     if st.session_state.pop("_revamp_refresh_bulk_actions", False):

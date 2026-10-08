@@ -263,12 +263,20 @@ rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden,
     assert any('2 new routes added' in item.value for item in app.markdown)
     assert any('width:12px;height:12px' in item.value for item in app.markdown)
     assert any('Houston' in button.label for button in app.button if button.key.startswith('revamp_route_'))
+    assert len([button for button in app.button if ':green-background[NEW]' in button.label]) == 2
+    assert len(app.session_state['_revamp_fn_new_routes']) == 2
     app.button(key='revamp_fn_saved_refresh').click().run()
     assert not app.exception
     assert app.session_state['_main_runs'] == 3
     assert '0 new routes added' in app.session_state['_revamp_fn_refresh_notice']
+    assert len([button for button in app.button if ':green-background[NEW]' in button.label]) == 2
     app.button(key='revamp_fn_pod_toggle_Orange').click().run()
     app.button(key='revamp_fn_pod_toggle_Orange').click().run()
     assert not app.exception
     assert app.session_state['_fetch_step'] == 2
     assert app.button(key='revamp_fn_pod_toggle_Orange').label == 'Orange Pod · 3 routes −'
+    new_card = next(button for button in app.button if ':green-background[NEW]' in button.label)
+    new_card.click().run()
+    assert not app.exception
+    assert len(app.session_state['_revamp_fn_new_routes']) == 1
+    assert len([button for button in app.button if ':green-background[NEW]' in button.label]) == 1
