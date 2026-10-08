@@ -155,3 +155,48 @@ rw._render_route_list(entries, 'Field Nation', {{'posted': '2026-10-08'}}, {{'as
     app.button(key='revamp_group_toggle_Field Nation_Orange_Pending_TX').click().run()
     assert not app.exception
     assert not any('Houston' in button.label for button in app.button if button.key.startswith('revamp_route_'))
+
+
+@pytest.mark.parametrize('pod', ['Blue', 'Green', 'Orange', 'Purple', 'Red', 'Digital'])
+def test_single_assign_saves_name_and_completes_assignment_in_every_pod(pod, monkeypatch):
+    import streamlit as st
+    from migration import data_access as fn_data
+
+    def save(engine, route_hash, provider):
+        st.session_state.setdefault('_assignment_calls', []).append(('save', route_hash, provider))
+        return {'success': True, 'work_order': 'FN10082026-1'}
+
+    def assign(engine, work_order):
+        st.session_state['_assignment_calls'].append(('assign', work_order))
+        return {'success': True, 'wo': 'Installer-10082026-1'}
+
+    monkeypatch.setattr(fn_data, 'mirror_set_fn_provider_by_cluster_hash', save)
+    monkeypatch.setattr(fn_data, 'mark_fn_assigned', assign)
+    route_pod = 'Global_Digital' if pod == 'Digital' else pod
+    source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import revamp_workspace as rw
+st.session_state['_auth_user'] = {{'pod': 'Field Nation', 'scope': 'field_nation', 'tier': 'guest'}}
+st.session_state['revamp_pod'] = {pod!r}
+def forbidden(*a, **k):
+    raise AssertionError('Unexpected regular route action')
+def records():
+    return {{}}, {{{route_pod!r}: [{{'hash': 'route', 'wo': 'FN10082026-1', 'status': 'field_nation', 'city': 'Houston', 'state': 'TX', 'stops': 1, 'task_ids': ['one']}}], '_fn_posted': {{'route': '10/08 12:00 PM'}}}}, set(), {{}}
+records.clear = lambda: st.session_state.update(_saved_cleared=True)
+rw._load_bundle_labels = lambda *args: []
+rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden, object(), forbidden, records)
+'''
+    app = AppTest.from_string(source).run()
+    assert not app.exception
+    assert not any(button.label in ('Save name', 'Assigned') for button in app.button)
+    button = app.button(key=f'revamp_mark_assigned_{route_pod}_route')
+    assert button.label == 'Assign' and button.disabled
+    app.text_input(key=f'revamp_provider_{route_pod}_route').set_value('  Installer  ').run()
+    assert not app.button(key=f'revamp_mark_assigned_{route_pod}_route').disabled
+    app.button(key=f'revamp_mark_assigned_{route_pod}_route').click().run()
+    assert not app.exception
+    assert app.session_state['_assignment_calls'] == [('save', 'route', 'Installer'), ('assign', 'FN10082026-1')]
+    assert app.session_state['_saved_cleared']
+    assert app.success[0].value == 'Assigned to Installer. Onfleet route named Installer-10082026-1.'

@@ -2228,43 +2228,29 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                          value=str(fn_providers.get(route_hash) or ""),
                                          key=f"revamp_provider_{pod}_{route_hash}",
                                          placeholder="Type the rep's name")
-                save_col, assigned_col = st.columns([1, 1])
-                with save_col:
-                    if st.button("Save name", key=f"revamp_save_rep_{pod}_{route_hash}",
-                                 disabled=db_engine is None or not provider.strip(),
-                                 use_container_width=True):
-                        try:
-                            result = fn_data.mirror_set_fn_provider_by_cluster_hash(db_engine, route_hash, provider.strip())
-                            if not result.get("success"):
-                                raise RuntimeError(result.get("skipped") or result.get("error") or "Order not found")
-                            fetch_sent_records_from_sheet.clear()
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(f"Could not save Field Nation rep: {exc}")
-                with assigned_col:
-                    if st.button("Assigned", key=f"revamp_mark_assigned_{pod}_{route_hash}",
-                                 type="primary",
-                                 disabled=db_engine is None or not provider.strip(),
-                                 use_container_width=True):
-                        try:
-                            saved = fn_data.mirror_set_fn_provider_by_cluster_hash(db_engine, route_hash, provider.strip())
-                            if not saved.get("success"):
-                                raise RuntimeError(saved.get("skipped") or saved.get("error") or "Order not found")
-                            result = fn_data.mark_fn_assigned(db_engine, saved["work_order"])
-                            if not result.get("success"):
-                                raise RuntimeError(result.get("error") or "Assignment failed")
-                            fetch_sent_records_from_sheet.clear()
-                            st.session_state.pop(f"route_state_{route_hash}", None)
-                            if result.get("partial"):
-                                st.session_state["_revamp_notice"] = (
-                                    "warning", f"Route moved to Accepted, but Onfleet Route Plan Name needs attention: {result.get('partialReason', 'unknown error')}")
-                            else:
-                                st.session_state["_revamp_notice"] = (
-                                    "success", f"Assigned to {provider.strip()}. Onfleet route named {result.get('wo', 'FN route')}.")
-                            st.session_state["_revamp_show_accepted_next"] = True
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(f"Could not assign Field Nation rep: {exc}")
+                if st.button("Assign", key=f"revamp_mark_assigned_{pod}_{route_hash}",
+                             type="primary",
+                             disabled=db_engine is None or not provider.strip(),
+                             use_container_width=True):
+                    try:
+                        saved = fn_data.mirror_set_fn_provider_by_cluster_hash(db_engine, route_hash, provider.strip())
+                        if not saved.get("success"):
+                            raise RuntimeError(saved.get("skipped") or saved.get("error") or "Order not found")
+                        result = fn_data.mark_fn_assigned(db_engine, saved["work_order"])
+                        if not result.get("success"):
+                            raise RuntimeError(result.get("error") or "Assignment failed")
+                        fetch_sent_records_from_sheet.clear()
+                        st.session_state.pop(f"route_state_{route_hash}", None)
+                        if result.get("partial"):
+                            st.session_state["_revamp_notice"] = (
+                                "warning", f"Route moved to Accepted, but Onfleet Route Plan Name needs attention: {result.get('partialReason', 'unknown error')}")
+                        else:
+                            st.session_state["_revamp_notice"] = (
+                                "success", f"Assigned to {provider.strip()}. Onfleet route named {result.get('wo', 'FN route')}.")
+                        st.session_state["_revamp_show_accepted_next"] = True
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not assign Field Nation rep: {exc}")
         elif state in ("Sent", "Accepted", "Declined", "Finalized"):
             if not saved_route_helpers:
                 st.error("Saved route details are unavailable. Refresh the page.")
