@@ -64,7 +64,7 @@ import revamp_workspace as rw
 st.session_state['_auth_user'] = {{'name': 'Field Nation Dispatch Associate', 'pod': 'Field Nation', 'tier': 'guest', 'scope': 'field_nation'}}
 if '_seeded' not in st.session_state:
     st.session_state['_seeded'] = True
-    st.session_state['revamp_status'] = 'Accepted'
+    st.session_state['revamp_status'] = 'Ready'
     st.session_state['_revamp_show_accepted_next'] = True
     st.query_params['view'] = 'Accepted'
 def forbidden(*args, **kwargs):
@@ -77,7 +77,7 @@ rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden,
 '''
     app = AppTest.from_string(source).run(timeout=15)
     assert not app.exception
-    assert app.radio[0].options == ['Field Nation', 'Routes']
+    assert app.radio[0].options == ['Field Nation']
     assert app.radio[0].value == 'Field Nation'
     assert app.selectbox[0].value == 'All my pods'
     assert not any('Return' in button.label for button in app.button)
@@ -89,7 +89,7 @@ rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden,
     assert any('Dallas' in button.label for button in app.button)
     app.button(key='revamp_fn_saved_refresh').click().run()
     assert not app.exception
-    assert app.radio[0].options == ['Field Nation', 'Routes']
+    assert app.radio[0].options == ['Field Nation']
 
 
 def test_dispatch_navigation_has_one_routes_tab():
@@ -281,34 +281,3 @@ rw.render_workspace(lambda pod: pod in rw.PODS, forbidden, forbidden, forbidden,
     assert not app.exception
     assert len(app.session_state['_revamp_fn_new_routes']) == 1
     assert len([button for button in app.button if ':green-background[NEW]' in button.label]) == 1
-
-
-
-def test_fn_associate_routes_view_shows_only_flagged_routes():
-    source = f"""
-import sys
-sys.path.insert(0, {str(ROOT)!r})
-import streamlit as st
-import revamp_workspace as rw
-st.session_state['_auth_user'] = {{'pod': 'Field Nation', 'scope': 'field_nation', 'tier': 'guest'}}
-st.session_state['revamp_pod'] = 'Orange'
-st.session_state['revamp_status'] = 'Routes'
-st.session_state['clusters_Orange'] = [{{'city': city, 'state': 'TX', 'stops': 1, 'status': status, 'data': [{{'id': city, 'full': city}}]}} for city, status in [('Houston', 'Ready'), ('Dallas', 'Flagged')]]
-rw._route_status = lambda route, *a: route['status']
-rw._eligible_ics = lambda *a: []
-rw._load_bundle_labels = lambda *a: []
-def records():
-    return {{}}, {{}}, set(), {{}}
-records.clear = lambda: None
-def forbidden_dispatch(*a):
-    raise AssertionError('FN associate must not see regular email dispatch actions')
-rw.render_workspace(lambda pod: pod in rw.PODS, lambda *a: None, forbidden_dispatch, lambda *a: 0, None, lambda *a: None, records)
-"""
-    app = AppTest.from_string(source).run()
-    assert not app.exception
-    assert app.radio[0].options == ['Field Nation', 'Routes']
-    cards = [button for button in app.button if button.key.startswith('revamp_route_')]
-    assert len(cards) == 1 and 'Dallas' in cards[0].label and 'Flagged' in cards[0].label
-    assert all('Houston' not in button.label for button in cards)
-    scope = load_functions('revamp_workspace.py', ['_entry_matches'], {'st': SimpleNamespace(session_state={'_auth_user': {'scope': 'field_nation'}}), '_searchable': lambda route: ''})
-    assert not scope['_entry_matches'](('Orange', {}, 'Ready', 'ready', None), 'Routes', '')
