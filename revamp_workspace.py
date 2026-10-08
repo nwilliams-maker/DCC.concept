@@ -473,6 +473,30 @@ def _clear_selection(keys):
         st.session_state[f"revamp_bulk_{key}"] = False
 
 
+def _apply_bulk_fn_results(chosen, saved, skipped):
+    """Settle selections using both original and post-reconciliation hashes."""
+    completed = dict(saved)
+    already_fn = {route_hash: wo for route_hash, wo in skipped if wo != "Already assigned"}
+    resolved = set(completed) | {route_hash for route_hash, _ in skipped}
+    for pod, route, _, original_hash, _ in chosen:
+        current_hash = _route_hash(route)
+        if original_hash not in resolved and current_hash not in resolved:
+            continue
+        _clear_selection([f"{pod}:{original_hash}", f"{pod}:{current_hash}"])
+        if current_hash != original_hash:
+            pool_key = "global_digital_clusters" if pod in ("Digital", "Global_Digital") else f"clusters_{pod}"
+            st.session_state[pool_key] = [route if _route_hash(live) == original_hash else live
+                                          for live in st.session_state.get(pool_key, [])]
+        if original_hash in completed or current_hash in completed or original_hash in already_fn or current_hash in already_fn:
+            for route_hash in {original_hash, current_hash}:
+                st.session_state[f"route_state_{route_hash}"] = "field_nation"
+                st.session_state[f"reverted_{route_hash}"] = False
+        if st.session_state.get("revamp_selected_route") in {f"{pod}:{original_hash}", f"{pod}:{current_hash}"}:
+            st.session_state.pop("revamp_selected_route", None)
+    for key in ("_revamp_quiet_visible_keys", "_revamp_quiet_pending", "_revamp_quiet_all_pending", "_revamp_fn_checked_entries"):
+        st.session_state.pop(key, None)
+
+
 def _fn_stage(route_hash, posted, providers):
     if str(providers.get(route_hash) or "").strip():
         return "Assigned"
@@ -2171,22 +2195,21 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 db_engine, [(pod, route) for pod, route, _, _, _ in chosen], fn_due,
                 assign_tasks_to_fn_team, fn_team_id, fn_worker_id,
             )
-            for route_hash, _ in saved:
-                st.session_state[f"route_state_{route_hash}"] = "field_nation"
-                st.session_state[f"reverted_{route_hash}"] = False
-            _clear_selection([f"{pod}:{route_hash}" for pod, _, _, route_hash, _ in chosen
-                              if route_hash in {saved_hash for saved_hash, _ in saved}])
-            if saved:
+            _apply_bulk_fn_results(chosen, saved, skipped)
+            if saved or skipped:
                 fetch_sent_records_from_sheet.clear()
-                st.success(f"Saved {len(saved)} route(s) to Field Nation.")
-            if skipped:
-                st.info(f"{len(skipped)} route(s) were already assigned.")
-            if errors:
+                message = f"Moved {len(saved)} route(s) to Field Nation."
+                if skipped:
+                    message += f" {len(skipped)} route(s) were already assigned."
+                if errors:
+                    message += f" {len(errors)} route(s) could not be assigned: " + "; ".join(msg for _, msg in errors[:3])
+                st.session_state["_revamp_notice"] = ("warning" if errors else "success", message)
+                if not errors:
+                    st.session_state["_revamp_show_fn_next"] = True
+                st.rerun()
+            elif errors:
                 st.error(f"{len(errors)} route(s) could not be assigned: " +
                          "; ".join(msg for _, msg in errors[:3]))
-            elif saved:
-                st.session_state["_revamp_show_fn_next"] = True
-                st.rerun()
 
     left, right = st.columns([1.75, 3.25], gap="large")
     with left:
