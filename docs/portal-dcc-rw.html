@@ -297,10 +297,9 @@
                     const missingTasks = Array.isArray(result && result.missingTasks) ? result.missingTasks : [];
                     const missingCount = Number(result && result.missingTaskCount) || missingTasks.length;
                     const missingMessage = missingCount ? missingCount + " tasks no longer in OnFleet, check with Dispatcher." : "";
-                    const missingAddresses = missingTasks.map((task) => "<li>" + esc(task.address || "Address unavailable") + "</li>").join("");
-                    const missingHtml = missingCount ? '<div class="mt-4 text-left mx-auto" style="max-width:600px;"><p class="font-bold text-red-600">' + esc(missingMessage) + '</p><p class="mt-2 font-semibold">Affected addresses:</p><ul class="list-disc pl-6 mt-2 text-sm">' + missingAddresses + '</ul></div>' : "";
+                    const missingAddresses = [...new Set(missingTasks.map(task => String(task.address || "Address unavailable")))].map(address => "<li>" + esc(address) + "</li>").join("");
+                    const missingHtml = missingCount ? '<details class="mt-4 text-left mx-auto text-sm text-slate-600" style="max-width:500px;"><summary class="cursor-pointer font-semibold">View affected addresses</summary><ul class="list-disc pl-6 mt-2">' + missingAddresses + '</ul></details>' : "";
                     const onfleetOK = result && result.onfleetSuccess === true;
-                    const errMsg = (result && (result.onfleetMsg || result.error || result.routeMsg)) || "Unknown error — please screenshot this and contact dispatch.";
                     if (onfleetOK && !missingCount && result.routeSuccess === true) {
                         successContainer.innerHTML = `
                             <div class="text-7xl mb-6">✅</div>
@@ -308,14 +307,14 @@
                             <p class="text-slate-500 mt-4 font-medium text-lg">The route has been successfully pushed to your Onfleet app.<br>You may now close this window.</p>
                         `;
                     } else {
-                        // ONFLEET FAILED UI — show real error so dispatch can diagnose
-                        successContainer.innerHTML = `
-                            <div class="text-7xl mb-6">⚠️</div>
-                            <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Route Accepted, BUT...</h2>
-                            <p class="text-red-500 mt-4 font-bold text-lg">We couldn't automatically push the tasks to your Onfleet app.</p>
-                            <p class="text-slate-700 mt-2 font-medium text-sm" style="max-width:600px;margin-left:auto;margin-right:auto;word-break:break-word;">${missingCount ? esc(missingMessage) : esc(errMsg)}</p>\n                            ${missingHtml}
-                            <p class="text-slate-500 mt-6 font-medium text-sm">Our dispatch team has been notified and will manually assign your tasks shortly.</p>
-                        `;
+                        // Keep technical diagnostics server-side; contractor sees actionable plain language.
+                        successContainer.innerHTML = \`
+                            <div class="text-5xl mb-5">⚠️</div>
+                            <h2 class="text-2xl font-bold text-slate-900">Route accepted</h2>
+                            <p class="text-slate-700 mt-4 text-base">Some tasks could not be added to OnFleet. Please contact your dispatcher before starting.</p>
+                            ${missingCount ? '<p class="text-slate-600 mt-3 text-sm">' + missingCount + ' task' + (missingCount === 1 ? '' : 's') + ' missing from OnFleet.</p>' : ''}
+                            ${missingHtml}
+                        \`;
                     }
                 } else {
                     successContainer.innerHTML = `
