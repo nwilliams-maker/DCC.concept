@@ -152,6 +152,10 @@ def reconcile_route_once(engine: sa.Engine, wo: str, plan_names: dict[str, dict[
         return {"status": "healthy", "wo": wo, "routePlanId": exact.get("id"), "source": "name"}
 
     plan_ids, workers, task_errors = _task_state(task_ids)
+    if task_errors:
+        result = {"status": "needs_review", "wo": wo, "reason": "OnFleet task lookup failed", "taskErrors": task_errors}
+        _log_result(engine, wo, result)
+        return result
     if len(plan_ids) == 1:
         plan_id = next(iter(plan_ids))
         result = {"status": "healthy", "wo": wo, "routePlanId": plan_id, "source": "task_link"}
