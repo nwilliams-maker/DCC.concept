@@ -70,25 +70,31 @@ def _recent_route_plans() -> dict[str, dict[str, Any]]:
     return {str(p.get("name") or "").strip(): p for p in plans if p.get("name")}
 
 
-def _task_state(task_ids: list[str]) -> tuple[set[str], set[str], list[str]]:
+def _task_state(task_ids: list[str]) -> tuple[set[str], set[str], list[str], list[str], list[str]]:
     headers = _fx._onfleet_auth_header()
     plan_ids: set[str] = set()
     workers: set[str] = set()
     errors: list[str] = []
+    valid: list[str] = []
+    missing: list[str] = []
     for tid in task_ids:
         try:
             resp = _fx.onfleet_fetch_with_backoff("get", f"{_fx.ONFLEET_BASE}/tasks/{tid}")
+            if resp.status_code == 404:
+                missing.append(tid)
+                continue
             if resp.status_code != 200:
                 errors.append(f"{tid}:HTTP {resp.status_code}")
                 continue
             task = resp.json()
+            valid.append(tid)
             if task.get("routePlan"):
                 plan_ids.add(str(task["routePlan"]))
             if task.get("worker"):
                 workers.add(str(task["worker"]))
         except Exception as exc:
             errors.append(f"{tid}:{type(exc).__name__}")
-    return plan_ids, workers, errors
+    return plan_ids, workers, errors, valid, missing
 
 
 def _log_result(engine: sa.Engine, wo: str, result: dict[str, Any]) -> None:
@@ -151,7 +157,11 @@ def reconcile_route_once(engine: sa.Engine, wo: str, plan_names: dict[str, dict[
     if exact:
         return {"status": "healthy", "wo": wo, "routePlanId": exact.get("id"), "source": "name"}
 
-    plan_ids, workers, task_errors = _task_state(task_ids)
+    plan_ids, workers, task_errors, valid_ids, missing_ids = _task_state(task_ids)
+    if task_errors or not valid_ids:
+        result = {"status": "needs_review", "wo": wo, "reason": "OnFleet task lookup failed or no usable tasks", "taskErrors": task_errors, "missingTaskIds": missing_ids, "verifiedTaskIds": valid_ids}
+        _log_result(engine, wo, result)
+        return result
     if len(plan_ids) == 1:
         plan_id = next(iter(plan_ids))
         result = {"status": "healthy", "wo": wo, "routePlanId": plan_id, "source": "task_link"}
@@ -173,7 +183,7 @@ def reconcile_route_once(engine: sa.Engine, wo: str, plan_names: dict[str, dict[
         _log_result(engine, wo, result)
         return result
 
-    ordered = str(payload.get("stopOrder") or payload.get("stop_order") or ",".join(task_ids))
+    ordered = ",".join(t for t in _ids(payload.get("stopOrder") or payload.get("stop_order") or task_ids) if t in set(valid_ids))
     try:
         comp = float(row["comp"] if row["comp"] is not None else payload.get("comp") or 0)
     except (TypeError, ValueError):
@@ -181,12 +191,12 @@ def reconcile_route_once(engine: sa.Engine, wo: str, plan_names: dict[str, dict[
 
     repair = _fx.apply_onfleet_decision(
         decision="accept",
-        task_ids=",".join(task_ids),
+        task_ids=",".join(valid_ids),
         wo=wo,
         phone=phone,
         comp=comp,
         due=str(row["due"] or payload.get("due") or ""),
-        digital_task_ids=str(payload.get("digitalTaskIds") or ""),
+        digital_task_ids=",".join(t for t in _ids(payload.get("digitalTaskIds") or "") if t in set(valid_ids)),
         stop_order=ordered,
     )
     route_id = None
@@ -194,10 +204,12 @@ def reconcile_route_once(engine: sa.Engine, wo: str, plan_names: dict[str, dict[
     if repair.get("routeSuccess") and "Route created:" in route_msg:
         route_id = route_msg.split("Route created:", 1)[1].strip() or None
     result = {
-        "status": "repaired" if repair.get("routeSuccess") else "repair_failed",
+        "status": ("partially_repaired" if missing_ids else "repaired") if repair.get("routeSuccess") and not repair.get("route_incomplete") else "repair_failed",
         "wo": wo,
         "routePlanId": route_id,
         "taskCount": len(task_ids),
+        "verifiedTaskIds": valid_ids,
+        "missingTaskIds": missing_ids,
         "onfleet": repair,
         "taskErrorsBeforeRepair": task_errors,
     }
