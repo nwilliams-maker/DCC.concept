@@ -6564,6 +6564,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     key=_bundle_select_key,
                     label_visibility="collapsed",
                     placeholder="Select nearby routes to preview a merged version...",
+                    on_change=lambda: st.rerun(scope="app"),
                 )
 
                 # 🔁 UNBUNDLE — shown when this cluster is currently a bundle
