@@ -254,6 +254,82 @@ def _load_onfleet_phone_map(force: bool = False) -> dict[str, str]:
     return phone_map
 
 
+def complete_venue_tasks(task_ids: list[str], wo: str) -> dict[str, Any]:
+    """Find additional unassigned tasks at the same exact destination and WO.
+
+    Fail closed: a failed or truncated OnFleet scan cannot silently expand a route.
+    The original tasks remain eligible even if venue expansion is unavailable.
+    """
+    original = list(dict.fromkeys(_task_ids(task_ids)))
+    if not original:
+        return {"taskIds": [], "addedTaskIds": [], "warning": ""}
+
+    def address_key(task: dict) -> str:
+        destination = task.get("destination") or {}
+        if not isinstance(destination, dict):
+            return ""
+        address = destination.get("address") or {}
+        if not isinstance(address, dict):
+            return ""
+        parts = [address.get("number"), address.get("street"), address.get("city"),
+                 address.get("state"), address.get("postalCode")]
+        return "|".join(re.sub(r"\\s+", " ", str(v or "").strip().lower()) for v in parts) if all(parts) else ""
+
+    def wo_matches(task: dict) -> bool:
+        return any(str(m.get("name") or "").upper() == "WO_NAME" and
+                   str(m.get("value") or "").strip() == wo
+                   for m in (task.get("metadata") or []) if isinstance(m, dict))
+
+    keys = set()
+    for tid in original:
+        response = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}", max_retries=2)
+        if response.status_code == 200:
+            key = address_key(response.json())
+            if key:
+                keys.add(key)
+    if not keys:
+        return {"taskIds": original, "addedTaskIds": [], "warning": "No verified venue addresses"}
+
+    now = int(time.time() * 1000)
+    since = now - 45 * 86400 * 1000
+    candidates = []
+    seen = set()
+    last_id = None
+    for page in range(40):
+        params = {"from": since, "to": now, "state": 0}
+        if last_id:
+            params["lastId"] = last_id
+        response = requests.get(f"{ONFLEET_BASE}/tasks/all", headers=_onfleet_auth_header(), params=params, timeout=30)
+        if response.status_code != 200:
+            return {"taskIds": original, "addedTaskIds": [], "warning": f"Venue lookup HTTP {response.status_code}"}
+        data = response.json()
+        batch = data if isinstance(data, list) else (data.get("tasks") or [])
+        if not batch:
+            break
+        for task in batch:
+            tid = str(task.get("id") or "")
+            if tid and tid not in seen:
+                seen.add(tid)
+                if tid not in original and task.get("state") == 0 and not task.get("worker") and not task.get("routePlan") and address_key(task) in keys and wo_matches(task):
+                    candidates.append(tid)
+        next_id = str(batch[-1].get("id") or "")
+        if len(batch) < 1000 or not next_id or next_id == last_id:
+            break
+        last_id = next_id
+    else:
+        return {"taskIds": original, "addedTaskIds": [], "warning": "Venue lookup pagination limit reached"}
+
+    added = []
+    for tid in candidates:
+        try:
+            task = assert_tasks_available([tid])[tid]
+            if address_key(task) in keys and wo_matches(task) and not task.get("routePlan"):
+                added.append(tid)
+        except (TaskAssignmentConflict, KeyError):
+            continue
+    return {"taskIds": original + added, "addedTaskIds": added, "warning": ""}
+
+
 def assign_tasks_to_worker(
     worker_phone: str,
     task_ids_str: str,
@@ -376,6 +452,16 @@ def apply_onfleet_decision(
     if decision != "accept" or not (task_ids or "").strip():
         return {"onfleetSuccess": True, "onfleetMsg": "", "routeSuccess": False, "routeMsg": "", "partial": False}
 
+    venue_additions = []
+    venue_warning = ""
+    try:
+        expansion = complete_venue_tasks(_task_ids(task_ids), wo)
+        venue_additions = expansion["addedTaskIds"]
+        venue_warning = expansion["warning"]
+        task_ids = ",".join(expansion["taskIds"])
+    except Exception as exc:
+        venue_warning = f"Venue task lookup failed ({type(exc).__name__})"
+
     assign_result = assign_tasks_to_worker(phone, task_ids, wo, comp, due, digital_task_ids)
     onfleet_success = assign_result.get("success", False)
     onfleet_msg = (
@@ -406,6 +492,9 @@ def apply_onfleet_decision(
         "routeMsg": route_msg,
         "partial": partial,
         "route_incomplete": route_incomplete,
+        "venueAddedTaskIds": venue_additions,
+        "venueAddedTaskCount": len(venue_additions),
+        "venueLookupWarning": venue_warning,
     }
 
 
