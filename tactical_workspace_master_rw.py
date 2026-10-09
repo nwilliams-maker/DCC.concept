@@ -299,6 +299,14 @@ headers = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()
 # TTL is the staleness ceiling — if a Dispatcher's view is more than a minute
 # old they can hit Sync Routes; if it's less, the cached result is fresh
 # enough for dispatching decisions.
+def _returned_from_fn_to_org(task, sent_record):
+    """An OnFleet state=0 task now in the org is no longer parked with Field Nation."""
+    container = task.get('container') or {}
+    return (str(container.get('type', '')).upper() in ('ORGANIZATION', 'ORG')
+            and not task.get('worker')
+            and str((sent_record or {}).get('status', '')).lower() == 'field_nation')
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
     """Returns dict with 'tasks' (deduped list of task dicts), 'target_team_ids',
@@ -4289,7 +4297,7 @@ def process_digital_pool(master_bar=None, warm_only=False):
         _t_id = str(t.get('id', '')).strip()
         if c_type == 'WORKER':
             continue
-        if t.get('worker') and _t_id in fresh_sent_db:
+        if not _returned_from_fn_to_org(t, fresh_sent_db.get(_t_id)) and t.get('worker') and _t_id in fresh_sent_db:
             if str(fresh_sent_db[_t_id].get('status', '')).lower() in (
                     'sent', 'accepted', 'declined', 'finalized', 'field_nation'):
                 continue
@@ -4387,6 +4395,8 @@ def process_digital_pool(master_bar=None, warm_only=False):
         # --- 4. ASSIGN STATUS & POOL ---
         t_status = fresh_sent_db.get(t['id'], {}).get('status', 'ready').lower() if t['id'] in fresh_sent_db else 'ready'
         t_wo = fresh_sent_db.get(t['id'], {}).get('wo', 'none') if t['id'] in fresh_sent_db else 'none'
+        if _returned_from_fn_to_org(t, fresh_sent_db.get(t['id'])):
+            t_status, t_wo = 'ready', 'none'
         
         pool.append({
             "id": t['id'], "city": addr.get('city', 'Unknown'), "state": stt,
@@ -4747,7 +4757,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 if c_type == 'WORKER':
                     _skipped_assigned += 1
                     continue
-                if t.get('worker') and _t_id in fresh_sent_db:
+                if not _returned_from_fn_to_org(t, fresh_sent_db.get(_t_id)) and t.get('worker') and _t_id in fresh_sent_db:
                     _sb_stat = str(fresh_sent_db[_t_id].get('status', '')).lower()
                     if _sb_stat in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
                         _skipped_assigned += 1
@@ -4847,6 +4857,8 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 if t['id'] in fresh_sent_db:
                     t_status = fresh_sent_db[t['id']].get('status', 'ready').lower()
                     t_wo = fresh_sent_db[t['id']].get('wo', 'none')
+                    if _returned_from_fn_to_org(t, fresh_sent_db[t['id']]):
+                        t_status, t_wo = 'ready', 'none'
             
                 if stt not in config['states']:
                     _skipped_out_of_pod_states += 1
@@ -7710,7 +7722,7 @@ def smart_sync_pod(pod_name):
         _t_id_ss = str(t.get('id', '')).strip()
         if c_type == 'WORKER':
             continue
-        if t.get('worker') and _t_id_ss in fresh_sent_db:
+        if not _returned_from_fn_to_org(t, fresh_sent_db.get(_t_id_ss)) and t.get('worker') and _t_id_ss in fresh_sent_db:
             _sb_stat_ss = str(fresh_sent_db[_t_id_ss].get('status', '')).lower()
             if _sb_stat_ss in ('sent', 'accepted', 'declined', 'finalized', 'field_nation'):
                 continue
@@ -7787,6 +7799,8 @@ def smart_sync_pod(pod_name):
 
         t_status = fresh_sent_db.get(t['id'], {}).get('status', 'ready').lower() if t['id'] in fresh_sent_db else 'ready'
         t_wo = fresh_sent_db.get(t['id'], {}).get('wo', 'none') if t['id'] in fresh_sent_db else 'none'
+        if _returned_from_fn_to_org(t, fresh_sent_db.get(t['id'])):
+            t_status, t_wo = 'ready', 'none'
 
         # Match process_pod's logic: a task is "removal" only if it's on the CVS Kiosk
         # Removal team AND its task type contains a removal keyword. Without this, CVS
