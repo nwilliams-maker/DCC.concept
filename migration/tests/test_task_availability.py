@@ -54,6 +54,19 @@ def test_exact_same_worker_and_wo_retry_allowed_but_other_wo_blocked():
             assert_tasks_available('a', fetch_task=lambda _: existing, wo=wo, worker_id=worker, allow_existing=True)
 
 
+def test_same_worker_manual_assignment_without_wo_metadata_is_reused():
+    existing = task(state=1, worker='worker', metadata=[])
+    assert assert_tasks_available('a', fetch_task=lambda _: existing, wo='NEW-WO', worker_id='worker', allow_existing=True)['a'] == existing
+    with pytest.raises(TaskAssignmentConflict):
+        assert_tasks_available('a', fetch_task=lambda _: existing, wo='NEW-WO', worker_id='different', allow_existing=True)
+
+
+def test_same_worker_different_wo_remains_blocked():
+    existing = task(state=1, worker='worker', metadata=[{'name': 'WO_NAME', 'value': 'OTHER-WO'}])
+    with pytest.raises(TaskAssignmentConflict):
+        assert_tasks_available('a', fetch_task=lambda _: existing, wo='NEW-WO', worker_id='worker', allow_existing=True)
+
+
 @pytest.fixture
 def assignment(monkeypatch):
     monkeypatch.setenv('ONFLEET_KEY', 'test-key')
