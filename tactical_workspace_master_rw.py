@@ -575,11 +575,11 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
 
 
 def _get_open_tasks_snapshot(force=False):
+    if force:
+        _fetch_onfleet_open_tasks_cached.clear()
     if DB_ENGINE is None or os.environ.get('DCC_TASK_SNAPSHOT_ENABLED') != '1':
         return _fetch_onfleet_open_tasks_cached()
     from migration.onfleet_snapshot import get_snapshot
-    if force:
-        _fetch_onfleet_open_tasks_cached.clear()
     return get_snapshot(DB_ENGINE, _fetch_onfleet_open_tasks_cached, force=force)
 
 
