@@ -574,6 +574,15 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
     }
 
 
+def _get_open_tasks_snapshot(force=False):
+    if DB_ENGINE is None or os.environ.get('DCC_TASK_SNAPSHOT_ENABLED') != '1':
+        return _fetch_onfleet_open_tasks_cached()
+    from migration.onfleet_snapshot import get_snapshot
+    if force:
+        _fetch_onfleet_open_tasks_cached.clear()
+    return get_snapshot(DB_ENGINE, _fetch_onfleet_open_tasks_cached, force=force)
+
+
 st.set_page_config(
     page_title="Terraboost Media: Dispatch Command Center", layout="wide",
     initial_sidebar_state="collapsed" if os.environ.get("DCC_REVAMP_UI") == "1" else "auto",
@@ -4206,7 +4215,7 @@ def process_digital_pool(master_bar=None, warm_only=False):
     # top of this file. If a Dispatcher already pulled within the last 60s, this
     # returns instantly. Digital tab + every pod tab now share one pull.
     try:
-        _onfleet_data = _fetch_onfleet_open_tasks_cached()
+        _onfleet_data = _get_open_tasks_snapshot()
     except Exception as _e:
         if not warm_only: st.error(f"Onfleet API Error: {_e}")
         _log_err("process_digital_pool", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -4589,11 +4598,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
             # The manual Check new tasks action must bypass the 60-second
             # process-wide Onfleet cache. Clear once before a multi-pod run;
             # subsequent pods reuse this fresh result.
-            if refresh_tasks:
-                _fetch_onfleet_open_tasks_cached.clear()
-            _onfleet_data = _fetch_onfleet_open_tasks_cached(
-                _progress_callback=_task_download_progress
-            )
+            _onfleet_data = _get_open_tasks_snapshot(force=refresh_tasks)
         except Exception as _e:
             if not warm_only: st.error(f"Onfleet API Error: {_e}")
             _log_err("process_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -7644,7 +7649,7 @@ def smart_sync_pod(pod_name):
     # routing it through the shared cache eliminates the worst rate-budget burner
     # in the app.
     try:
-        _onfleet_data = _fetch_onfleet_open_tasks_cached()
+        _onfleet_data = _get_open_tasks_snapshot()
     except Exception as _e:
         st.error(f"Onfleet API Error: {_e}")
         _log_err("smart_sync_pod", f"shared pull failed: {type(_e).__name__}: {_e}")
@@ -8695,7 +8700,7 @@ def run_pod_tab(pod_name):
     if not _skip_reclaim:
         st.session_state[_reclaim_ts_key] = _reclaim_now
         try:
-            _reclaim_pull = _fetch_onfleet_open_tasks_cached()
+            _reclaim_pull = _get_open_tasks_snapshot()
             _fresh_state0 = {str(t.get('id', '')).strip() for t in _reclaim_pull.get('tasks', [])}
         except Exception as _rec_e:
             _log_err(f"unassign_reclaim/{pod_name}/fetch", _rec_e)
