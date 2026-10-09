@@ -452,6 +452,16 @@ def apply_onfleet_decision(
     if decision != "accept" or not (task_ids or "").strip():
         return {"onfleetSuccess": True, "onfleetMsg": "", "routeSuccess": False, "routeMsg": "", "partial": False}
 
+    venue_additions = []
+    venue_warning = ""
+    try:
+        expansion = complete_venue_tasks(_task_ids(task_ids), wo)
+        venue_additions = expansion["addedTaskIds"]
+        venue_warning = expansion["warning"]
+        task_ids = ",".join(expansion["taskIds"])
+    except Exception as exc:
+        venue_warning = f"Venue task lookup failed ({type(exc).__name__})"
+
     assign_result = assign_tasks_to_worker(phone, task_ids, wo, comp, due, digital_task_ids)
     onfleet_success = assign_result.get("success", False)
     onfleet_msg = (
@@ -482,6 +492,9 @@ def apply_onfleet_decision(
         "routeMsg": route_msg,
         "partial": partial,
         "route_incomplete": route_incomplete,
+        "venueAddedTaskIds": venue_additions,
+        "venueAddedTaskCount": len(venue_additions),
+        "venueLookupWarning": venue_warning,
     }
 
 
