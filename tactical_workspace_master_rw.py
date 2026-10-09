@@ -299,7 +299,7 @@ headers = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()
 # TTL is the staleness ceiling — if a Dispatcher's view is more than a minute
 # old they can hit Sync Routes; if it's less, the cached result is fresh
 # enough for dispatching decisions.
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
     """Returns dict with 'tasks' (deduped list of task dicts), 'target_team_ids',
     'esc_team_ids', 'cvs_remov_team_ids', '_page_count', '_hit_cap'.
