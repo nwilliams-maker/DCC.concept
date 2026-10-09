@@ -6914,10 +6914,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         with _disp_c1:
             _gen_clicked = st.button(btn_label, type="primary", key=f"gbtn_{pod_name}_{cluster_hash}", disabled=not is_unlocked or is_fn or _in_preview or _email_paused, use_container_width=True, help=("Confirm or clear the bundle preview before dispatching." if _in_preview else None))
         with _disp_c2:
-            if route_state != "email_sent":
-                fn_checked = st.checkbox("Assign to FN", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")
-            else:
-                fn_checked = is_fn
+            # Allow an already-sent route to be transferred to Field Nation.
+            # The save below still verifies task ownership before committing.
+            fn_checked = st.checkbox("Assign to FN", value=is_fn, key=f"fn_check_{pod_name}_{cluster_hash}")
         _resume_generate = st.session_state.pop(f"_resume_generate_{pod_name}_{cluster_hash}", False)
         if (_gen_clicked or (_resume_generate and is_unlocked and not is_fn and not _in_preview)) and not email_dispatch_paused(DB_ENGINE):
             if not is_already_sent and not _wp_order:
@@ -7190,7 +7189,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
 
     # --- 🌐 FIELD NATION PERSISTENCE (CHECKBOX) ---
 
-    if route_state != "email_sent":
+    if True:
         # Reuse the checkbox rendered above for assignment and revocation.
         if fn_checked and not is_fn:
             if not _wp_order:
