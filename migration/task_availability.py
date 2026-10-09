@@ -22,7 +22,7 @@ def assert_tasks_available(
     ids: Any, *, fetch_task: Callable[[str], dict], wo: str = "",
     worker_id: str | None = None, allow_existing: bool = False,
 ) -> dict[str, dict]:
-    """Check every task before any write; only exact same-worker/WO retries pass."""
+    """Check every task before writes; allow same-worker retries with no conflicting WO metadata."""
     def check(tid):
         try:
             task = fetch_task(tid)
@@ -33,7 +33,7 @@ def assert_tasks_available(
             worker = str(worker.get("id") or "") if isinstance(worker, dict) else str(worker or "")
             prior_wo = next((str(m.get("value") or "").strip() for m in task.get("metadata") or []
                              if str(m.get("name") or "").upper() == "WO_NAME"), "")
-            same_assignment = bool(allow_existing and wo and worker_id and worker == worker_id and prior_wo == wo)
+            same_assignment = bool(allow_existing and worker_id and worker == worker_id and (not prior_wo or prior_wo == wo))
             if state == 3 or bool((task.get("completionDetails") or {}).get("success")):
                 reason = "already completed in OnFleet"
             elif state not in (0, 1, 2) or isinstance(state, bool):
