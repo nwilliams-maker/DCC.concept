@@ -299,6 +299,53 @@ def process_decision(
     except (TypeError, ValueError):
         agreed_comp = float(comp or 0)
 
+    # Validate current OnFleet task IDs before dispatch. Missing IDs are excluded,
+    # while transient lookup failures must block dispatch rather than be guessed away.
+    missing_tasks = []
+    if decision == "accept" and (task_ids or "").strip():
+        raw_ids = _fx._task_ids(task_ids)
+        valid_ids = []
+        lookup_errors = []
+        stop_data = route_payload.get("stopData") or []
+        if isinstance(stop_data, str):
+            try:
+                stop_data = json.loads(stop_data)
+            except (TypeError, ValueError):
+                stop_data = []
+        if not isinstance(stop_data, list):
+            stop_data = []
+        for tid in raw_ids:
+            try:
+                response = _fx.onfleet_fetch_with_backoff("get", f"{_fx.ONFLEET_BASE}/tasks/{tid}", max_retries=2)
+                if response.status_code == 404:
+                    matching = next((stop for stop in stop_data if isinstance(stop, dict) and
+                                     str(stop.get("taskId") or stop.get("task_id") or stop.get("id") or "") == tid), {})
+                    address = matching.get("address") or matching.get("streetAddress") or matching.get("street") or "Address unavailable"
+                    if isinstance(address, dict):
+                        address = address.get("unparsed") or address.get("street") or "Address unavailable"
+                    missing_tasks.append({"taskId": tid, "address": str(address)})
+                elif response.status_code == 200 and str(response.json().get("id") or "") == tid:
+                    valid_ids.append(tid)
+                else:
+                    lookup_errors.append(f"{tid}: HTTP {response.status_code}")
+            except Exception as exc:
+                lookup_errors.append(f"{tid}: {type(exc).__name__}")
+        if lookup_errors:
+            return {"success": False, "onfleetSuccess": False, "routeSuccess": False,
+                    "error": "OnFleet task verification unavailable. Check with Dispatcher.",
+                    "onfleetMsg": "OnFleet task verification unavailable. Check with Dispatcher.",
+                    "taskErrors": lookup_errors}
+        if missing_tasks and not valid_ids:
+            message = f"{len(missing_tasks)} tasks no longer in OnFleet, check with Dispatcher."
+            return {"success": False, "onfleetSuccess": False, "routeSuccess": False,
+                    "error": message, "onfleetMsg": message, "missingTasks": missing_tasks,
+                    "missingTaskCount": len(missing_tasks)}
+        if missing_tasks:
+            task_ids = ",".join(valid_ids)
+            stop_order = ",".join(t for t in _fx._task_ids(stop_order or task_ids) if t in set(valid_ids))
+            route_payload = dict(route_payload)
+            route_payload["missingOnfleetTasks"] = missing_tasks
+
     onfleet_result: dict[str, Any] = {"onfleetSuccess": True, "onfleetMsg": "", "routeSuccess": False, "routeMsg": "", "partial": False}
     if decision == "accept" and (task_ids or "").strip():
         try:
@@ -314,6 +361,14 @@ def process_decision(
             )
         except Exception as exc:  # noqa: BLE001 -- never let an Onfleet failure block the status write
             onfleet_result = {"onfleetSuccess": False, "onfleetMsg": f"Onfleet exception: {exc}", "routeSuccess": False, "routeMsg": "", "partial": True}
+
+    if missing_tasks:
+        message = f"{len(missing_tasks)} tasks no longer in OnFleet, check with Dispatcher."
+        onfleet_result["missingTasks"] = missing_tasks
+        onfleet_result["missingTaskCount"] = len(missing_tasks)
+        onfleet_result["missingTasksMsg"] = message
+        onfleet_result["partial"] = True
+        onfleet_result["route_incomplete"] = True
 
     if decision == "accept" and onfleet_result.get("assignmentBlocked") and not onfleet_result.get("onfleetSuccess"):
         return {"success": False, "error": onfleet_result.get("onfleetMsg"), **onfleet_result}
