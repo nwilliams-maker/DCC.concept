@@ -196,7 +196,7 @@ def reconcile_route_once(engine: sa.Engine, wo: str, plan_names: dict[str, dict[
         phone=phone,
         comp=comp,
         due=str(row["due"] or payload.get("due") or ""),
-        digital_task_ids=str(payload.get("digitalTaskIds") or ""),
+        digital_task_ids=",".join(t for t in _ids(payload.get("digitalTaskIds") or "") if t in set(valid_ids)),
         stop_order=ordered,
     )
     route_id = None
