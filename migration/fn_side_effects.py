@@ -322,10 +322,10 @@ def complete_venue_tasks(task_ids: list[str], wo: str) -> dict[str, Any]:
     added = []
     for tid in candidates:
         try:
-            task = assert_tasks_available([tid])[tid]
+            task = assert_tasks_available([tid], wo=wo)[tid]
             if address_key(task) in keys and wo_matches(task) and not task.get("routePlan"):
                 added.append(tid)
-        except (TaskAssignmentConflict, KeyError):
+        except Exception:  # Candidate failed fresh availability check; do not attach it
             continue
     return {"taskIds": original + added, "addedTaskIds": added, "warning": ""}
 
