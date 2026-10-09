@@ -7192,9 +7192,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
     if True:
         # Reuse the checkbox rendered above for assignment and revocation.
         if fn_checked and not is_fn:
+            # Field Nation is a tracking transfer, not a contractor dispatch.
+            # Google Maps routing is optional here: retain the original stop
+            # order when route optimization is unavailable (RoutePlanningError).
+            # Do not block the transfer for a missing contractor road route.
             if not _wp_order:
-                st.error("The road route could not be calculated. Retry before assigning so mileage and pay use a complete route.")
-                return
+                _ordered_route_addrs = list(stop_metrics)
+                ordered_stop_metrics = {addr: stop_metrics[addr] for addr in _ordered_route_addrs}
             # Persist the FN route before changing the local UI state.
             home = _ic_home_loc(ic, f"{cluster['center'][0]},{cluster['center'][1]}")
             _fn_due = st.session_state.get(f"dd_{pod_name}_{cluster_hash}", datetime.now().date()+timedelta(DEFAULT_DUE_DAYS))
