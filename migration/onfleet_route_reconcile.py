@@ -158,6 +158,25 @@ def reconcile_route_once(engine: sa.Engine, wo: str, plan_names: dict[str, dict[
         return {"status": "healthy", "wo": wo, "routePlanId": exact.get("id"), "source": "name"}
 
     plan_ids, workers, task_errors, valid_ids, missing_ids = _task_state(task_ids)
+    if missing_ids:
+        stop_data = payload.get("stopData") or []
+        if isinstance(stop_data, str):
+            try:
+                stop_data = json.loads(stop_data)
+            except (ValueError, TypeError):
+                stop_data = []
+        if not isinstance(stop_data, list):
+            stop_data = []
+        missing_details = []
+        for tid in missing_ids:
+            stop = next((item for item in stop_data if isinstance(item, dict) and
+                         str(item.get("taskId") or item.get("task_id") or item.get("id") or "") == tid), {})
+            address = stop.get("address") or stop.get("streetAddress") or stop.get("street") or "Address unavailable"
+            if isinstance(address, dict):
+                address = address.get("unparsed") or address.get("street") or "Address unavailable"
+            missing_details.append({"taskId": tid, "address": str(address)})
+        _log_result(engine, wo, {"status": "missing_tasks", "wo": wo,
+                                 "missingTaskCount": len(missing_ids), "missingTasks": missing_details})
     if task_errors or not valid_ids:
         result = {"status": "needs_review", "wo": wo, "reason": "OnFleet task lookup failed or no usable tasks", "taskErrors": task_errors, "missingTaskIds": missing_ids, "verifiedTaskIds": valid_ids}
         _log_result(engine, wo, result)

@@ -294,9 +294,14 @@
                     // result object has `error` but not `onfleetMsg`/`onfleetSuccess`, so the
                     // old code rendered the literal text "undefined". Fall through all the
                     // possible error fields and provide a final fallback message.
+                    const missingTasks = Array.isArray(result && result.missingTasks) ? result.missingTasks : [];
+                    const missingCount = Number(result && result.missingTaskCount) || missingTasks.length;
+                    const missingMessage = missingCount ? missingCount + " tasks no longer in OnFleet, check with Dispatcher." : "";
+                    const missingAddresses = missingTasks.map((task) => "<li>" + esc(task.address || "Address unavailable") + "</li>").join("");
+                    const missingHtml = missingCount ? '<div class="mt-4 text-left mx-auto" style="max-width:600px;"><p class="font-bold text-red-600">' + esc(missingMessage) + '</p><p class="mt-2 font-semibold">Affected addresses:</p><ul class="list-disc pl-6 mt-2 text-sm">' + missingAddresses + '</ul></div>' : "";
                     const onfleetOK = result && result.onfleetSuccess === true;
                     const errMsg = (result && (result.onfleetMsg || result.error || result.routeMsg)) || "Unknown error — please screenshot this and contact dispatch.";
-                    if (onfleetOK) {
+                    if (onfleetOK && !missingCount && result.routeSuccess === true) {
                         successContainer.innerHTML = `
                             <div class="text-7xl mb-6">✅</div>
                             <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Tasks Assigned!</h2>
@@ -308,7 +313,7 @@
                             <div class="text-7xl mb-6">⚠️</div>
                             <h2 class="text-4xl font-black uppercase text-slate-900 tracking-tight">Route Accepted, BUT...</h2>
                             <p class="text-red-500 mt-4 font-bold text-lg">We couldn't automatically push the tasks to your Onfleet app.</p>
-                            <p class="text-slate-700 mt-2 font-medium text-sm" style="max-width:600px;margin-left:auto;margin-right:auto;word-break:break-word;">${errMsg}</p>
+                            <p class="text-slate-700 mt-2 font-medium text-sm" style="max-width:600px;margin-left:auto;margin-right:auto;word-break:break-word;">${missingCount ? esc(missingMessage) : esc(errMsg)}</p>\n                            ${missingHtml}
                             <p class="text-slate-500 mt-6 font-medium text-sm">Our dispatch team has been notified and will manually assign your tasks shortly.</p>
                         `;
                     }
