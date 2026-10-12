@@ -62,11 +62,15 @@ def queue_bulk(engine, selected_routes, due, fn_team_id, fn_worker_id):
         conn.execute(sa.text("SELECT pg_advisory_xact_lock(hashtextextended('dcc-fn-bulk-queue', 0))"))
         all_ids = sorted(set(tid for *_, tids in candidates for tid in tids))
         if all_ids:
+            # Fully consume the SELECT so every task lock is acquired before
+            # scanning reservations (including drivers with lazy cursors).
             conn.execute(sa.text("""
                 SELECT pg_advisory_xact_lock(hashtextextended(tid, 0))
-                FROM unnest(string_to_array(:task_ids, ',')) AS tid
-                ORDER BY tid
-            """), {"task_ids": ",".join(all_ids)})
+                FROM (
+                    SELECT unnest(string_to_array(:task_ids, ',')) AS tid
+                    ORDER BY tid
+                ) AS ordered_ids
+            """), {"task_ids": ",".join(all_ids)}).all()
         fn_rows = conn.execute(sa.text("""
             SELECT work_order, status, route_plan_id, payload
             FROM field_nation_orders
