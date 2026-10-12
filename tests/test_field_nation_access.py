@@ -1,5 +1,7 @@
 """Permissions and rendered FN-only navigation, including stale session state."""
 import ast
+import hashlib
+import json
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -420,3 +422,72 @@ rw.render_workspace(lambda p: p == 'Orange', lambda *a: None, lambda *a: None,
     assert app.session_state.filtered_state.get('revamp_selected_route') is None
     if mode == 'bulk':
         assert not any('Gardena' in button.label for button in app.button)
+
+
+def test_fn_assigned_history_keeps_both_original_work_orders_even_if_accepted_wo_is_shared():
+    scope = load_functions(
+        "revamp_workspace.py",
+        ["_fn_assigned_history_entries", "_fn_stage", "_fn_entry_stage", "_route_entry_key"],
+        {"hashlib": hashlib, "json": json},
+    )
+    original_orders = [
+        {
+            "work_order": f"FN10122026-Phoenix AZ-{i}",
+            "assigned_work_order": "FN-Pat Contractor-10/12",
+            "provider": "Pat Contractor", "assigned_at": "2026-10-12T17:00:00Z",
+            "payload": {"city": "Phoenix", "state": "AZ", "cluster_hash": "reused-hash",
+                        "lCnt": 2, "taskIds": f"t{i}"},
+        } for i in (1, 2)
+    ]
+    entries = scope["_fn_assigned_history_entries"](
+        original_orders, ["Orange"], {"Orange": {"states": {"AZ"}}})
+    assert len(entries) == 2
+    assert all(e[2] == "Field Nation" for e in entries)
+    assert all(scope["_fn_entry_stage"](e, {}, {}) == "Assigned" for e in entries)
+    assert len({scope["_route_entry_key"](*e[:4]) for e in entries}) == 2
+    assert {e[1]["_fn_original_wo"] for e in entries} == {
+        "FN10122026-Phoenix AZ-1", "FN10122026-Phoenix AZ-2"
+    }
+    assert scope["_fn_assigned_history_entries"](
+        original_orders, ["Purple"], {"Orange": {"states": {"AZ"}}}) == []
+
+
+def test_fn_guest_assigned_card_shows_accepted_history_read_only(monkeypatch):
+    from migration import data_access as fn_data
+    import revamp_workspace as rw
+
+    assigned = [
+        {
+            "work_order": f"FN10122026-Phoenix AZ-{i}",
+            "assigned_work_order": "FN-Pat Contractor-10/12",
+            "provider": "Pat Contractor", "assigned_at": "2026-10-12T17:00:00Z",
+            "payload": {"city": "Phoenix", "state": "AZ", "cluster_hash": "reused-hash",
+                        "lCnt": 2, "tCnt": 3, "taskIds": f"task-{i}"},
+        } for i in (1, 2)
+    ]
+    monkeypatch.setattr(fn_data, "get_fn_assigned_orders", lambda engine: assigned)
+    source = f'''
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import revamp_workspace as rw
+st.session_state["_auth_user"] = {{"pod": "Field Nation", "tier": "guest", "scope": "field_nation"}}
+rw._load_bundle_labels = lambda *args: []
+def records():
+    return {{}}, {{"Orange": [{{"hash": "reused-hash", "wo": "FN-Pat Contractor-10/12",
+       "status": "accepted", "city": "Phoenix", "state": "AZ", "stops": 2}}]}}, set(), {{}}
+records.clear = lambda: None
+rw.render_workspace(lambda pod: pod == "Orange", lambda *args: None,
+    lambda *args: None, lambda *args: 0, object(), lambda *args: None, records,
+    pod_configs={{"Orange": {{"states": {{"AZ"}}}}}})
+'''
+    app = AppTest.from_string(source).run(timeout=30)
+    assert not app.exception
+    assert app.radio[0].options == ["Field Nation"]
+    assert app.button(key="revamp_fn_stage_assigned")
+    app.button(key="revamp_fn_stage_assigned").click().run(timeout=30)
+    assert not app.exception
+    route_buttons = [b for b in app.button if b.key.startswith("revamp_route_")]
+    assert len(route_buttons) == 2
+    assert not any(b.label == "Assign" for b in app.button)
+    assert any("Original FN work order" in item.value for item in app.markdown)
