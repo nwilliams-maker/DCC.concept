@@ -206,6 +206,9 @@ def _dedupe_route_entries(entries):
 
 def _route_entry_key(pod, route, state, route_hash):
     key = f"{pod}:{route_hash}"
+    if route.get("_fn_assigned_history"):
+        original_wo = str(route.get("_fn_original_wo") or route.get("wo") or route_hash)
+        return f"{pod}:fn-assigned:" + hashlib.sha256(original_wo.encode()).hexdigest()[:16]
     # Different saved work orders can share task IDs/hash after a resend.
     # Keep their historical cards separate while actions use the real hash.
     if state in ("Sent", "Accepted", "Declined", "Finalized"):
@@ -501,6 +504,13 @@ def _fn_stage(route_hash, posted, providers):
     if str(providers.get(route_hash) or "").strip():
         return "Assigned"
     return "Posted" if route_hash in posted else "Pending"
+
+
+def _fn_entry_stage(entry, posted, providers):
+    """Historical FN assignments remain Assigned after promotion to Accepted."""
+    if entry[1].get("_fn_assigned_history"):
+        return "Assigned"
+    return _fn_stage(entry[3], posted, providers)
 
 
 def _fn_dates(route, route_hash, fn_posted):
@@ -951,13 +961,88 @@ def _fn_saved_entries(ghost_db, pods, merge_same_wo_ghosts=None):
     return _dedupe_route_entries(entries)
 
 
+def _fn_assigned_history_entries(assigned_orders, pods, pod_configs=None):
+    """Read-only historical cards; original FN WO is the unique identity."""
+    entries = []
+    for order in assigned_orders or []:
+        payload = order.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        state = str(payload.get("state") or "").strip().upper()
+        hint = str(payload.get("pod") or "").strip()
+        try:
+            digital_count = int(payload.get("dCnt") or 0)
+        except (TypeError, ValueError):
+            digital_count = 0
+        job_text = str(payload.get("jobOnly") or "").lower()
+        digital = (hint in ("Digital", "Global_Digital") or digital_count > 0
+                   or any(marker in job_text for marker in
+                          ("service", "offline", "ins/rem", "🔌", "🔧", "⚙️", "📵")))
+        if digital:
+            pod = "Digital"
+        elif hint in pods:
+            pod = hint
+        else:
+            pod = next((name for name, config in (pod_configs or {}).items()
+                        if state in config.get("states", ())), None)
+        if pod not in pods:
+            continue
+        original_wo = str(order.get("work_order") or "").strip()
+        if not original_wo:
+            continue
+        accepted_wo = str(order.get("assigned_work_order") or payload.get("wo")
+                          or original_wo).strip()
+        assigned_at = str(order.get("assigned_at") or "")
+        provider = str(order.get("provider") or payload.get("fn_provider") or "").strip()
+        route_hash = str(payload.get("cluster_hash") or "").strip()
+        if not route_hash:
+            route_hash = hashlib.sha256(original_wo.encode()).hexdigest()
+        raw_ids = payload.get("taskIds") or ""
+        task_ids = ([str(i).strip() for i in raw_ids if str(i).strip()]
+                    if isinstance(raw_ids, list) else
+                    [i.strip() for i in str(raw_ids).replace("|", ",").split(",") if i.strip()])
+        stop_data = payload.get("stopData") or []
+        if isinstance(stop_data, str):
+            try:
+                stop_data = json.loads(stop_data)
+            except (TypeError, ValueError):
+                stop_data = []
+        if not isinstance(stop_data, list):
+            stop_data = []
+        try:
+            stops = int(payload.get("lCnt") or len(stop_data))
+            tasks = int(payload.get("tCnt") or len(task_ids))
+        except (TypeError, ValueError):
+            stops, tasks = len(stop_data), len(task_ids)
+        ghost = {
+            "wo": accepted_wo, "original_wo": original_wo,
+            "status": "assigned", "contractor_name": provider or "Field Nation provider",
+            "city": str(payload.get("city") or "Unknown"), "state": state,
+            "hash": route_hash, "stops": stops, "tasks": tasks,
+            "task_ids": task_ids, "route_ts": assigned_at,
+            "due": payload.get("due") or "N/A", "locs": payload.get("locs") or "",
+            "stop_data": stop_data, "fn_provider": provider,
+        }
+        route = {
+            "_is_ghost": True, "_fn_assigned_history": True,
+            "_fn_original_wo": original_wo, "_fn_assigned_at": assigned_at,
+            "_fn_history_provider": provider, "_ghost_record": ghost,
+            "wo": accepted_wo, "city": ghost["city"], "state": state,
+            "stops": stops, "data": [],
+        }
+        entries.append(("Global_Digital" if pod == "Digital" else pod,
+                        route, "Field Nation", route_hash, None))
+    return entries
+
+
 def _fn_route_identities(entries):
     # Changing workflow or task hashes on the same WO is not a new route.
-    return {(entry[0], str(entry[1].get("wo") or entry[3])) for entry in entries}
+    return {(entry[0], str(entry[1].get("_fn_original_wo")
+                           or entry[1].get("wo") or entry[3])) for entry in entries}
 
 
 def _refresh_fn_route_list(matching, posted, providers, context):
-    fetch_records, pods, search, merge = context
+    fetch_records, pods, search, merge, engine, pod_configs = context
     signature = (tuple(pods), search)
     checked = st.session_state.get("_revamp_fn_checked_entries")
     if checked and checked[0] == signature:
@@ -975,10 +1060,14 @@ def _refresh_fn_route_list(matching, posted, providers, context):
             _routes_refresh_style(True)
             notice_placeholder.markdown('<span class="rv-task-note">Checking routes…</span>', unsafe_allow_html=True)
             try:
-                old_ids = _fn_route_identities(_fn_saved_entries(st.session_state.get("ghost_db"), pods, merge))
+                old_ids = _fn_route_identities(matching)
                 fetch_records.clear()
                 sent, ghosts, archived, history = fetch_records()
                 entries = _fn_saved_entries(ghosts, pods, merge)
+                if engine is not None:
+                    from migration import data_access as fn_data
+                    entries.extend(_fn_assigned_history_entries(
+                        fn_data.get_fn_assigned_orders(engine), pods, pod_configs))
                 new_ids = _fn_route_identities(entries) - old_ids
                 added = len(new_ids)
                 st.session_state.setdefault("_revamp_fn_new_routes", set()).update(new_ids)
@@ -999,7 +1088,7 @@ def _refresh_fn_route_list(matching, posted, providers, context):
     if _workspace_statuses(st.session_state.get("_auth_user") or {}) == ("Field Nation",):
         active_stage = st.session_state.get("revamp_fn_stage_filter", "Pending")
         matching = [entry for entry in matching
-                    if _fn_stage(entry[3], posted, providers) == active_stage]
+                    if _fn_entry_stage(entry, posted, providers) == active_stage]
     return matching, posted, providers
 
 
@@ -1342,7 +1431,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      fetch_sent_records_from_sheet, default_due_days=14,
                      fn_ghost_to_cluster=None, saved_route_helpers=None,
                      merge_same_wo_ghosts=None, cluster_store=None,
-                     mapbox_geocode=None, process_digital_pool=None, fetch_open_tasks=None):
+                     mapbox_geocode=None, process_digital_pool=None, fetch_open_tasks=None,
+                     pod_configs=None):
     """Render one selected route while retaining the existing dispatch actions."""
     move_to_dispatch = (saved_route_helpers or {}).get("move_to_dispatch")
     st.markdown("""
@@ -1955,6 +2045,20 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                   for pod, route, state, route_hash, nearest in all_routes]
     if fn_only:
         all_routes = [entry for entry in all_routes if entry[2] == "Field Nation"]
+        # FN assignments leave this queue for Accepted. Keep a read-only copy
+        # of every assigned FN order from Postgres, across all associates.
+        if db_engine is not None:
+            try:
+                from migration import data_access as fn_data
+                all_routes.extend(_fn_assigned_history_entries(
+                    fn_data.get_fn_assigned_orders(db_engine),
+                    selected_pods, pod_configs))
+            except Exception as exc:
+                print(f"[revamp/fn-assigned-history] {type(exc).__name__}: {exc}", flush=True)
+                st.warning("Field Nation Assigned history is temporarily unavailable.")
+        else:
+            st.warning("Field Nation Assigned history requires the Railway database.")
+        all_routes = _dedupe_route_entries(all_routes)
     else:
         _render_workspace_summary(all_routes, pod_choice, selected_pods)
 
@@ -2287,7 +2391,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         st.session_state['_revamp_quiet_list_order'] = [_route_entry_key(*entry[:4]) for entry in matching
                                                       if entry[2] in ('Ready', 'Flagged')]
         st.session_state.pop("_revamp_fn_checked_entries", None)
-        fn_refresh_context = (fetch_sent_records_from_sheet, selected_pods, search, merge_same_wo_ghosts) if fn_only else None
+        fn_refresh_context = (fetch_sent_records_from_sheet, selected_pods, search,
+                              merge_same_wo_ghosts, db_engine, pod_configs) if fn_only else None
         _render_route_list(matching, status, fn_posted, fn_providers, quiet_context, fn_refresh_context)
 
     with right:
