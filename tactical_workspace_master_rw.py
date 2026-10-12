@@ -7590,6 +7590,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                             if DB_ENGINE is not None:
                                 try:
                                     _da.mirror_mark_fn_assigned_by_cluster_hash(DB_ENGINE, cluster_hash)
+                                    _da.record_fn_assignment_actor(DB_ENGINE, cluster_hash, str(st.session_state.get('_auth_user', {}).get('username') or '').lower())
                                 except Exception as _dw_e:
                                     _log_err("pg_dual_write_mark_fn_assigned", _dw_e)
                             # Force the next render to re-pull the sheet so the new Accepted row is visible.
@@ -9593,6 +9594,28 @@ def run_pod_tab(pod_name):
                         render_dispatch(i+1000, c, pod_name)
 
         with t_fn:
+            # History is independent of the live FN queue: assignments remain
+            # visible after promotion to Accepted / Finalized and after reload.
+            _fn_hist_user = str(st.session_state.get('_auth_user', {}).get('username') or '').strip().lower()
+            if DB_ENGINE is not None and _fn_hist_user:
+                try:
+                    _fn_hist_rows = _da.get_fn_assignment_history(DB_ENGINE, _fn_hist_user)
+                    with st.expander(f"Assigned History · {len(_fn_hist_rows)}", expanded=False):
+                        _fn_hist_search = st.text_input("Search assignment history", key=f"fn_history_search_{pod_name}")
+                        _fn_hist_match = [r for r in _fn_hist_rows if _fn_hist_search.lower() in (str(r['work_order']) + ' ' + str(r['assigned_work_order']) + ' ' + str(r['provider'])).lower()]
+                        if _fn_hist_match:
+                            st.dataframe(pd.DataFrame(_fn_hist_match).rename(columns={
+                                "work_order": "Original Work Order",
+                                "assigned_work_order": "Assigned Work Order",
+                                "provider": "Provider",
+                                "assigned_at": "Assigned At",
+                                "task_count": "Tasks",
+                            }), use_container_width=True, hide_index=True)
+                        else:
+                            st.caption("No assignments found for this account.")
+                except Exception as _fn_hist_err:
+                    _log_err("fn_assignment_history", _fn_hist_err)
+                    st.warning("Assignment history is temporarily unavailable.")
             if not field_nation: st.info("No routes currently moved to Field Nation.")
             else:
                 sorted_fn = group_and_sort_by_proximity(field_nation)
@@ -9933,6 +9956,7 @@ def run_pod_tab(pod_name):
                                         if DB_ENGINE is not None:
                                             try:
                                                 _da.mirror_mark_fn_assigned_by_cluster_hash(DB_ENGINE, _h)
+                                                _da.record_fn_assignment_actor(DB_ENGINE, _h, str(st.session_state.get('_auth_user', {}).get('username') or '').lower())
                                             except Exception as _dw_e:
                                                 _log_err(f"pg_dual_write_mark_fn_assigned/{pod_name}", _dw_e)
                                     else:
