@@ -1061,6 +1061,8 @@ def _ingest_sent_record(
                 "status": status_label,
                 "hash": ghost_hash,
                 "bundle_count": p.get("bundle_count", 0),
+                "fn_handoff_state": p.get("fn_handoff_state", ""),
+                "fn_handoff_error": p.get("fn_handoff_error", ""),
                 "locs": p.get("locs", ""),
                 "stop_data": stop_data,
                 "task_ids": tids,
