@@ -996,6 +996,10 @@ def _refresh_fn_route_list(matching, posted, providers, context):
             notice = st.session_state.get("_revamp_fn_refresh_notice", "")
             notice_placeholder.markdown(f'<span class="rv-task-note">{html.escape(notice)}</span>', unsafe_allow_html=True)
     _routes_refresh_style(False)
+    if _workspace_statuses(st.session_state.get("_auth_user") or {}) == ("Field Nation",):
+        active_stage = st.session_state.get("revamp_fn_stage_filter", "Pending")
+        matching = [entry for entry in matching
+                    if _fn_stage(entry[3], posted, providers) == active_stage]
     return matching, posted, providers
 
 
@@ -1603,6 +1607,28 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     .fn-stage-card.pending {border-left:3px solid #d59b22}
     .fn-stage-card.posted {border-left:3px solid #3b82f6}
     .fn-stage-card.assigned {border-left:3px solid #16804a}
+    /* Associate-only: the workflow cards are accessible buttons, not HTML. */
+    div[class*="st-key-revamp_fn_stage_"] button,
+    div[class*="st-key-revamp_fn_stage_"] button:hover {
+      min-height:58px!important;width:100%;padding:8px 10px!important;
+      justify-content:flex-start!important;text-align:left!important;
+      background:#fff!important;color:#1d2939!important;
+      border:1px solid var(--rv-border)!important;border-left:3px solid #d59b22!important;
+      border-radius:9px!important;box-shadow:0 1px 2px rgba(16,24,40,.03)!important;
+    }
+    div[class*="st-key-revamp_fn_stage_"] button p {
+      font-size:.76rem!important;line-height:1.4!important;font-weight:760!important;
+      text-align:left!important;white-space:pre-line!important;color:#1d2939!important
+    }
+    div[class*="st-key-revamp_fn_stage_posted"] button,
+    div[class*="st-key-revamp_fn_stage_posted"] button:hover {border-left-color:#3b82f6!important}
+    div[class*="st-key-revamp_fn_stage_assigned"] button,
+    div[class*="st-key-revamp_fn_stage_assigned"] button:hover {border-left-color:#16804a!important}
+    div[class*="st-key-revamp_fn_stage_"] button[kind="primary"],
+    div[class*="st-key-revamp_fn_stage_"] button[kind="primary"]:hover {
+      background:#edf4ff!important;border-color:#abbfd9!important;
+      box-shadow:0 0 0 1px #abbfd9!important
+    }
     div[class*="st-key-revamp_fn_toolbar"] {
       background:#fff;border:1px solid var(--rv-border);border-radius:10px;
       padding:6px 8px;margin-bottom:10px;box-shadow:0 1px 3px rgba(16,24,40,.035)
@@ -2026,19 +2052,50 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if status == "Field Nation":
         from fn_utils import generate_combined_fn_upload
         from migration import data_access as fn_data
-        fn_selected = [entry for entry in all_routes if entry[2] == "Field Nation"
-                       and st.session_state.get(f"revamp_fn_{entry[0]}:{entry[3]}")]
-        pending = [entry for entry in fn_selected if _fn_stage(entry[3], fn_posted, fn_providers) == "Pending"]
+        # Counts always reflect every matching FN route, regardless of the
+        # Associate's currently selected workflow stage.
         stage_counts = {stage: sum(_fn_stage(e[3], fn_posted, fn_providers) == stage
                                    for e in matching) for stage in ("Pending", "Posted", "Assigned")}
-        st.markdown(
-            '<div class="fn-stage-row">'
-            f'<div class="fn-stage-card pending"><div class="k">Pending</div><div class="v">{stage_counts["Pending"]}</div></div>'
-            f'<div class="fn-stage-card posted"><div class="k">Posted</div><div class="v">{stage_counts["Posted"]}</div></div>'
-            f'<div class="fn-stage-card assigned"><div class="k">Assigned</div><div class="v">{stage_counts["Assigned"]}</div></div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+        if fn_only:
+            # The guest/Field Nation account uses these cards as real navigation
+            # controls. Previously they were inert HTML and filtered nothing.
+            stage_key = "revamp_fn_stage_filter"
+            if st.session_state.get(stage_key) not in ("Pending", "Posted", "Assigned"):
+                st.session_state[stage_key] = "Pending"
+            active_stage = st.session_state[stage_key]
+            stage_columns = st.columns(3, gap="small")
+            for col, stage_name in zip(stage_columns, ("Pending", "Posted", "Assigned")):
+                with col:
+                    if st.button(
+                        f"{stage_name.upper()}  \n**{stage_counts[stage_name]}**",
+                        key=f"revamp_fn_stage_{stage_name.lower()}",
+                        type="primary" if active_stage == stage_name else "secondary",
+                        use_container_width=True,
+                        help=f"Show {stage_name.lower()} Field Nation routes",
+                    ):
+                        st.session_state[stage_key] = stage_name
+                        st.session_state.pop("revamp_selected_route", None)
+                        st.rerun()
+            # Filter the route inbox AND the associated detail pane; selections
+            # outside the visible stage cannot be bulk-posted accidentally.
+            matching = [entry for entry in matching
+                        if _fn_stage(entry[3], fn_posted, fn_providers) == active_stage]
+            visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching]
+        else:
+            # Keep the existing full-queue dispatcher presentation unchanged.
+            st.markdown(
+                '<div class="fn-stage-row">'
+                f'<div class="fn-stage-card pending"><div class="k">Pending</div><div class="v">{stage_counts["Pending"]}</div></div>'
+                f'<div class="fn-stage-card posted"><div class="k">Posted</div><div class="v">{stage_counts["Posted"]}</div></div>'
+                f'<div class="fn-stage-card assigned"><div class="k">Assigned</div><div class="v">{stage_counts["Assigned"]}</div></div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        fn_selected = [entry for entry in (matching if fn_only else all_routes)
+                       if entry[2] == "Field Nation"
+                       and st.session_state.get(f"revamp_fn_{entry[0]}:{entry[3]}")]
+        pending = [entry for entry in fn_selected
+                   if _fn_stage(entry[3], fn_posted, fn_providers) == "Pending"]
         csv_routes = [_fn_csv_route(entry[1], entry[3], fn_ghost_to_cluster) for entry in fn_selected]
         csv_routes = [route for route in csv_routes if route]
         csv_data = None
@@ -2056,7 +2113,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             with sel_col:
                 st.caption(f"{len(fn_selected)} selected · {stop_count} stops")
             with select_col:
-                _pending_selectable = stage_counts["Pending"]
+                _pending_selectable = (sum(_fn_stage(entry[3], fn_posted, fn_providers) == "Pending"
+                                           for entry in matching) if fn_only else stage_counts["Pending"])
                 st.button("Select all pending", key="revamp_fn_select_all",
                           on_click=select_visible, disabled=not _pending_selectable,
                           use_container_width=True)
