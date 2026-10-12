@@ -1286,3 +1286,27 @@ def get_fn_assignment_history(engine: sa.Engine, username: str, limit: int = 500
             "task_count": len(p.get("taskIds") or []) if isinstance(p.get("taskIds"), list) else len([x for x in str(p.get("taskIds") or "").replace("|", ",").split(",") if x.strip()]),
         })
     return result
+
+
+def get_fn_posted_orders(engine: sa.Engine, limit: int = 500) -> list[dict[str, Any]]:
+    """Persisted FN orders marked Posted, excluding those subsequently Assigned."""
+    with engine.connect() as conn:
+        rows = conn.execute(sa.text("""
+            SELECT work_order, payload, updated_at, provider
+            FROM field_nation_orders
+            WHERE status = 'posted'
+              AND NULLIF(payload::jsonb->>'fn_posted_ts', '') IS NOT NULL
+            ORDER BY updated_at DESC
+            LIMIT :limit
+        """), {"limit": limit}).mappings().all()
+    result = []
+    for row in rows:
+        p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+        tids = p.get("taskIds") or []
+        result.append({
+            "work_order": row["work_order"],
+            "provider": row["provider"] or p.get("fn_provider") or "",
+            "posted_at": p.get("fn_posted_ts") or str(row["updated_at"]),
+            "tasks": len(tids) if isinstance(tids, list) else len([x for x in str(tids).replace("|", ",").split(",") if x.strip()]),
+        })
+    return result
