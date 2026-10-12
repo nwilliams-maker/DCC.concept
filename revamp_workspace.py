@@ -922,7 +922,7 @@ def _route_list_groups(matching, status, fn_posted=None, fn_providers=None):
     for entry in matching:
         if status == "Field Nation":
             pod = "Digital" if entry[0] == "Global_Digital" else entry[0]
-            stage = _fn_stage(entry[3], fn_posted or {}, fn_providers or {})
+            stage = _fn_entry_stage(entry, fn_posted or {}, fn_providers or {})
             group = (pod, stage, str(entry[1].get("state") or "Unknown state").strip().upper())
         else:
             group = ("", "", _saved_status_group_label(entry[1])
@@ -1191,7 +1191,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
             if not is_open:
                 continue
             for pod, route, state, route_hash, nearest in entries:
-                stage = _fn_stage(route_hash, fn_posted, fn_providers) if status == "Field Nation" else ""
+                stage = _fn_entry_stage((pod, route, state, route_hash, nearest), fn_posted, fn_providers) if status == "Field Nation" else ""
                 key = _route_entry_key(pod, route, state, route_hash)
                 city = route.get("city") or "Unknown city"
                 select_col, card_col = st.columns([.09, .91], gap="small", vertical_alignment="center")
@@ -1199,13 +1199,13 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     if state in ("Ready", "Flagged"):
                         st.checkbox("Select route for Field Nation", key=f"revamp_bulk_{key}",
                                     label_visibility="collapsed", on_change=_refresh_bulk_actions)
-                    elif status == "Field Nation":
+                    elif status == "Field Nation" and not route.get("_fn_assigned_history"):
                         st.checkbox("Select for Field Nation CSV", key=f"revamp_fn_{key}",
                                     label_visibility="collapsed", on_change=_refresh_bulk_actions)
                 with card_col:
                     removal = " · CVS Removal" if route.get("is_removal") else ""
                     card_state = stage if status == "Field Nation" else state
-                    provider = str(fn_providers.get(route_hash) or "").strip()
+                    provider = str(route.get("_fn_history_provider") or fn_providers.get(route_hash) or "").strip()
                     stops = route.get("stops", 0)
                     _ghost = route.get("_ghost_record") or {}
                     tasks = (len(route.get("data", []))
@@ -1239,7 +1239,9 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     if status == "Field Nation":
                         _created, _posted, _due = _fn_dates(route, route_hash, fn_posted)
                         _date_bits = [f"Due {_due}"]
-                        if card_state == "Pending":
+                        if route.get("_fn_assigned_history"):
+                            _date_bits.insert(0, f"Assigned {route.get('_fn_assigned_at') or '—'}")
+                        elif card_state == "Pending":
                             _date_bits.insert(0, f"Sent {_created}")
                         elif card_state in ("Posted", "Assigned"):
                             _date_bits.insert(0, f"Posted {_posted}")
@@ -2103,11 +2105,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         matching.sort(key=lambda entry: (
             entry[0] if status == "Field Nation" else "",
             str(entry[1].get("state") or "").upper(),
-            {"Pending": 0, "Posted": 1, "Assigned": 2}[_fn_stage(entry[3], fn_posted, fn_providers)] if status == "Field Nation" else 0,
+            {"Pending": 0, "Posted": 1, "Assigned": 2}[_fn_entry_stage(entry, fn_posted, fn_providers)] if status == "Field Nation" else 0,
             str(entry[1].get("city") or "").lower(), entry[0]))
     selection_prefix = "revamp_fn_" if status == "Field Nation" else "revamp_bulk_"
     visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
-                    if entry[2] == "Field Nation" or
+                    if (entry[2] == "Field Nation" and not entry[1].get("_fn_assigned_history")) or
                     (status != "Field Nation" and entry[2] in ("Ready", "Flagged"))]
     def select_visible():
         # Field Nation bulk selection is intentionally Pending-only. Posted
@@ -2118,7 +2120,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             keys_to_select = [
                 f"{entry[0]}:{entry[3]}" for entry in matching
                 if entry[2] == "Field Nation"
-                and _fn_stage(entry[3], fn_posted, fn_providers) == "Pending"
+                and _fn_entry_stage(entry, fn_posted, fn_providers) == "Pending"
             ]
         for key in keys_to_select:
             st.session_state[f"{selection_prefix}{key}"] = True
@@ -2158,7 +2160,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         from migration import data_access as fn_data
         # Counts always reflect every matching FN route, regardless of the
         # Associate's currently selected workflow stage.
-        stage_counts = {stage: sum(_fn_stage(e[3], fn_posted, fn_providers) == stage
+        stage_counts = {stage: sum(_fn_entry_stage(e, fn_posted, fn_providers) == stage
                                    for e in matching) for stage in ("Pending", "Posted", "Assigned")}
         if fn_only:
             # The guest/Field Nation account uses these cards as real navigation
@@ -2183,8 +2185,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             # Filter the route inbox AND the associated detail pane; selections
             # outside the visible stage cannot be bulk-posted accidentally.
             matching = [entry for entry in matching
-                        if _fn_stage(entry[3], fn_posted, fn_providers) == active_stage]
-            visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching]
+                        if _fn_entry_stage(entry, fn_posted, fn_providers) == active_stage]
+            visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
+                            if not entry[1].get("_fn_assigned_history")]
         else:
             # Keep the existing full-queue dispatcher presentation unchanged.
             st.markdown(
@@ -2197,9 +2200,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             )
         fn_selected = [entry for entry in (matching if fn_only else all_routes)
                        if entry[2] == "Field Nation"
+                       and not entry[1].get("_fn_assigned_history")
                        and st.session_state.get(f"revamp_fn_{entry[0]}:{entry[3]}")]
         pending = [entry for entry in fn_selected
-                   if _fn_stage(entry[3], fn_posted, fn_providers) == "Pending"]
+                   if _fn_entry_stage(entry, fn_posted, fn_providers) == "Pending"]
         csv_routes = [_fn_csv_route(entry[1], entry[3], fn_ghost_to_cluster) for entry in fn_selected]
         csv_routes = [route for route in csv_routes if route]
         csv_data = None
@@ -2455,7 +2459,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             render_dispatch(20000, dispatch_route, pod)
         elif state == "Field Nation":
             from migration import data_access as fn_data
-            stage = _fn_stage(route_hash, fn_posted, fn_providers)
+            stage = _fn_entry_stage((pod, route, state, route_hash, nearest), fn_posted, fn_providers)
             ghost = route.get("_ghost_record") or {}
             wo = str(ghost.get("wo") or route.get("wo") or "Field Nation route")
             due = str(ghost.get("due") or "Not set")
@@ -2527,7 +2531,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                         except Exception as exc:
                             st.error(f"Could not return route: {exc}")
 
-            if stage == "Pending":
+            if route.get("_fn_assigned_history"):
+                st.success("Assigned in Field Nation. This route is now in the Accepted workflow.")
+                st.caption(f"Original FN work order: {route.get('_fn_original_wo') or '—'}")
+                st.caption(f"Provider: {route.get('_fn_history_provider') or 'Not recorded'}"
+                           f" · Assigned: {route.get('_fn_assigned_at') or 'Date unavailable'}")
+            elif stage == "Pending":
                 st.info("Select this route on the left, download the FN CSV, post it in Field Nation, then click Mark Posted.")
             else:
                 provider = st.text_input("Assigned Field Nation rep",
@@ -2547,6 +2556,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             raise RuntimeError(result.get("error") or "Assignment failed")
                         fetch_sent_records_from_sheet.clear()
                         st.session_state.pop(f"route_state_{route_hash}", None)
+                        st.session_state[f"revamp_fn_{pod}:{route_hash}"] = False
+                        if fn_only:
+                            st.session_state["revamp_fn_stage_filter"] = "Assigned"
                         if result.get("partial"):
                             st.session_state["_revamp_notice"] = (
                                 "warning", f"Route moved to Accepted, but Onfleet Route Plan Name needs attention: {result.get('partialReason', 'unknown error')}")
