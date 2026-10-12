@@ -144,6 +144,14 @@ def queue_bulk(engine, selected_routes, due, fn_team_id, fn_worker_id):
             for tid in task_ids:
                 reservations[tid] = wo
             queued.append((route_hash, wo))
+        if queued:
+            # Notify other logged-in sessions. The Revamp workspace checks
+            # route_events.version to invalidate its 60-second saved-route
+            # cache, so FN Associates see queued work on their next interaction.
+            conn.execute(sa.text("""
+                INSERT INTO route_events (route_id, action, payload)
+                VALUES (NULL, 'fnHandoffQueued', CAST(:payload AS jsonb))
+            """), {"payload": json.dumps({"work_orders": [wo for _, wo in queued]})})
     return queued, skipped, errors
 
 
@@ -155,6 +163,12 @@ def _patch(engine, wo, **fields):
                 updated_at = now()
             WHERE work_order = :wo
         """), {"wo": wo, "patch": json.dumps(fields)})
+        if fields.get("fn_handoff_state") in ("complete", "error"):
+            conn.execute(sa.text("""
+                INSERT INTO route_events (route_id, action, payload)
+                VALUES (NULL, 'fnHandoffUpdated', CAST(:payload AS jsonb))
+            """), {"payload": json.dumps({
+                "work_order": wo, "state": fields["fn_handoff_state"]})})
 
 
 def _run_handoff(engine, wo, handoff):
