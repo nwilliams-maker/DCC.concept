@@ -167,12 +167,6 @@ def _patch(engine, wo, **fields):
                 updated_at = now()
             WHERE work_order = :wo
         """), {"wo": wo, "patch": json.dumps(fields)})
-        if fields.get("fn_handoff_state") in ("complete", "error"):
-            conn.execute(sa.text("""
-                INSERT INTO route_events (route_id, action, payload)
-                VALUES (NULL, 'fnHandoffUpdated', CAST(:payload AS jsonb))
-            """), {"payload": json.dumps({
-                "work_order": wo, "state": fields["fn_handoff_state"]})})
 
 
 def _run_handoff(engine, wo, handoff):
