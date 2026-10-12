@@ -9526,7 +9526,7 @@ def run_pod_tab(pod_name):
             """,
             unsafe_allow_html=True,
         )
-        t_ready, t_flagged, t_fn, t_fn_assigned, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "✅ Assigned", "🔌 Digital"])
+        t_ready, t_flagged, t_fn, t_fn_posted, t_fn_assigned, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "📤 Posted", "✅ Assigned", "🔌 Digital"])
 
         with t_ready:
             if _is_dispatch_associate():
@@ -9592,6 +9592,27 @@ def run_pod_tab(pod_name):
                     boosted_pill = f" | {next((v for k,v in _BOOSTED_BADGES.items() if k in c.get('boosted_tag','')), '')}" if c.get('boosted_tag') and any(k in c.get('boosted_tag','') for k in _BOOSTED_BADGES) else ""
                     with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                         render_dispatch(i+1000, c, pod_name)
+
+        with t_fn_posted:
+            st.subheader("Field Nation — Posted")
+            if DB_ENGINE is None:
+                st.warning("Posted history is unavailable while Railway Postgres is disconnected.")
+            else:
+                try:
+                    _fn_posted_rows = _da.get_fn_posted_orders(DB_ENGINE)
+                    _fn_posted_search = st.text_input("Search posted work orders", key=f"fn_posted_search_{pod_name}")
+                    _fn_posted_matches = [r for r in _fn_posted_rows if _fn_posted_search.lower() in (str(r["work_order"]) + " " + str(r["provider"])).lower()]
+                    st.caption(f"{len(_fn_posted_matches)} posted work orders")
+                    if _fn_posted_matches:
+                        st.dataframe(pd.DataFrame(_fn_posted_matches).rename(columns={
+                            "work_order": "Work Order", "provider": "Provider",
+                            "posted_at": "Posted At", "tasks": "Tasks",
+                        }), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No posted work orders found.")
+                except Exception as _fn_posted_err:
+                    _log_err("fn_posted_history", _fn_posted_err)
+                    st.warning("Posted work orders are temporarily unavailable.")
 
         with t_fn_assigned:
             st.subheader("Field Nation — Assigned")
