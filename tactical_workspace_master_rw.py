@@ -10016,7 +10016,35 @@ def run_pod_tab(pod_name):
                 _fn_pending_list  = [_fn_route_lookup[h] for h in _fn_pending_hashes]
                 _fn_posted_list   = [_fn_route_lookup[h] for h in _fn_posted_hashes]
                 _fn_assigned_list = [_fn_route_lookup[h] for h in _fn_assigned_hashes]
-                _fn_ordered = _fn_pending_list + _fn_posted_list + _fn_assigned_list
+                # Status cards are navigation/filter controls, not bulk-selection actions.
+                _fn_filter_key = f"fn_status_filter_{pod_name}"
+                if _fn_filter_key not in st.session_state:
+                    st.session_state[_fn_filter_key] = "posted"
+                _fn_status_cols = st.columns(3)
+                for _fn_idx, (_fn_status, _fn_caption, _fn_count) in enumerate([
+                    ("pending", "PENDING", len(_fn_pending_list)),
+                    ("posted", "POSTED", len(_fn_posted_list)),
+                    ("assigned", "ASSIGNED", len(_fn_assigned_list)),
+                ]):
+                    with _fn_status_cols[_fn_idx]:
+                        _fn_active = st.session_state[_fn_filter_key] == _fn_status
+                        if st.button(
+                            f"{'● ' if _fn_active else ''}{_fn_caption}\\n\\n{_fn_count}",
+                            key=f"fn_status_card_{pod_name}_{_fn_status}",
+                            use_container_width=True,
+                            type="primary" if _fn_active else "secondary",
+                        ):
+                            st.session_state[_fn_filter_key] = _fn_status
+                            st.rerun()
+                _fn_current_status = st.session_state[_fn_filter_key]
+                _fn_ordered = {
+                    "pending": _fn_pending_list,
+                    "posted": _fn_posted_list,
+                    "assigned": _fn_assigned_list,
+                }[_fn_current_status]
+                if not _fn_ordered:
+                    st.info(f"No {_fn_current_status} Field Nation routes currently in the queue.")
+
 
                 def _fn_section_banner(_label, _count, _bg, _border, _fg, _emoji, _margin_top="6px"):
                     st.markdown(
