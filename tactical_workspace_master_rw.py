@@ -11559,6 +11559,8 @@ with tabs[6]:
         with col_left:
             st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_DIGITAL_TEXT}; text-align: center;'>🚀 Dispatch</div>", unsafe_allow_html=True)
             t_ready, t_flagged, t_fn = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation"])
+            with t_fn:
+                _digital_fn_posted, _digital_fn_assigned = st.tabs(["📤 Posted", "✅ Assigned"])
             
             with t_ready:
                 if not d_ready: st.info("No digital tasks ready for dispatch.")
@@ -11590,7 +11592,55 @@ with tabs[6]:
                         with st.expander(f"🔴 {get_digi_badges(c['data'])} {c['city']}, {c['state']} | {c['stops']} Stops{_gdf_boost}{_gdf_esc}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                             render_dispatch(i+9000, c, "Global_Digital")
                             
-            with t_fn:
+            with _digital_fn_posted:
+                st.subheader("Field Nation — Posted")
+                if DB_ENGINE is None:
+                    st.warning("Posted history is unavailable while Railway Postgres is disconnected.")
+                else:
+                    try:
+                        _fn_posted_rows = _da.get_fn_posted_orders(DB_ENGINE)
+                        _fn_posted_search = st.text_input("Search posted work orders", key="fn_posted_search_digital")
+                        _fn_posted_matches = [r for r in _fn_posted_rows if _fn_posted_search.lower() in (str(r["work_order"]) + " " + str(r["provider"])).lower()]
+                        st.caption(f"{len(_fn_posted_matches)} posted work orders")
+                        if _fn_posted_matches:
+                            st.dataframe(pd.DataFrame(_fn_posted_matches).rename(columns={
+                                "work_order": "Work Order", "provider": "Provider",
+                                "posted_at": "Posted At", "tasks": "Tasks",
+                            }), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No posted work orders found.")
+                    except Exception as _fn_posted_err:
+                        _log_err("fn_posted_history", _fn_posted_err)
+                        st.warning("Posted work orders are temporarily unavailable.")
+
+            with _digital_fn_assigned:
+                st.subheader("Field Nation — Assigned")
+                # History is independent of the live FN queue: assignments remain
+                # visible after promotion to Accepted / Finalized and after reload.
+                _fn_hist_user = str(st.session_state.get('_auth_user', {}).get('username') or '').strip().lower()
+                if DB_ENGINE is not None and _fn_hist_user:
+                    try:
+                        _fn_hist_rows = _da.get_fn_assignment_history(DB_ENGINE, _fn_hist_user)
+                        with st.container():
+                            _fn_hist_search = st.text_input("Search assigned work orders", key="fn_history_search_digital")
+                            _fn_hist_match = [r for r in _fn_hist_rows if _fn_hist_search.lower() in (str(r['work_order']) + ' ' + str(r['assigned_work_order']) + ' ' + str(r['provider'])).lower()]
+                            if _fn_hist_match:
+                                st.dataframe(pd.DataFrame(_fn_hist_match).rename(columns={
+                                    "work_order": "Original Work Order",
+                                    "assigned_work_order": "Assigned Work Order",
+                                    "provider": "Provider",
+                                    "assigned_at": "Assigned At",
+                                    "task_count": "Tasks",
+                                }), use_container_width=True, hide_index=True)
+                            else:
+                                st.caption("No assignments found for this account.")
+                    except Exception as _fn_hist_err:
+                        _log_err("fn_assignment_history", _fn_hist_err)
+                        st.warning("Assignment history is temporarily unavailable.")
+                if DB_ENGINE is None:
+                    st.warning("Assignment history is unavailable while Railway Postgres is disconnected.")
+
+            with _digital_fn_posted:
                 if not d_fn: st.info("No tasks in Field Nation.")
                 else:
                     sorted_d_fn = group_and_sort_by_proximity(d_fn)
