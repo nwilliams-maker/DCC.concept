@@ -9526,7 +9526,10 @@ def run_pod_tab(pod_name):
             """,
             unsafe_allow_html=True,
         )
-        t_ready, t_flagged, t_fn, t_fn_posted, t_fn_assigned, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "📤 Posted", "✅ Assigned", "🔌 Digital"])
+        t_ready, t_flagged, t_fn, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "🔌 Digital"])
+
+        with t_fn:
+            _fn_posted_subtab, _fn_assigned_subtab = st.tabs(["📤 Posted", "✅ Assigned"])
 
         with t_ready:
             if _is_dispatch_associate():
@@ -9593,7 +9596,7 @@ def run_pod_tab(pod_name):
                     with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                         render_dispatch(i+1000, c, pod_name)
 
-        with t_fn_posted:
+        with _fn_posted_subtab:
             st.subheader("Field Nation — Posted")
             if DB_ENGINE is None:
                 st.warning("Posted history is unavailable while Railway Postgres is disconnected.")
@@ -9614,7 +9617,7 @@ def run_pod_tab(pod_name):
                     _log_err("fn_posted_history", _fn_posted_err)
                     st.warning("Posted work orders are temporarily unavailable.")
 
-        with t_fn_assigned:
+        with _fn_assigned_subtab:
             st.subheader("Field Nation — Assigned")
             # History is independent of the live FN queue: assignments remain
             # visible after promotion to Accepted / Finalized and after reload.
@@ -9641,7 +9644,7 @@ def run_pod_tab(pod_name):
             if DB_ENGINE is None:
                 st.warning("Assignment history is unavailable while Railway Postgres is disconnected.")
 
-        with t_fn:
+        with _fn_posted_subtab:
             if not field_nation: st.info("No routes currently moved to Field Nation.")
             else:
                 sorted_fn = group_and_sort_by_proximity(field_nation)
