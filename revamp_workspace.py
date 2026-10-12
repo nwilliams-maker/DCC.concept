@@ -2476,10 +2476,16 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 unsafe_allow_html=True,
             )
             created_date, posted_date, due_date = _fn_dates(route, route_hash, fn_posted)
+            if route.get("_fn_assigned_history"):
+                first_label, first_date = "Assigned", str(route.get("_fn_assigned_at") or "—")
+                second_label, second_value = "Workflow", "Accepted"
+            else:
+                first_label, first_date = "Sent to FN", created_date
+                second_label, second_value = "Posted", posted_date
             st.markdown(
                 '<div class="fn-date-row">'
-                f'<div class="fn-date"><div class="k">Sent to FN</div><div class="v">{html.escape(created_date)}</div></div>'
-                f'<div class="fn-date"><div class="k">Posted</div><div class="v">{html.escape(posted_date)}</div></div>'
+                f'<div class="fn-date"><div class="k">{first_label}</div><div class="v">{html.escape(first_date)}</div></div>'
+                f'<div class="fn-date"><div class="k">{second_label}</div><div class="v">{html.escape(second_value)}</div></div>'
                 f'<div class="fn-date"><div class="k">Due</div><div class="v">{html.escape(due_date)}</div></div>'
                 '</div>',
                 unsafe_allow_html=True,
