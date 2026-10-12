@@ -7,6 +7,7 @@ so a dashboard interaction does not build every dispatch card at once.
 
 import hashlib
 import html
+import json
 import base64
 import os
 import re
