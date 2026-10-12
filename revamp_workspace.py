@@ -1231,6 +1231,12 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                         heading += f" · {bundle}"
                     if status == "Field Nation" and (pod, str(route.get("wo") or route_hash)) in st.session_state.get("_revamp_fn_new_routes", set()):
                         heading += " · :green-background[NEW]"
+                    if status == "Field Nation":
+                        sync_state = str((_ghost.get("fn_handoff_state") or "")).lower()
+                        if sync_state in ("queued", "running"):
+                            heading += " · OnFleet syncing"
+                        elif sync_state == "error":
+                            heading += " · OnFleet needs retry"
                     label = (f"{heading}\n"
                              f"{('Digital' if pod == 'Global_Digital' else pod)} Pod  ·  {stops} {'stop' if stops == 1 else 'stops'}  ·  "
                              f"{tasks} {'task' if tasks == 1 else 'tasks'}")
@@ -2130,6 +2136,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 f"{entry[0]}:{entry[3]}" for entry in matching
                 if entry[2] == "Field Nation"
                 and _fn_entry_stage(entry, fn_posted, fn_providers) == "Pending"
+                and (entry[1].get("_ghost_record") or {}).get("fn_handoff_state")
+                    not in ("queued", "running", "error")
             ]
         for key in keys_to_select:
             st.session_state[f"{selection_prefix}{key}"] = True
@@ -2235,8 +2243,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             with sel_col:
                 st.caption(f"{len(fn_selected)} selected · {stop_count} stops")
             with select_col:
-                _pending_selectable = (sum(_fn_stage(entry[3], fn_posted, fn_providers) == "Pending"
-                                           for entry in matching) if fn_only else stage_counts["Pending"])
+                _pending_selectable = (sum(
+                    _fn_entry_stage(entry, fn_posted, fn_providers) == "Pending"
+                    and (entry[1].get("_ghost_record") or {}).get("fn_handoff_state")
+                        not in ("queued", "running", "error")
+                    for entry in matching) if fn_only else stage_counts["Pending"])
                 st.button("Select all pending", key="revamp_fn_select_all",
                           on_click=select_visible, disabled=not _pending_selectable,
                           use_container_width=True)
