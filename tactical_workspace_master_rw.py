@@ -9526,7 +9526,7 @@ def run_pod_tab(pod_name):
             """,
             unsafe_allow_html=True,
         )
-        t_ready, t_flagged, t_fn, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "🔌 Digital"])
+        t_ready, t_flagged, t_fn, t_fn_assigned, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "✅ Assigned", "🔌 Digital"])
 
         with t_ready:
             if _is_dispatch_associate():
@@ -9593,15 +9593,16 @@ def run_pod_tab(pod_name):
                     with st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops | 🗑️ CVS Kiosk Removal") if c.get('is_removal') else st.expander(f"🔒 🔴 {c['city']}, {c['state']} | {c['stops']} Stops{inst_pill}{remov_pill}{boosted_pill}{esc_pill}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}", expanded=bool(c.get('bundle_count', 0))):
                         render_dispatch(i+1000, c, pod_name)
 
-        with t_fn:
+        with t_fn_assigned:
+            st.subheader("Field Nation — Assigned")
             # History is independent of the live FN queue: assignments remain
             # visible after promotion to Accepted / Finalized and after reload.
             _fn_hist_user = str(st.session_state.get('_auth_user', {}).get('username') or '').strip().lower()
             if DB_ENGINE is not None and _fn_hist_user:
                 try:
                     _fn_hist_rows = _da.get_fn_assignment_history(DB_ENGINE, _fn_hist_user)
-                    with st.expander(f"Assigned History · {len(_fn_hist_rows)}", expanded=False):
-                        _fn_hist_search = st.text_input("Search assignment history", key=f"fn_history_search_{pod_name}")
+                    with st.container():
+                        _fn_hist_search = st.text_input("Search assigned work orders", key=f"fn_history_search_{pod_name}")
                         _fn_hist_match = [r for r in _fn_hist_rows if _fn_hist_search.lower() in (str(r['work_order']) + ' ' + str(r['assigned_work_order']) + ' ' + str(r['provider'])).lower()]
                         if _fn_hist_match:
                             st.dataframe(pd.DataFrame(_fn_hist_match).rename(columns={
@@ -9616,6 +9617,10 @@ def run_pod_tab(pod_name):
                 except Exception as _fn_hist_err:
                     _log_err("fn_assignment_history", _fn_hist_err)
                     st.warning("Assignment history is temporarily unavailable.")
+            if DB_ENGINE is None:
+                st.warning("Assignment history is unavailable while Railway Postgres is disconnected.")
+
+        with t_fn:
             if not field_nation: st.info("No routes currently moved to Field Nation.")
             else:
                 sorted_fn = group_and_sort_by_proximity(field_nation)
