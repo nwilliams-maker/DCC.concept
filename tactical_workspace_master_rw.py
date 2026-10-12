@@ -10029,7 +10029,7 @@ def run_pod_tab(pod_name):
                     with _fn_status_cols[_fn_idx]:
                         _fn_active = st.session_state[_fn_filter_key] == _fn_status
                         if st.button(
-                            f"{'● ' if _fn_active else ''}{_fn_caption}\\n\\n{_fn_count}",
+                            f"{'● ' if _fn_active else ''}{_fn_caption} · {_fn_count}",
                             key=f"fn_status_card_{pod_name}_{_fn_status}",
                             use_container_width=True,
                             type="primary" if _fn_active else "secondary",
