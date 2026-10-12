@@ -11062,7 +11062,8 @@ if (os.environ.get("DCC_REVAMP_UI") == "1"
                      cluster_store=_pod_cluster_store,
                      mapbox_geocode=_mapbox_geocode,
                      process_digital_pool=process_digital_pool,
-                     fetch_open_tasks=_fetch_onfleet_open_tasks_cached)
+                     fetch_open_tasks=_fetch_onfleet_open_tasks_cached,
+                     pod_configs=POD_CONFIGS)
     st.stop()
 
 # Updated Main Tabs
