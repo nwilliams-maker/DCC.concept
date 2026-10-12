@@ -1262,6 +1262,39 @@ def record_fn_assignment_actor(engine: sa.Engine, cluster_hash: str, username: s
         return bool(result.rowcount)
 
 
+def get_fn_assigned_orders(engine: sa.Engine, limit: int = 2000) -> list[dict[str, Any]]:
+    """Read-only FN assignment history across users, even after promotion to Accepted.
+
+    The original FN order remains in field_nation_orders with status='assigned'
+    after mark_fn_assigned() creates the Accepted route. Use that original order
+    as the unique identity: an Accepted WO may be shared by multiple FN orders.
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(sa.text("""
+            SELECT work_order, provider, payload, updated_at
+            FROM field_nation_orders
+            WHERE status = 'assigned'
+            ORDER BY updated_at DESC
+            LIMIT :limit
+        """), {"limit": limit}).mappings().all()
+    result = []
+    for row in rows:
+        try:
+            p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+            if not isinstance(p, dict):
+                continue
+            result.append({
+                "work_order": row["work_order"],
+                "assigned_work_order": p.get("wo") or row["work_order"],
+                "provider": row["provider"] or p.get("fn_provider") or "",
+                "assigned_at": p.get("fn_assigned_ts") or str(row["updated_at"]),
+                "payload": p,
+            })
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return result
+
+
 def get_fn_assignment_history(engine: sa.Engine, username: str, limit: int = 500) -> list[dict[str, Any]]:
     """Durable, per-user FN assignment history, including routes moved to Accepted."""
     if not username:
