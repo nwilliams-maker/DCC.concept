@@ -1438,6 +1438,14 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      pod_configs=None):
     """Render one selected route while retaining the existing dispatch actions."""
     move_to_dispatch = (saved_route_helpers or {}).get("move_to_dispatch")
+    # Restore durable queued OnFleet handoffs after a Railway/Streamlit restart.
+    # Scheduling is nonblocking and throttled across Streamlit sessions.
+    if db_engine is not None:
+        try:
+            from revamp_fn_queue import recover_queued
+            recover_queued(db_engine, assign_tasks_to_fn_team)
+        except Exception as exc:
+            print(f"[fn-handoff/recovery] {type(exc).__name__}: {exc}", flush=True)
     st.markdown("""
     <style>
     /* ── DCC Revamp visual system ─────────────────────────────────────────
@@ -2204,8 +2212,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                        and not entry[1].get("_fn_assigned_history")
                        and st.session_state.get(f"revamp_fn_{entry[0]}:{entry[3]}")]
         pending = [entry for entry in fn_selected
-                   if _fn_entry_stage(entry, fn_posted, fn_providers) == "Pending"]
-        csv_routes = [_fn_csv_route(entry[1], entry[3], fn_ghost_to_cluster) for entry in fn_selected]
+                   if _fn_entry_stage(entry, fn_posted, fn_providers) == "Pending"
+                   and (entry[1].get("_ghost_record") or {}).get("fn_handoff_state")
+                       not in ("queued", "running", "error")]
+        csv_routes = [_fn_csv_route(entry[1], entry[3], fn_ghost_to_cluster)
+                      for entry in fn_selected
+                      if (entry[1].get("_ghost_record") or {}).get("fn_handoff_state")
+                         not in ("queued", "running", "error")]
         csv_routes = [route for route in csv_routes if route]
         csv_data = None
         stop_count = 0
@@ -2364,25 +2377,37 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         if not fn_team_id or not fn_worker_id:
             st.error("Field Nation team or placeholder worker was not found in Onfleet. Selection is preserved; check the Onfleet team and worker setup.")
         else:
-            from revamp_bulk_fn import bulk_assign
-            saved, skipped, errors = bulk_assign(
-                db_engine, [(pod, route) for pod, route, _, _, _ in chosen], fn_due,
-                assign_tasks_to_fn_team, fn_team_id, fn_worker_id,
-            )
+            from revamp_fn_queue import queue_bulk, schedule_queued
+            try:
+                saved, skipped, errors = queue_bulk(
+                    db_engine, [(pod, route) for pod, route, _, _, _ in chosen],
+                    fn_due, fn_team_id, fn_worker_id,
+                )
+            except Exception as exc:
+                st.error(f"Could not queue Field Nation routes: {exc}")
+                saved, skipped, errors = [], [], []
             _apply_bulk_fn_results(chosen, saved, skipped)
+            if saved:
+                try:
+                    schedule_queued(db_engine, [wo for _, wo in saved], assign_tasks_to_fn_team)
+                except Exception as exc:
+                    st.warning("Field Nation rows were saved, but OnFleet sync could not "
+                               "start immediately. It will resume on the next refresh.")
+                    print(f"[fn-handoff/schedule] {type(exc).__name__}: {exc}", flush=True)
             if saved or skipped:
                 fetch_sent_records_from_sheet.clear()
-                message = f"Moved {len(saved)} route(s) to Field Nation."
+                message = (f"Queued {len(saved)} route(s) in Field Nation. "
+                           "OnFleet assignments and route plans are syncing separately.")
                 if skipped:
-                    message += f" {len(skipped)} route(s) were already assigned."
+                    message += f" {len(skipped)} route(s) already existed."
                 if errors:
-                    message += f" {len(errors)} route(s) could not be assigned: " + "; ".join(msg for _, msg in errors[:3])
+                    message += f" {len(errors)} could not be queued: " + "; ".join(msg for _, msg in errors[:3])
                 st.session_state["_revamp_notice"] = ("warning" if errors else "success", message)
-                if not errors:
+                if saved:
                     st.session_state["_revamp_show_fn_next"] = True
                 st.rerun()
             elif errors:
-                st.error(f"{len(errors)} route(s) could not be assigned: " +
+                st.error(f"{len(errors)} route(s) could not be queued: " +
                          "; ".join(msg for _, msg in errors[:3]))
 
     left, right = st.columns([1.75, 3.25], gap="large")
@@ -2538,13 +2563,30 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                         except Exception as exc:
                             st.error(f"Could not return route: {exc}")
 
+            handoff_state = str(ghost.get("fn_handoff_state") or "")
+            if handoff_state in ("queued", "running"):
+                st.info("OnFleet sync is in progress. The Field Nation route is saved; "
+                        "its OnFleet Route Plan is not confirmed yet.")
+            elif handoff_state == "error":
+                st.error("OnFleet handoff needs attention: " +
+                         str(ghost.get("fn_handoff_error") or "Route Plan was not confirmed."))
+                if not fn_only and db_engine is not None:
+                    from revamp_fn_queue import retry_handoff
+                    if st.button("Retry OnFleet handoff",
+                                 key=f"revamp_fn_retry_{pod}_{route_hash}",
+                                 use_container_width=True):
+                        if retry_handoff(db_engine, wo, assign_tasks_to_fn_team):
+                            st.success("Retry queued. Refresh to check the result.")
+                        else:
+                            st.info("This route was already queued or completed.")
             if route.get("_fn_assigned_history"):
                 st.success("Assigned in Field Nation. This route is now in the Accepted workflow.")
                 st.caption(f"Original FN work order: {route.get('_fn_original_wo') or '—'}")
                 st.caption(f"Provider: {route.get('_fn_history_provider') or 'Not recorded'}"
                            f" · Assigned: {route.get('_fn_assigned_at') or 'Date unavailable'}")
             elif stage == "Pending":
-                st.info("Select this route on the left, download the FN CSV, post it in Field Nation, then click Mark Posted.")
+                if handoff_state not in ("queued", "running", "error"):
+                    st.info("Select this route on the left, download the FN CSV, post it in Field Nation, then click Mark Posted.")
             else:
                 provider = st.text_input("Assigned Field Nation rep",
                                          value=str(fn_providers.get(route_hash) or ""),
