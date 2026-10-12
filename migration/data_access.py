@@ -1241,3 +1241,48 @@ def get_sent_records_from_db(
     ghost_routes["_fn_posted"] = fn_posted_dict
     ghost_routes["_fn_provider"] = fn_provider_dict
     return sent_dict, ghost_routes, archived_wos, history_db
+
+
+def record_fn_assignment_actor(engine: sa.Engine, cluster_hash: str, username: str) -> bool:
+    """Attribute a successful FN assignment to the signed-in dispatcher."""
+    if not username:
+        return False
+    with engine.begin() as conn:
+        wo = _fn_work_order_for_cluster_hash(conn, cluster_hash)
+        if not wo:
+            return False
+        result = conn.execute(sa.text("""
+            UPDATE field_nation_orders
+            SET payload = jsonb_set(
+                COALESCE(payload::jsonb, '{}'::jsonb),
+                '{fn_assigned_by}', to_jsonb(CAST(:username AS text)), true
+            ), updated_at = now()
+            WHERE work_order = :wo AND status = 'assigned'
+        """), {"wo": wo, "username": username})
+        return bool(result.rowcount)
+
+
+def get_fn_assignment_history(engine: sa.Engine, username: str, limit: int = 500) -> list[dict[str, Any]]:
+    """Durable, per-user FN assignment history, including routes moved to Accepted."""
+    if not username:
+        return []
+    with engine.connect() as conn:
+        rows = conn.execute(sa.text("""
+            SELECT work_order, payload, updated_at
+            FROM field_nation_orders
+            WHERE status = 'assigned'
+              AND payload::jsonb->>'fn_assigned_by' = :username
+            ORDER BY COALESCE(NULLIF(payload::jsonb->>'fn_assigned_ts', '')::timestamptz, updated_at) DESC
+            LIMIT :limit
+        """), {"username": username, "limit": limit}).mappings().all()
+    result = []
+    for row in rows:
+        p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+        result.append({
+            "work_order": row["work_order"],
+            "assigned_work_order": p.get("wo") or row["work_order"],
+            "provider": p.get("fn_provider") or p.get("icn") or "",
+            "assigned_at": p.get("fn_assigned_ts") or str(row["updated_at"]),
+            "task_count": len(p.get("taskIds") or []) if isinstance(p.get("taskIds"), list) else len([x for x in str(p.get("taskIds") or "").replace("|", ",").split(",") if x.strip()]),
+        })
+    return result
