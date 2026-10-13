@@ -508,6 +508,96 @@ def mirror_remove_field_nation_by_cluster_hash(engine: sa.Engine, cluster_hash: 
     remove_field_nation(engine, work_order)
     return {"success": True, "work_order": work_order}
 
+def _fn_return_task_ids(raw: Any) -> set[str]:
+    """Normalize task IDs without treating a comma-delimited string as one ID."""
+    if isinstance(raw, (list, tuple, set)):
+        return {str(value).strip() for value in raw if str(value).strip()}
+    if isinstance(raw, str) and raw.lstrip().startswith("["):
+        try:
+            return _fn_return_task_ids(json.loads(raw))
+        except (ValueError, TypeError):
+            pass
+    return {item.strip() for item in str(raw or "").replace("|", ",").split(",") if item.strip()}
+
+
+def _match_fn_return_order(rows, cluster_hash: str, work_order: str = "",
+                           task_ids: Any = None) -> dict[str, Any]:
+    """Select one exact FN order for return; NEVER infer by city/pod.
+
+    Re-bundling can change the live route hash, so exact saved WO or exact
+    task-ID set is also accepted. Overlapping-but-not-identical tasks fail
+    closed: a partial live cluster may not revoke an entire FN assignment.
+    """
+    requested = _fn_return_task_ids(task_ids)
+    wo_hint = str(work_order or "").strip()
+    if wo_hint.lower() in ("none", "unknown", "field nation route", "n/a"):
+        wo_hint = ""
+    hash_hint = str(cluster_hash or "").strip()
+    matches, overlapping = [], False
+    for row in rows:
+        payload = row.get("payload") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (ValueError, TypeError):
+                continue
+        if not isinstance(payload, dict):
+            continue
+        row_wo = str(row.get("work_order") or "").strip()
+        row_hash = str(payload.get("cluster_hash") or "").strip()
+        row_ids = _fn_return_task_ids(payload.get("taskIds") or payload.get("task_ids"))
+        exact_ids = bool(requested and row_ids and requested == row_ids)
+        wo_matches = bool(wo_hint and (row_wo == wo_hint or str(payload.get("wo") or "") == wo_hint))
+        hash_matches = bool(hash_hint and row_hash == hash_hint)
+        if requested and row_ids and requested.intersection(row_ids) and not exact_ids:
+            overlapping = True
+        if not (exact_ids or wo_matches or hash_matches):
+            continue
+        if requested and (not row_ids or not exact_ids):
+            # Even matching WO/hash must not remove tasks outside this card.
+            overlapping = True
+            continue
+        if not row_ids:
+            continue
+        matches.append({
+            "work_order": row_wo,
+            "cluster_hash": row_hash or hash_hint,
+            "task_ids": sorted(row_ids),
+            "status": str(row.get("status") or "").lower(),
+            "handoff_state": str(payload.get("fn_handoff_state") or "").lower(),
+            "payload": payload,
+        })
+    if len(matches) > 1:
+        return {"success": False, "reason": "ambiguous",
+                "error": "More than one Field Nation work order matches these tasks. Nothing was changed."}
+    if not matches:
+        if overlapping:
+            return {"success": False, "reason": "partial",
+                    "error": "This route only partially overlaps a saved Field Nation work order. Refresh and select the original complete work order."}
+        return {"success": False, "reason": "not_found",
+                "error": "No saved Field Nation work order matches this route."}
+    selected = matches[0]
+    if selected["status"] != "posted":
+        return {"success": False, "reason": "already_assigned",
+                "error": "This Field Nation work order has already moved to Accepted. Return it through the Accepted workflow."}
+    if selected["handoff_state"] in ("queued", "running"):
+        return {"success": False, "reason": "handoff_running",
+                "error": "OnFleet is still processing this Field Nation route. Wait for synchronization to finish before returning it."}
+    return {"success": True, **selected}
+
+
+def resolve_fn_return_order(engine: sa.Engine, cluster_hash: str, work_order: str = "",
+                            task_ids: Any = None) -> dict[str, Any]:
+    """Resolve an FN return using durable identity; read-only until confirmed."""
+    with engine.connect() as conn:
+        rows = conn.execute(sa.text("""
+            SELECT work_order, status::text AS status, payload
+            FROM field_nation_orders
+            WHERE status IN ('posted', 'assigned')
+        """)).mappings().all()
+    return _match_fn_return_order(rows, cluster_hash, work_order, task_ids)
+
+
 def mark_fn_posted(engine: sa.Engine, work_order: str) -> None:
     """Replaces `markFNPosted`."""
     with engine.begin() as conn:
