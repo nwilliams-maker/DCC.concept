@@ -632,6 +632,7 @@ def test_return_real_fn_route_uses_db_identity_and_only_then_removes(monkeypatch
     def dispatch(route_hash, ic, pod, **kwargs):
         assert route_hash == "persisted-hash"
         assert kwargs["cluster_data"]["taskIds"] == "a,b"
+        assert kwargs["verify_fn_return"] is True
         events.append(("OnFleet", route_hash))
     route = {"wo": "none", "city": "Mount Vernon", "state": "IL",
              "data": [{"id": "a"}, {"id": "b"}]}
@@ -639,3 +640,23 @@ def test_return_real_fn_route_uses_db_identity_and_only_then_removes(monkeypatch
         route, "new-hash", "Blue", object(), dispatch, Refresh())
     assert outcome == "returned"
     assert [event[0] for event in events] == ["OnFleet", "deleted", "cache"]
+
+
+def test_fn_return_keeps_tracking_if_onfleet_release_fails(monkeypatch):
+    from migration import data_access as da
+    deleted = []
+    monkeypatch.setattr(da, "resolve_fn_return_order", lambda *args: {
+        "success": True, "work_order": "FN10132026-Mount Vernon IL-1",
+        "cluster_hash": "old-hash", "task_ids": ["a", "b"],
+        "payload": {"taskIds": "a,b"}})
+    monkeypatch.setattr(da, "remove_field_nation",
+                        lambda *args: deleted.append("removed"))
+    scope = load_functions("revamp_workspace.py", ["_return_fn_route_to_regular"],
+                           {"st": SimpleNamespace(session_state={})})
+    def fail_release(*args, **kwargs):
+        raise RuntimeError("OnFleet did not confirm release of every task")
+    with unittest.TestCase().assertRaisesRegex(RuntimeError, "did not confirm"):
+        scope["_return_fn_route_to_regular"](
+            {"data": [{"id": "a"}, {"id": "b"}]}, "new-hash", "Blue",
+            object(), fail_release, SimpleNamespace(clear=lambda: None))
+    assert deleted == []
