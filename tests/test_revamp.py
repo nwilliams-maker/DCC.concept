@@ -543,3 +543,99 @@ render_workspace(lambda pod: pod == "Blue", lambda pod: None,
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_stale_session_field_nation_label_returns_to_normal_route():
+    scope = load_functions("revamp_workspace.py", ["_route_hash", "_route_status"],
+                           {"hashlib": hashlib, "HIGH_RATE_FLAG_THRESHOLD": 25.0,
+                            "st": SimpleNamespace(session_state={})})
+    route = {"city": "Mount Vernon", "state": "IL",
+             "data": [{"id": "t1"}, {"id": "t2"}]}
+    route_hash = scope["_route_hash"](route)
+    scope["st"].session_state[f"route_state_{route_hash}"] = "field_nation"
+    # The legacy code showed a phantom FN card despite no persisted reservation.
+    assert scope["_route_status"](route, {}, 22) == "Ready"
+    assert f"route_state_{route_hash}" not in scope["st"].session_state
+    assert scope["_route_status"](
+        route, {"t1": {"status": "field_nation"}}, 22) == "Field Nation"
+
+
+def test_return_fn_lookup_requires_complete_task_identity():
+    from migration import data_access as da
+    stored = [
+        {"work_order": "FN10132026-Mount Vernon IL-1", "status": "posted",
+         "payload": {"cluster_hash": "original-hash", "taskIds": "a,b,c,d,e"}},
+    ]
+    # Rebundled route gets another hash but retains exactly the same tasks.
+    result = da._match_fn_return_order(stored, "new-hash", "none",
+                                       ["a", "b", "c", "d", "e"])
+    assert result["success"] and result["work_order"] == stored[0]["work_order"]
+    assert result["cluster_hash"] == "original-hash"
+    assert da._match_fn_return_order(
+        stored, "original-hash", "", ["a", "b"])["reason"] == "partial"
+    assert da._match_fn_return_order(
+        stored, "stale-hash", "none", ["other"])["reason"] == "not_found"
+    assert da._match_fn_return_order(
+        [{**stored[0], "status": "assigned"}], "new-hash", "",
+        ["a", "b", "c", "d", "e"])["reason"] == "already_assigned"
+    syncing = {**stored[0], "payload": {
+        **stored[0]["payload"], "fn_handoff_state": "running"}}
+    assert da._match_fn_return_order(
+        [syncing], "original-hash", "",
+        ["a", "b", "c", "d", "e"])["reason"] == "handoff_running"
+
+
+def test_return_orphan_fn_route_does_not_unassign_or_delete(monkeypatch):
+    from migration import data_access as da
+    calls = []
+    monkeypatch.setattr(da, "resolve_fn_return_order",
+                        lambda *args: {"success": False, "reason": "not_found"})
+    monkeypatch.setattr(da, "remove_field_nation",
+                        lambda *args: calls.append("DELETE"))
+    scope = load_functions(
+        "revamp_workspace.py", ["_return_fn_route_to_regular"],
+        {"st": SimpleNamespace(session_state={
+            "route_state_stale-hash": "field_nation",
+            "revamp_selected_route": "Blue:stale-hash",
+        })})
+    class Refresh:
+        def clear(self):
+            calls.append("invalidate")
+    route = {"wo": "none", "city": "Mount Vernon", "state": "IL",
+             "data": [{"id": "a"}, {"id": "b"}]}
+    outcome = scope["_return_fn_route_to_regular"](
+        route, "stale-hash", "Blue", object(),
+        lambda *args, **kw: calls.append("OnFleet PUT"), Refresh())
+    assert outcome == "stale_cleared"
+    assert calls == ["invalidate"]
+    assert "route_state_stale-hash" not in scope["st"].session_state
+
+
+def test_return_real_fn_route_uses_db_identity_and_only_then_removes(monkeypatch):
+    from migration import data_access as da
+    events = []
+    saved = {
+        "success": True, "work_order": "FN10132026-Mount Vernon IL-1",
+        "cluster_hash": "persisted-hash",
+        "task_ids": ["a", "b"], "payload": {
+            "taskIds": "a,b", "city": "Mount Vernon", "state": "IL"}}
+    monkeypatch.setattr(da, "resolve_fn_return_order",
+                        lambda *args: saved)
+    monkeypatch.setattr(da, "remove_field_nation",
+                        lambda engine, wo: events.append(("deleted", wo)))
+    scope = load_functions(
+        "revamp_workspace.py", ["_return_fn_route_to_regular"],
+        {"st": SimpleNamespace(session_state={})})
+    class Refresh:
+        def clear(self):
+            events.append(("cache", None))
+    def dispatch(route_hash, ic, pod, **kwargs):
+        assert route_hash == "persisted-hash"
+        assert kwargs["cluster_data"]["taskIds"] == "a,b"
+        events.append(("OnFleet", route_hash))
+    route = {"wo": "none", "city": "Mount Vernon", "state": "IL",
+             "data": [{"id": "a"}, {"id": "b"}]}
+    outcome = scope["_return_fn_route_to_regular"](
+        route, "new-hash", "Blue", object(), dispatch, Refresh())
+    assert outcome == "returned"
+    assert [event[0] for event in events] == ["OnFleet", "deleted", "cache"]
