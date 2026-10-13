@@ -1402,13 +1402,20 @@ def _return_fn_route_to_regular(route, route_hash, pod, db_engine,
     payload["taskIds"] = ",".join(resolved["task_ids"])
     payload.setdefault("city", route.get("city") or "")
     payload.setdefault("state", route.get("state") or "")
-    move_to_dispatch(
+    # A previous failed attempt may have set reverted_ locally while the
+    # durable Field Nation record still exists. Explicit confirmation allows
+    # retrying the release of exactly this verified task set.
+    st.session_state.pop(f"reverted_{saved_hash}", None)
+    release_result = move_to_dispatch(
         saved_hash, "Field Nation", pod,
         action_label="Field Nation Revoked",
         check_onfleet=True, cluster_data=payload, check_completed=True,
+        verify_fn_return=True,
     )
-    # Do not remove tracking before the return was initiated; this way a
-    # failed lookup or exception never deletes the real FN order.
+    if release_result is False:
+        raise RuntimeError("OnFleet release could not be confirmed. The Field Nation work order was preserved.")
+    # Remove tracking only once all OnFleet tasks are confirmed released.
+    # Failed attempts leave the original FN work order intact for retry.
     _fn_data.remove_field_nation(db_engine, resolved["work_order"])
 
     fetch_sent_records_from_sheet.clear()
