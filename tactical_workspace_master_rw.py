@@ -2243,7 +2243,7 @@ def _onfleet_get_state(tid, auth_header):
     return (tid, False)
 
 
-def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=None, check_completed=False):
+def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", check_onfleet=True, cluster_data=None, check_completed=False, verify_fn_return=False):
     """Moves route to Dispatch column instantly. Sheet update + Onfleet scrub run in background.
 
     Apr 27 2026 — completion-aware unassign (gated by check_completed=True):
@@ -2261,7 +2261,7 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # already flagged reverted_ (a prior click is in flight or done), a
     # second click would re-fire the archive + Onfleet unassign. Bail.
     if st.session_state.get(f"reverted_{cluster_hash}", False):
-        return
+        return False if verify_fn_return else None
 
     # 1. Parse all task IDs from cluster_data (str CSV or list of dicts).
     all_task_ids = []
@@ -2372,7 +2372,7 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
         # daemon), still reliable, just parallel across the two network calls.
         def _do_onfleet_unassigns():
             if not (outstanding_ids and check_completed):
-                return
+                return not verify_fn_return or bool(all_task_ids)
             try:
                 _put_auth = {"Authorization": f"Basic {base64.b64encode(f'{ONFLEET_KEY}:'.encode()).decode()}", "Content-Type": "application/json"}
                 _put_payload = json.dumps({"worker": None, "metadata": []})
@@ -2386,9 +2386,11 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
                         _log_err(f"move_to_dispatch/unassign task={tid}", e)
                         return (tid, -1)
                 with ThreadPoolExecutor(max_workers=min(10, len(outstanding_ids))) as _ex:
-                    list(_ex.map(_do_put, outstanding_ids))
+                    results = list(_ex.map(_do_put, outstanding_ids))
+                return all(http_status == 200 for _tid, http_status in results)
             except Exception as e:
                 _log_err("move_to_dispatch/unassign-outer", e)
+                return False
 
         def _do_sheet_archive():
             try:
@@ -2425,9 +2427,15 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
         with ThreadPoolExecutor(max_workers=2) as _rec_ex:
             _f1 = _rec_ex.submit(_do_onfleet_unassigns)
             _f2 = _rec_ex.submit(_do_sheet_archive)
+            unassign_ok = False
             for _f in (_f1, _f2):
-                try: _f.result(timeout=55)
-                except Exception as _fe: _log_err("_bg_reconcile/future", _fe)
+                try:
+                    result = _f.result(timeout=55)
+                    if _f is _f1:
+                        unassign_ok = bool(result)
+                except Exception as _fe:
+                    _log_err("_bg_reconcile/future", _fe)
+            return unassign_ok
 
     # 🛑 INLINE, NOT A DAEMON THREAD (May 2026 fix — Accepted-revoke Onfleet bug):
     # The daemon-thread version fails SILENTLY under Streamlit on Railway. The
@@ -2441,7 +2449,16 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # re-introduced. Run inline: the reverted_ flag set ABOVE already moved the
     # route in the UI so the click still feels responsive — this just makes the
     # Onfleet + sheet reconcile actually happen before the rerun.
-    _bg_reconcile()
+    _unassign_verified = _bg_reconcile()
+    if verify_fn_return and not _unassign_verified:
+        # Preserve the DB FN order for retry. Never represent a failed
+        # OnFleet release as a successful return to dispatch.
+        st.session_state.pop(f"reverted_{cluster_hash}", None)
+        st.session_state[f"route_state_{cluster_hash}"] = "field_nation"
+        raise RuntimeError(
+            "OnFleet did not confirm release of every task. "
+            "The Field Nation work order is preserved; retry after checking OnFleet."
+        )
 
     # Toast — completion-aware variant only when check_completed=True.
     if check_completed:
