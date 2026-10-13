@@ -152,8 +152,14 @@ def _route_status(route, sent_db, nearest_miles=None, pod=None):
         return "Accepted"
     if persisted_status == "declined":
         return "Declined"
-    if local == "field_nation" or persisted_status == "field_nation":
+    if persisted_status == "field_nation":
         return "Field Nation"
+    if local == "field_nation":
+        # Session-only FN labels are not proof of an actual transfer.
+        # Successful sends have a Postgres reservation by task ID, and the
+        # sender invalidates its cache before rerun. Drop any orphaned label.
+        st.session_state.pop(f"route_state_{route_hash}", None)
+        local = None
     if local == "email_sent" or persisted_status == "sent":
         return "Sent"
     if local == "declined":
@@ -1349,49 +1355,71 @@ def _fetch_fn_assignment_ids():
 
 def _return_fn_route_to_regular(route, route_hash, pod, db_engine,
                                 move_to_dispatch, fetch_sent_records_from_sheet):
-    """Remove FN tracking and push its OnFleet tasks back to normal dispatch."""
+    """Return a verified FN order, or clear an orphaned local FN label safely.
+
+    Re-clustering may change the live hash. Resolve by persisted WO or exact
+    task IDs before touching OnFleet. Never revoke unrelated tasks based on
+    a city, address, partial subset, or stale session label.
+    """
     if db_engine is None:
         raise RuntimeError("Railway database is unavailable")
-    if not callable(move_to_dispatch):
-        raise RuntimeError("The return-to-dispatch action is unavailable")
-
     from migration import data_access as _fn_data
 
-    # Remove the Field Nation tracking row first so the next refresh cannot
-    # immediately classify the route back into the FN bucket.
-    result = _fn_data.mirror_remove_field_nation_by_cluster_hash(db_engine, route_hash)
-    if not result.get("success"):
-        raise RuntimeError(result.get("skipped") or result.get("error") or "Field Nation order not found")
-
     ghost = route.get("_ghost_record") or {}
-    cluster_data = ghost if ghost else route
+    original_wo = str(ghost.get("wo") or route.get("wo") or "").strip()
+    raw_task_ids = (ghost.get("task_ids") or ghost.get("taskIds")
+                    or route.get("task_ids") or [
+                        task.get("id") for task in (route.get("data") or [])
+                        if isinstance(task, dict) and task.get("id")
+                    ])
+    resolved = _fn_data.resolve_fn_return_order(db_engine, route_hash,
+                                                  original_wo, raw_task_ids)
+    if not resolved.get("success"):
+        if resolved.get("reason") == "not_found" and not ghost and route.get("data"):
+            # This is a live, open OnFleet cluster that was mislabeled FN by
+            # session_state after a failed / old transfer. No FN order exists.
+            # Clear ONLY the false local UI label: no Postgres mutation and
+            # critically NO OnFleet worker removal for unrelated tasks.
+            st.session_state.pop(f"route_state_{route_hash}", None)
+            st.session_state.pop(f"reverted_{route_hash}", None)
+            st.session_state.pop(f"revamp_fn_{pod}:{route_hash}", None)
+            st.session_state.pop("revamp_selected_route", None)
+            for key in ("_revamp_quiet_pending", "_revamp_quiet_all_pending",
+                        "_revamp_fn_checked_entries"):
+                st.session_state.pop(key, None)
+            fetch_sent_records_from_sheet.clear()
+            return "stale_cleared"
+        raise RuntimeError(resolved.get("error") or "Field Nation order was not verified")
 
-    # Existing DCC re-route logic already handles the critical OnFleet side:
-    # FN tasks are state=1 under the FN placeholder, so check_completed=True
-    # causes them to be PUT back to worker=None and flow into the open pool.
+    if not callable(move_to_dispatch):
+        raise RuntimeError("The return-to-dispatch action is unavailable")
+    # Use the durable task set (and saved original cluster hash), not an
+    # incomplete live cluster with a possibly different/new route hash.
+    saved_hash = resolved["cluster_hash"]
+    if not saved_hash or not resolved["task_ids"]:
+        raise RuntimeError("The saved Field Nation route is missing its task identity")
+    payload = dict(resolved["payload"])
+    payload["taskIds"] = ",".join(resolved["task_ids"])
+    payload.setdefault("city", route.get("city") or "")
+    payload.setdefault("state", route.get("state") or "")
     move_to_dispatch(
-        route_hash,
-        "Field Nation",
-        pod,
+        saved_hash, "Field Nation", pod,
         action_label="Field Nation Revoked",
-        check_onfleet=True,
-        cluster_data=cluster_data,
-        check_completed=True,
+        check_onfleet=True, cluster_data=payload, check_completed=True,
     )
+    # Do not remove tracking before the return was initiated; this way a
+    # failed lookup or exception never deletes the real FN order.
+    _fn_data.remove_field_nation(db_engine, resolved["work_order"])
 
-    try:
-        fetch_sent_records_from_sheet.clear()
-    except Exception:
-        pass
-
-    st.session_state.pop(f"revamp_fn_{pod}:{route_hash}", None)
-    st.session_state.pop(f"route_state_{route_hash}", None)
-    if st.session_state.get("revamp_selected_route") == f"{pod}:{route_hash}":
-        st.session_state.pop("revamp_selected_route", None)
-    for key in ("_revamp_quiet_pending", "_revamp_quiet_all_pending", "_revamp_fn_checked_entries"):
+    fetch_sent_records_from_sheet.clear()
+    for candidate_hash in {route_hash, saved_hash}:
+        st.session_state.pop(f"revamp_fn_{pod}:{candidate_hash}", None)
+        st.session_state.pop(f"route_state_{candidate_hash}", None)
+    st.session_state.pop("revamp_selected_route", None)
+    for key in ("_revamp_quiet_pending", "_revamp_quiet_all_pending",
+                "_revamp_fn_checked_entries"):
         st.session_state.pop(key, None)
-    return True
-
+    return "returned"
 
 @st.fragment
 def _render_workspace_summary(all_routes, pod_choice, loaded):
@@ -2092,6 +2120,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if st.session_state.pop("_revamp_show_fn_next", False):
         st.session_state["revamp_status"] = "Field Nation"
         _remember_view()
+    if st.session_state.pop("_revamp_show_routes_next", False) and not fn_only:
+        st.session_state["revamp_status"] = "Routes"
+        _remember_view()
     if st.session_state.pop("_revamp_show_accepted_next", False) and not fn_only:
         st.session_state["revamp_status"] = "Accepted"
         _remember_view()
@@ -2498,7 +2529,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             from migration import data_access as fn_data
             stage = _fn_entry_stage((pod, route, state, route_hash, nearest), fn_posted, fn_providers)
             ghost = route.get("_ghost_record") or {}
-            wo = str(ghost.get("wo") or route.get("wo") or "Field Nation route")
+            wo = str(ghost.get("wo") or route.get("wo") or "").strip()
+            if not wo or wo.lower() in ("none", "unknown"):
+                wo = "Field Nation route (no linked work order)"
             due = str(ghost.get("due") or "Not set")
             fn_tasks = (len(route.get("data", []))
                         or len(ghost.get("task_ids") or [])
@@ -2562,14 +2595,22 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                         use_container_width=True,
                     ):
                         try:
-                            _return_fn_route_to_regular(
+                            outcome = _return_fn_route_to_regular(
                                 route, route_hash, pod, db_engine,
                                 move_to_dispatch, fetch_sent_records_from_sheet,
                             )
-                            st.session_state["_revamp_notice"] = (
-                                "success",
-                                f"{title} returned to regular dispatch.",
-                            )
+                            if outcome == "stale_cleared":
+                                st.session_state["_revamp_notice"] = (
+                                    "warning",
+                                    f"{title}: cleared a stale Field Nation label. "
+                                    "No database records or OnFleet task assignments were changed.",
+                                )
+                            else:
+                                st.session_state["_revamp_notice"] = (
+                                    "success",
+                                    f"{title} returned to regular dispatch.",
+                                )
+                            st.session_state["_revamp_show_routes_next"] = True
                             st.rerun()
                         except Exception as exc:
                             st.error(f"Could not return route: {exc}")
