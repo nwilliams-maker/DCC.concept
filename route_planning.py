@@ -78,11 +78,93 @@ def geographic_order(home, stops):
     return [i-1 for i in min(candidates, key=lambda p: (length(p), p))[1:-1]]
 
 
+def _road_costs(points, token, request_get):
+    """Build a directed road-time matrix across the entire route in 12-stop blocks."""
+    n = len(points)
+    blocks = [list(range(i, min(i + 12, n))) for i in range(0, n, 12)]
+    costs = [[float('inf')] * n for _ in range(n)]
+    for i in range(n):
+        costs[i][i] = 0.0
+
+    def fetch(pair):
+        a, b = pair
+        src, dst = blocks[a], blocks[b]
+        indices = src if a == b else src + dst
+        coords = ';'.join(f'{points[i][0]},{points[i][1]}' for i in indices)
+        sources = ';'.join(str(i) for i in range(len(src)))
+        targets = ';'.join(str(i if a == b else len(src) + i) for i in range(len(dst)))
+        url = (f'https://api.mapbox.com/directions-matrix/v1/mapbox/driving-traffic/{coords}'
+               f'?annotations=duration&sources={sources}&destinations={targets}&access_token={token}')
+        result = request_get(url, timeout=20).json()
+        rows = result.get('durations')
+        if (result.get('code') != 'Ok' or not isinstance(rows, list)
+                or len(rows) != len(src)
+                or any(not isinstance(row, list) or len(row) != len(dst) for row in rows)):
+            raise RoutePlanningError('Incomplete road-time matrix; route not dispatched')
+        return src, dst, rows
+
+    pairs = [(i, j) for i in range(len(blocks)) for j in range(len(blocks))]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for src, dst, rows in pool.map(fetch, pairs):
+            for i, row in zip(src, rows):
+                for j, value in zip(dst, row):
+                    if i == j:
+                        continue
+                    if value is None or not math.isfinite(value) or value < 0:
+                        raise RoutePlanningError('Unreachable stop in road-time matrix')
+                    costs[i][j] = value
+    return costs
+
+
+def _global_road_order(costs, seeds):
+    """Directed full-route 2-opt; depot stays fixed at the beginning and end."""
+    n = len(costs) - 1
+
+    def score(order):
+        path = [0, *[i + 1 for i in order], 0]
+        return sum(costs[a][b] for a, b in zip(path, path[1:]))
+
+    def improve(order):
+        order = list(order)
+        current = score(order)
+        for _ in range(30):
+            best, candidate = current, None
+            for i in range(n - 1):
+                for j in range(i + 1, n):
+                    trial = order[:i] + order[i:j+1][::-1] + order[j+1:]
+                    value = score(trial)
+                    if value < best - 0.01:
+                        best, candidate = value, trial
+            if candidate is None:
+                break
+            order, current = candidate, best
+        return current, order
+
+    candidates = [improve(seed) for seed in seeds]
+    for first in sorted(range(n), key=lambda i: costs[0][i+1])[:min(n, 6)]:
+        remaining = set(range(n)) - {first}
+        order = [first]
+        while remaining:
+            nxt = min(remaining, key=lambda i: (costs[order[-1]+1][i+1], i))
+            order.append(nxt)
+            remaining.remove(nxt)
+        candidates.append(improve(order))
+    return min(candidates, key=lambda result: result[0])[1]
+
+
 def plan_round_trip(home, stops, token, request_get):
     """Return road miles, driving hours, and indices of every stop exactly once."""
     if not stops:
         return 0.0, 0.0, []
-    seed = geographic_order(home, stops) if len(stops) > 10 else list(range(len(stops)))
+    seed = geographic_order(home, stops)
+    # A single global road-time optimization for normal-sized routes.
+    # Never dispatch a worse order than the existing stop sequence.
+    if len(stops) <= 75:
+        costs = _road_costs([home, *stops], token, request_get)
+        order = _global_road_order(
+            costs, [list(range(len(stops))), seed, list(reversed(seed))])
+    else:
+        order = None
     def fetch(endpoint, coords, params):
         coord_text = ';'.join(f'{lng},{lat}' for lng, lat in coords)
         response = request_get(
@@ -105,9 +187,12 @@ def plan_round_trip(home, stops, token, request_get):
                 or ranks[0] != 0 or ranks[-1] != len(wps)-1):
             raise RoutePlanningError('Incomplete optimized stop order')
         return [chunk[i] for i in sorted(range(len(chunk)), key=lambda i: ranks[i+1])]
-    offsets = list(range(0, len(seed), 10))
-    with ThreadPoolExecutor(max_workers=min(4, len(offsets))) as pool:
-        order = [i for chunk in pool.map(refine, offsets) for i in chunk]
+    if order is None:
+        # Large routes use shared chunk endpoints, never intermediate
+        # depot returns. The final measured path is still one round trip.
+        offsets = list(range(0, len(seed), 10))
+        with ThreadPoolExecutor(max_workers=min(4, len(offsets))) as pool:
+            order = [i for chunk in pool.map(refine, offsets) for i in chunk]
     if sorted(order) != list(range(len(stops))):
         raise RoutePlanningError('Route did not include every stop once')
     # Directions measures precisely the final dispatch order. Adjacent requests
