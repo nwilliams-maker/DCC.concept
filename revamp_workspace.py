@@ -2586,6 +2586,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         _render_route_list(matching, status, fn_posted, fn_providers, quiet_context, fn_refresh_context)
 
     with right:
+        # Search should bring the first matching route into focus, rather than
+        # leaving the detail pane on a previously selected unrelated route.
+        _previous_search = st.session_state.get("_revamp_last_detail_search")
+        if _previous_search != search:
+            st.session_state["_revamp_last_detail_search"] = search
+            if search and matching:
+                st.session_state["revamp_selected_route"] = _route_entry_key(*matching[0][:4])
         selection = st.session_state.get("revamp_selected_route")
         current = next((entry for entry in matching if
                         _route_entry_key(*entry[:4]) == selection),
