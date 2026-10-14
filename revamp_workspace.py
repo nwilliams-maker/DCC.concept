@@ -947,6 +947,22 @@ def _workspace_statuses(user):
     return ("Field Nation",) if user.get("tier") == "guest" or user.get("scope") == "field_nation" or str(user.get("role", "")).lower() == "associate" else STATUSES
 
 
+def _has_linked_fn_work_order(ghost):
+    """Only persisted FN orders belong in the Field Nation queue.
+
+    Live OnFleet clusters may inherit a task's FN status even when their
+    clustering/hash no longer corresponds to a saved FN work order. They
+    must not appear as selectable phantom routes with blank WO/dates.
+    """
+    if not isinstance(ghost, dict):
+        return False
+    work_order = str(ghost.get("wo") or "").strip()
+    return bool(work_order and work_order.lower() not in (
+        "none", "null", "unknown", "n/a", "field nation route",
+        "field nation route (no linked work order)",
+    ))
+
+
 def _fn_saved_entries(ghost_db, pods, merge_same_wo_ghosts=None):
     entries = []
     for pod in pods:
@@ -956,7 +972,8 @@ def _fn_saved_entries(ghost_db, pods, merge_same_wo_ghosts=None):
             ghosts = merge_same_wo_ghosts(ghosts)
         for ghost in ghosts:
             route_hash = str(ghost.get("hash") or "")
-            if not route_hash or str(ghost.get("status") or "").lower() not in ("field_nation", "posted"):
+            if (not route_hash or not _has_linked_fn_work_order(ghost)
+                    or str(ghost.get("status") or "").lower() not in ("field_nation", "posted")):
                 continue
             if st.session_state.get(f"reverted_{route_hash}", False):
                 continue
@@ -2034,6 +2051,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             route_hash = _route_hash(route)
             display_route = dict(route)
             route_state = _route_status(route, sent_db, nearest[1] if nearest else None, route_pod)
+            if route_state == "Field Nation":
+                # FN membership is derived from individual task reservations.
+                # A live task cluster can have a NEW hash / partial task set,
+                # resulting in a fake FN card with "no linked work order".
+                # The persisted FN ghosts below are authoritative and show the
+                # whole saved work order even after an OnFleet reassignment.
+                continue
             saved = saved_by_hash.get((pod, route_hash))
             if saved:
                 display_route["_ghost_record"] = saved
@@ -2078,6 +2102,10 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                      "Field Nation" if ghost_status in ("field_nation", "posted") else
                      "Sent" if ghost_status == "sent" else
                      "Declined" if ghost_status == "declined" else "Routed")
+            if state == "Field Nation" and not _has_linked_fn_work_order(ghost):
+                # Never show a phantom FN card without a persistent work order.
+                # Do not delete or unassign any OnFleet task here.
+                continue
             rebuilt_fn_data = _fn_ghost_tasks(ghost) if state == "Field Nation" else []
             route = {
                 "_is_ghost": True, "wo": ghost.get("wo", ""),
