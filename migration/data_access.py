@@ -1413,6 +1413,28 @@ def get_fn_assignment_history(engine: sa.Engine, username: str, limit: int = 500
     return result
 
 
+def revert_fn_posted_to_pending(engine: sa.Engine, work_orders: list[str]) -> dict[str, Any]:
+    """Revert exact posted orders; never change assigned orders."""
+    selected = list(dict.fromkeys(str(w).strip() for w in work_orders if str(w).strip()))
+    if not 1 <= len(selected) <= 100:
+        raise ValueError("Select 1 to 100 work orders.")
+    reverted, skipped = [], []
+    with engine.begin() as conn:
+        for wo in selected:
+            row = conn.execute(sa.text("SELECT status::text AS status, payload FROM field_nation_orders WHERE work_order=:wo FOR UPDATE"), {"wo": wo}).mappings().first()
+            if not row or row["status"] != "posted":
+                skipped.append(wo)
+                continue
+            payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+            if payload.get("fn_provider") or payload.get("fn_assigned_ts"):
+                skipped.append(wo)
+                continue
+            payload.pop("fn_posted_ts", None)
+            conn.execute(sa.text("UPDATE field_nation_orders SET status='pending', payload=CAST(:payload AS jsonb), updated_at=now() WHERE work_order=:wo AND status='posted'"), {"wo": wo, "payload": json.dumps(payload)})
+            reverted.append({"work_order": wo, "cluster_hash": payload.get("cluster_hash", "")})
+    return {"reverted": reverted, "skipped": skipped}
+
+
 def get_fn_posted_orders(engine: sa.Engine, limit: int = 500) -> list[dict[str, Any]]:
     """Persisted FN orders marked Posted, excluding those subsequently Assigned."""
     with engine.connect() as conn:
