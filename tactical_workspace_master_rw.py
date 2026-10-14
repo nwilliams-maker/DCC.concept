@@ -7557,14 +7557,16 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
         dl_col, link_col = st.columns(2)
         with dl_col:
             if fn_buf:
-                st.download_button(
+                if st.download_button(
                     label="Download CSV",
                     data=fn_buf,
                     file_name=f"FN_Upload_{cluster.get('city', 'Route')}_{datetime.now().strftime('%m%d%Y')}.csv",
                     mime="text/csv",
                     key=f"fn_dl_{cluster_hash}",
                     use_container_width=True
-                )
+                ):
+                    st.session_state.setdefault('_fn_exported', {})[cluster_hash] = datetime.now().strftime('%m/%d %I:%M %p')
+                    st.toast("✓ CSV downloaded — route eligible to mark Posted.")
         with link_col:
             st.link_button(
                 "Field Nation",
@@ -7588,10 +7590,14 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     disabled=True,
                 )
             else:
+                _single_csv_ready = cluster_hash in st.session_state.get('_fn_exported', {})
+                if not _single_csv_ready:
+                    st.caption("Download CSV to enable Posted.")
                 if st.button(
                     "Posted",
                     key=f"fn_post_one_{pod_name}_{cluster_hash}",
                     use_container_width=True,
+                    disabled=not _single_csv_ready,
                 ):
                     _ts = datetime.now().strftime('%m/%d %I:%M %p')
                     _fn_posted_dict[cluster_hash] = _ts
@@ -11897,12 +11903,12 @@ with tabs[6]:
                                 disabled=(len(_newly_posting) == 0 or not _digital_csv_ready),
                             ):
                                 _ts = datetime.now().strftime('%m/%d %I:%M %p')
-                                for _h in _fn_selected:
+                                for _h in _newly_posting:
                                     _fn_posted_dict[_h] = _ts
                                 st.session_state['_fn_posted'] = _fn_posted_dict
                                 # 📤 Persist via GAS so Sent group survives reload (see pod FN handler).
                                 try:
-                                    _hashes_csv = ",".join(_fn_selected)
+                                    _hashes_csv = ",".join(_newly_posting)
                                     threading.Thread(
                                         target=lambda: requests.post(
                                             GAS_WEB_APP_URL,
