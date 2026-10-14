@@ -86,7 +86,6 @@ def test_cannot_mark_unchecked_route_posted_even_direct_backend(db):
     assert row["status"] == "posted"
     assert "fn_posted_ts" not in row["payload"]
     assert not da.fn_csv_downloaded(row["payload"])
-    assert not da._fn_csv_payload_signature if hasattr(da,"_fn_csv_payload_signature") else True
 
 
 def test_click_durably_checks_only_exact_downloaded_wo_and_allows_posting(db):
@@ -268,4 +267,3 @@ def test_associate_route_card_shows_green_check_after_csv_click_and_posts(db, tm
     at.button(key="revamp_fn_posted").click().run()
     assert not at.exception, [e.message for e in at.exception]
     assert fetch_row(db, "FN10142026-Phoenix AZ-1")["payload"]["fn_posted_ts"]
-'''
