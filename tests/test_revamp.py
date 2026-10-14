@@ -931,3 +931,23 @@ def test_same_campaign_different_kiosks_get_separate_campaign_lines():
         assert "key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip())" in segment
         assert "for (cmp, tt_badge, _kiosk_id), grp in" in segment
         assert "kiosk_text" in segment
+
+
+def test_venue_ids_on_stop_address_and_search_opens_matching_dropdowns():
+    from pathlib import Path
+    source = Path("tactical_workspace_master_rw.py").read_text(encoding="utf-8")
+    live = source[source.index("def make_venue_details(data):"):source.index("def make_venue_details_ghost(")]
+    saved = source[source.index("def make_venue_details_ghost("):source.index("VENUE_SECTION_CSS =")]
+    ready = source[source.index("def render_dispatch("):source.index("def make_venue_details(data):")]
+    assert "{_venue_addr_label}" in ready
+    assert "{_venue_ids}" not in ready
+    assert "{_venue_ids}" not in live
+    assert "Venue ID" in live
+    assert "{id_tag}" in saved
+    assert "Venue ID" in saved
+    assert " · Kiosk ID" not in saved[saved.index("id_tag = ("):saved.index("if saved_tasks:", saved.index("id_tag = ("))]
+    for section in (ready, live, saved):
+        assert "_open_match" in section or "_ready_match" in section
+        assert "if _open_match else" in section or "if _ready_match else" in section
+    import ast
+    ast.parse(source)
