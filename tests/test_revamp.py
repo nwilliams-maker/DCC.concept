@@ -810,16 +810,41 @@ def test_fn_route_stop_details_show_ids_per_stop_and_task_without_guessing():
     assert "Kiosk IDs: K-101, K-202" not in legacy
 
 
-def test_field_nation_csv_location_slot_keeps_template_and_task_identifiers():
-    helper = load_functions("fn_utils.py", ["_fn_task_location_text"])["_fn_task_location_text"]
-    assert helper({
-        "task_type": "New Ad", "location_in_venue": "Front Entrance",
-        "venue_id": "VEN-1", "kiosk_id": "K-101",
-    }) == "New Ad — Front Entrance | Venue ID: VEN-1 | Kiosk ID: K-101"
-    assert helper({
-        "task_type": "Kiosk Install", "venue_id": "VEN-2", "kiosk_id": "K-202",
-    }) == "Kiosk Install | Venue ID: VEN-2 | Kiosk ID: K-202"
-    assert helper({"task_type": "Default"}) == "Default"
+def test_field_nation_csv_remains_original_venue_id_only_template():
+    import csv
+    import io
+    import fn_utils
+
+    route = {"city": "Seward", "state": "AK", "_cluster_hash": "route-1",
+             "data": [
+                 {"id": "task-A", "full": "100 Main St, Seward, AK 99664",
+                  "venue_name": "Market", "task_type": "New Ad",
+                  "location_in_venue": "Front Entrance", "client_company": "Client A",
+                  "venue_id": "VEN-1", "kiosk_id": "K-101"},
+                 {"id": "task-B", "full": "100 Main St, Seward, AK 99664",
+                  "venue_name": "Market", "task_type": "Kiosk Install",
+                  "location_in_venue": "Rear", "client_company": "Client B",
+                  "venue_id": "VEN-2", "kiosk_id": "K-202"},
+             ]}
+    # Both single-route and mass-upload generation must use the unchanged
+    # Field Nation header and not append any ID to Location in Venue slots.
+    single, single_count = fn_utils.generate_fn_upload({}, route, "10/30/2026", 20, "route-1")
+    combined, combined_count, included = fn_utils.generate_combined_fn_upload([route])
+    assert single_count == combined_count == 1
+    assert included == ["route-1"]
+    original_headers = fn_utils._fn_csv_headers()
+    assert original_headers.count("1. Venue ID") == 1
+    assert not any("Kiosk ID" in header for header in original_headers)
+    for output in (single, combined):
+        rows = list(csv.reader(io.StringIO(output.getvalue().decode("utf-8"))))
+        header, row = rows[0], rows[1]
+        assert header == original_headers
+        assert row[header.index("1. Venue ID")] == "VEN-1"
+        assert row[header.index("1. Location in Venue")] == "New Ad — Front Entrance"
+        assert row[header.index("2. Location in Venue")] == "Kiosk Install — Rear"
+        assert not any("Kiosk ID" in cell or "K-101" in cell or "K-202" in cell
+                       for cell in row)
+        assert not any("Venue ID:" in cell for cell in row)
 
 
 def test_route_venue_accordions_show_multiple_task_identifiers():
