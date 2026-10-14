@@ -6542,7 +6542,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>" if camp_rows else ""
             _icon_html = f"<span style='font-size:13px;margin-left:6px;'>{pill_str}</span>" if pill_str else ""
             _ready_query = str(st.session_state.get('revamp_search') or '').strip().lower()
-            _ready_haystack = ' '.join(str(t) for t in loc_tasks) + ' ' + str(loc)
+            _ready_haystack = ' '.join(str(t) for t in loc_tasks) + ' ' + str(addr)
             _ready_match = bool(_ready_query and all(part in _ready_haystack.lower() for part in _ready_query.split()))
             _venue_ids = list(dict.fromkeys(str(t.get('venue_id') or t.get('venueId') or '').strip()
                           for t in loc_tasks if str(t.get('venue_id') or t.get('venueId') or '').strip()))
