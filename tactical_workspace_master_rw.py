@@ -9776,6 +9776,35 @@ def run_pod_tab(pod_name):
                 st.warning("Assignment history is unavailable while Railway Postgres is disconnected.")
 
         with _fn_posted_subtab:
+            # Always-visible recovery access, independent of the live route queue.
+            _fn_recovery_open_key = f"fn_recovery_open_{pod_name}"
+            if st.button("HISTORY — Restore Posted routes", key=f"fn_history_always_visible_{pod_name}", use_container_width=True):
+                st.session_state[_fn_recovery_open_key] = not st.session_state.get(_fn_recovery_open_key, False)
+            if st.session_state.get(_fn_recovery_open_key, False):
+                st.subheader("Posting history / Restore Posted to Pending")
+                if DB_ENGINE is None:
+                    st.warning("Database unavailable — recovery is disabled.")
+                else:
+                    try:
+                        _fn_recovery_rows = _da.get_fn_posted_orders(DB_ENGINE, limit=1000)
+                        st.caption(f"{len(_fn_recovery_rows)} currently Posted routes eligible for recovery. Assigned routes are protected.")
+                        _fn_recovery_search = st.text_input("Search work order to restore", key=f"fn_recovery_always_search_{pod_name}")
+                        _fn_recovery_options = {r["work_order"]: r for r in _fn_recovery_rows if _fn_recovery_search.lower() in r["work_order"].lower()}
+                        _fn_recovery_selected = st.multiselect("Select Posted routes", list(_fn_recovery_options), key=f"fn_recovery_always_selected_{pod_name}")
+                        _fn_recovery_confirmed = st.checkbox("Confirm selected routes should return to Pending", key=f"fn_recovery_always_confirm_{pod_name}")
+                        if st.button("Restore selected routes to Pending", key=f"fn_recovery_always_apply_{pod_name}", disabled=not (_fn_recovery_selected and _fn_recovery_confirmed), type="primary"):
+                            _fn_recovery_result = _da.revert_fn_posted_to_pending(DB_ENGINE, _fn_recovery_selected)
+                            for _fn_recovered in _fn_recovery_result["reverted"]:
+                                _fn_recovered_hash = _fn_recovered.get("cluster_hash")
+                                if _fn_recovered_hash:
+                                    st.session_state.get("_fn_posted", {}).pop(_fn_recovered_hash, None)
+                                    st.session_state.get("_fn_exported", {}).pop(_fn_recovered_hash, None)
+                            _cached_fetch_sent_records_from_db.clear()
+                            st.success(f"Restored {len(_fn_recovery_result['reverted'])} routes; skipped {len(_fn_recovery_result['skipped'])}.")
+                            st.rerun()
+                    except Exception as _fn_recovery_error:
+                        _log_err("fn_recovery_always", _fn_recovery_error)
+                        st.error(f"Could not load recovery list: {_fn_recovery_error}")
             if not field_nation: st.info("No routes currently moved to Field Nation.")
             else:
                 sorted_fn = group_and_sort_by_proximity(field_nation)
@@ -10175,7 +10204,7 @@ def run_pod_tab(pod_name):
                 if st.session_state[_fn_filter_key] == "history":
                     # Durable FN posting history and recovery. This operates on the
                     # Postgres source of truth, not a browser-only session flag.
-                    with st.expander("📜 Posting history / Restore Posted to Pending", expanded=False):
+                    with st.expander("📜 Posting history / Restore Posted to Pending", expanded=True):
                         if DB_ENGINE is None:
                             st.warning("Database unavailable — recovery is disabled.")
                         else:
