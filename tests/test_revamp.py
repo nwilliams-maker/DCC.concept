@@ -731,3 +731,120 @@ render_workspace(lambda pod: pod == "Orange", lambda pod: None,
     assert "Seward" in labels
     assert "Juneau" not in labels
     assert "no linked work order" not in labels.lower()
+
+
+def test_fn_bulk_payload_preserves_ids_for_each_task_at_same_stop():
+    scope = load_functions("revamp_bulk_fn.py", ["_payload"], {"json": json})
+    route = {
+        "city": "Seward", "state": "AK", "stops": 1, "center": (60, -149),
+        "data": [
+            {"id": "task-A", "full": "100 Main St, Seward, AK 99664",
+             "venue_name": "Market", "venue_id": "VEN-1", "kiosk_id": "K-101",
+             "task_type": "New Ad", "client_company": "Client A"},
+            {"id": "task-B", "full": "100 Main St, Seward, AK 99664",
+             "venue_name": "Market", "venue_id": "VEN-2", "kiosk_id": "K-202",
+             "task_type": "Kiosk Install", "client_company": "Client B"},
+        ],
+    }
+    payload = scope["_payload"](route, "Orange", "2026-11-05", "FN-TEST-1", "h1")
+    stops = json.loads(payload["stopData"])
+    assert len(stops) == 1
+    assert stops[0]["venueId"] == "VEN-1"  # legacy stop-level value
+    assert stops[0]["kioskId"] == "K-101"
+    assert [(task["taskId"], task["venueId"], task["kioskId"])
+            for task in stops[0]["tasks"]] == [
+                ("task-A", "VEN-1", "K-101"),
+                ("task-B", "VEN-2", "K-202"),
+            ]
+
+
+def test_fn_saved_task_rebuild_and_csv_keep_distinct_kiosk_ids():
+    scope = load_functions("revamp_workspace.py",
+                           ["_fn_ghost_tasks", "_fn_csv_route"], {"json": json})
+    stop = {
+        "addr": "100 Main St, Seward, AK 99664", "venue": "Market",
+        "venueId": "VEN-1", "kioskId": "K-101", "t_count": 2,
+        "tasks": [
+            {"taskId": "task-A", "taskType": "New Ad", "venueId": "VEN-1",
+             "kioskId": "K-101", "clientCompany": "Client A"},
+            {"taskId": "task-B", "taskType": "Kiosk Install", "venueId": "VEN-2",
+             "kioskId": "K-202", "clientCompany": "Client B"},
+        ],
+    }
+    ghost = {"stops": 1, "stop_data": [stop]}
+    tasks = scope["_fn_ghost_tasks"](ghost)
+    assert [(t["id"], t["venue_id"], t["kiosk_id"]) for t in tasks] == [
+        ("task-A", "VEN-1", "K-101"), ("task-B", "VEN-2", "K-202")
+    ]
+    called = []
+    def old_rebuilder(*args, **kwargs):
+        called.append(True)
+        return {"data": [{"id": "wrong", "kiosk_id": "K-101"}]}
+    output = scope["_fn_csv_route"](
+        {"_is_ghost": True, "_ghost_record": ghost}, "hash", old_rebuilder)
+    assert not called
+    assert [t["kiosk_id"] for t in output["data"]] == ["K-101", "K-202"]
+
+
+def test_fn_route_stop_details_show_ids_per_stop_and_task_without_guessing():
+    scope = load_functions("revamp_workspace.py", ["_fn_stop_markup"],
+                           {"html": __import__("html")})
+    saved = {"venue": "Test & Shop", "t_count": 2,
+             "venueId": "VEN-1", "kioskId": "K-101",
+             "tasks": [
+                 {"taskId": "task-A", "venueId": "VEN-1", "kioskId": "K-101",
+                  "taskType": "New Ad"},
+                 {"taskId": "task-B", "venueId": "VEN-2", "kioskId": "K-202",
+                  "taskType": "Kiosk Install"},
+             ]}
+    markup = scope["_fn_stop_markup"](saved, 1, "100 Main St")
+    assert "Test &amp; Shop" in markup
+    assert "Venue IDs: VEN-1, VEN-2" in markup
+    assert "Kiosk IDs: K-101, K-202" in markup
+    assert "Task 1 (task-A)" in markup and "Task 2 (task-B)" in markup
+    assert "Kiosk ID: K-202" in markup
+    legacy = scope["_fn_stop_markup"]({
+        "venue": "Market", "kioskId": "K-101", "venueId": "VEN-1",
+        "t_count": 2}, 2, "200 Main St")
+    assert "Per-task identifiers were not saved" in legacy
+    assert "Kiosk IDs: K-101, K-202" not in legacy
+
+
+def test_field_nation_csv_location_slot_keeps_template_and_task_identifiers():
+    helper = load_functions("fn_utils.py", ["_fn_task_location_text"])["_fn_task_location_text"]
+    assert helper({
+        "task_type": "New Ad", "location_in_venue": "Front Entrance",
+        "venue_id": "VEN-1", "kiosk_id": "K-101",
+    }) == "New Ad — Front Entrance | Venue ID: VEN-1 | Kiosk ID: K-101"
+    assert helper({
+        "task_type": "Kiosk Install", "venue_id": "VEN-2", "kiosk_id": "K-202",
+    }) == "Kiosk Install | Venue ID: VEN-2 | Kiosk ID: K-202"
+    assert helper({"task_type": "Default"}) == "Default"
+
+
+def test_route_venue_accordions_show_multiple_task_identifiers():
+    scope = load_functions("tactical_workspace_master_rw.py",
+                           ["make_venue_details", "make_venue_details_ghost"], {
+        "esc": __import__("html").escape,
+        "task_location_address": lambda loc, tasks: loc,
+        "address_with_zip": lambda address, zipcode: address,
+    })
+    live_tasks = [
+        {"full": "100 Main St", "venue_name": "Market", "task_type": "New Ad",
+         "client_company": "Client", "venue_id": "VEN-1", "kiosk_id": "K-101"},
+        {"full": "100 Main St", "venue_name": "Market", "task_type": "New Ad",
+         "client_company": "Client", "venue_id": "VEN-2", "kiosk_id": "K-202"},
+    ]
+    live = scope["make_venue_details"](live_tasks)
+    assert "Venue IDs: VEN-1, VEN-2" in live
+    assert "Kiosk IDs: K-101, K-202" in live
+    assert "Task 2" in live and "Kiosk ID: K-202" in live
+    ghost = scope["make_venue_details_ghost"](["100 Main St"], [{
+        "addr": "100 Main St", "venue": "Market",
+        "tasks": [
+            {"taskType": "New Ad", "venueId": "VEN-1", "kioskId": "K-101"},
+            {"taskType": "New Ad", "venueId": "VEN-2", "kioskId": "K-202"},
+        ],
+    }])
+    assert "Venue IDs: VEN-1, VEN-2" in ghost
+    assert "Kiosk ID: K-202" in ghost
