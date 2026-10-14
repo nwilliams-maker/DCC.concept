@@ -246,6 +246,25 @@ def _fn_window():
         return "", ""
 
 
+def _fn_task_location_text(task: dict) -> str:
+    """Keep Field Nation's fixed upload columns while including each task's IDs.
+
+    The upload template only has one dedicated Venue ID column (slot one) and
+    no Kiosk ID columns. Record the exact identifiers in each task's existing
+    'Location in Venue' slot, without changing Field Nation's CSV schema.
+    """
+    task_type = str(task.get("task_type") or "Kiosk Install").strip()
+    loc = str(task.get("location_in_venue") or "").strip()
+    venue_id = str(task.get("venue_id") or "").strip()
+    kiosk_id = str(task.get("kiosk_id") or "").strip()
+    text = f"{task_type} — {loc}" if loc else task_type
+    if venue_id:
+        text += f" | Venue ID: {venue_id}"
+    if kiosk_id:
+        text += f" | Kiosk ID: {kiosk_id}"
+    return text
+
+
 def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: int = 1):
     """Yield one CSV row per unique stop address in this cluster. Used by both
     generate_fn_upload (single cluster) and generate_combined_fn_upload (many).
@@ -310,7 +329,7 @@ def _fn_stop_rows(cluster: dict, start_date: str, end_date: str, bundle_number: 
             loc_in_venue = str(task.get('location_in_venue', '')).strip()
             client       = str(task.get('client_company', '') or '').strip() or 'Terraboost Media'
             venue_id     = str(task.get('venue_id', '')).strip()
-            combined_loc = f"{task_type} — {loc_in_venue}" if loc_in_venue else task_type
+            combined_loc = _fn_task_location_text(task)
 
             custom_cols.append(_csv_safe(client))
             if slot_idx == 1:
@@ -514,7 +533,7 @@ def generate_combined_fn_upload(clusters: list):
             loc_in_venue = str(task.get('location_in_venue', '')).strip()
             client       = str(task.get('client_company', '') or '').strip() or 'Terraboost Media'
             venue_id     = str(task.get('venue_id', '')).strip()
-            combined_loc = f"{task_type} — {loc_in_venue}" if loc_in_venue else task_type
+            combined_loc = _fn_task_location_text(task)
 
             custom_cols.append(_csv_safe(client))
             if slot_idx == 1:
