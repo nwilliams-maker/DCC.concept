@@ -862,9 +862,10 @@ def test_route_venue_accordions_show_multiple_task_identifiers():
          "client_company": "Client", "venue_id": "VEN-2", "kiosk_id": "K-202"},
     ]
     live = scope["make_venue_details"](live_tasks)
-    assert "Venue IDs: VEN-1, VEN-2" in live
     assert "Kiosk IDs: K-101, K-202" in live
-    assert "Task 2" in live and "Kiosk ID: K-202" in live
+    assert "Kiosk ID" in live
+    assert "Task 2" not in live
+    assert "Venue IDs:" not in live
     ghost = scope["make_venue_details_ghost"](["100 Main St"], [{
         "addr": "100 Main St", "venue": "Market",
         "tasks": [
@@ -900,61 +901,22 @@ def test_legacy_fn_ghost_rebuild_uses_saved_per_task_ids_not_first_kiosk():
     ]
 
 
-def test_route_card_identifiers_follow_tab_rules_for_live_and_historical_routes():
-    ids = load_functions(
-        "revamp_workspace.py", ["_route_card_identifier_line"], {"json": json}
-    )["_route_card_identifier_line"]
-    live = {
-        "city": "Juneau", "state": "AK",
-        "data": [
-            {"venue_id": "VEN-1", "kiosk_id": "K-101"},
-            {"venue_id": "VEN-2", "kiosk_id": "K-202"},
-            {"venue_id": "VEN-1", "kiosk_id": "K-101"},
-        ],
-    }
-    for tab in ("Routes", "CVS Removal", "Sent", "Accepted", "Declined", "Finalized"):
-        text = ids(live, tab)
-        assert "Venue IDs: VEN-1, VEN-2" in text, (tab, text)
-        assert "Kiosk IDs: K-101, K-202" in text, (tab, text)
-    fn = ids(live, "Field Nation")
-    assert "Venue IDs: VEN-1, VEN-2" in fn
-    assert "Kiosk ID" not in fn and "K-101" not in fn and "K-202" not in fn
-
-    ghost = {"_is_ghost": True, "_ghost_record": {
-        "stop_data": json.dumps([{
-            "venueId": "WRONG-LEGACY-VENUE", "kioskId": "WRONG-LEGACY-KIOSK",
-            "tasks": [
-                {"taskId": "one", "venueId": "VEN-1", "kioskId": "K-101"},
-                {"taskId": "two", "venueId": "VEN-2", "kioskId": "K-202"},
-            ],
-        }])}}
-    for tab in ("Sent", "Accepted", "Declined", "Finalized"):
-        text = ids(ghost, tab)
-        assert "Venue IDs: VEN-1, VEN-2" in text
-        assert "Kiosk IDs: K-101, K-202" in text
-        assert "WRONG-LEGACY" not in text
-    fn = ids(ghost, "Field Nation")
-    assert "Venue IDs: VEN-1, VEN-2" in fn
-    assert "Kiosk ID" not in fn and "K-101" not in fn and "K-202" not in fn
-
-    legacy = {"_ghost_record": {"stop_data": [
-        {"venueId": "VEN-OLD", "kioskId": "K-OLD"}]}}
-    assert "Venue ID: VEN-OLD" in ids(legacy, "Field Nation")
-    assert "Kiosk ID" not in ids(legacy, "Field Nation")
-    assert "Kiosk ID: K-OLD" in ids(legacy, "Accepted")
 
 
-def test_route_card_identifier_preview_keeps_large_routes_compact():
-    formatter = load_functions(
-        "revamp_workspace.py", ["_route_card_identifier_line"], {"json": json}
-    )["_route_card_identifier_line"]
-    route = {"data": [
-        {"venue_id": f"V{i}", "kiosk_id": f"K{i}"} for i in range(10)
-    ]}
-    text = formatter(route, "Routes")
-    assert "V0, V1, V2, V3 (+6 more)" in text
-    assert "K0, K1, K2, K3 (+6 more)" in text
-    assert "V4" not in text and "K4" not in text
-    fn = formatter(route, "Field Nation")
-    assert "V0, V1, V2, V3 (+6 more)" in fn
-    assert "Kiosk ID" not in fn
+
+def test_kiosk_id_appears_on_campaign_lines_not_route_selection_cards():
+    import ast
+    with open("revamp_workspace.py", encoding="utf-8") as handle:
+        revamp = handle.read()
+    assert 'label += "\\n" + _route_card_identifier_line' not in revamp
+    with open("tactical_workspace_master_rw.py", encoding="utf-8") as handle:
+        source = handle.read()
+    dispatch = source[source.index("def render_dispatch("):source.index("def make_venue_details(")]
+    saved = source[source.index("def make_venue_details("):source.index("def make_venue_details_ghost(")]
+    for segment in (dispatch, saved):
+        assert "grp['kiosk_ids']" in segment
+        assert "kiosk_text" in segment
+        assert "Kiosk ID" in segment
+    assert "{id_tag}" not in saved
+    ast.parse(source)
+    ast.parse(revamp)
