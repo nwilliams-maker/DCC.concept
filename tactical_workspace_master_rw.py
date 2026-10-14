@@ -10037,13 +10037,12 @@ def run_pod_tab(pod_name):
                 with _fn_act_row[0]:
                     if _sel_pending:
                         _csv_ready = all(h in _fn_exported for h in _sel_pending)
-                        _confirm_post = st.checkbox("I uploaded the selected CSV to Field Nation", key=f"fn_confirm_upload_{pod_name}")
                         if st.button(
                             "Posted",
                             key=f"fn_post_btn_{pod_name}",
                             use_container_width=True,
                             type="secondary",
-                            disabled=not (_csv_ready and _confirm_post),
+                            disabled=not _csv_ready,
                         ):
                             _ts = datetime.now().strftime('%m/%d %I:%M %p')
                             for _h in _sel_pending:
@@ -11886,13 +11885,12 @@ with tabs[6]:
                         if _fn_selected:
                             _newly_posting = [_h for _h in _fn_selected if _h not in _fn_posted_dict]
                             _digital_csv_ready = all(h in _fn_exported for h in _newly_posting)
-                            _digital_confirm = st.checkbox("I uploaded the selected CSV to Field Nation", key="fn_confirm_upload_digital")
                             if st.button(
                                 f"📤 Posted! ({len(_newly_posting)} new · {len(_fn_selected)} selected)",
                                 key="fn_post_btn_digital",
                                 use_container_width=True,
                                 type="secondary",
-                                disabled=(len(_newly_posting) == 0 or not _digital_csv_ready or not _digital_confirm),
+                                disabled=(len(_newly_posting) == 0 or not _digital_csv_ready),
                             ):
                                 _ts = datetime.now().strftime('%m/%d %I:%M %p')
                                 for _h in _fn_selected:
