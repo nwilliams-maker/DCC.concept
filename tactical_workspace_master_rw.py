@@ -6489,7 +6489,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             # what dispatchers see here in Ready/Flagged.
             from collections import defaultdict as _dd
             loc_tasks = [t for t in cluster['data'] if t.get('full') == addr]
-            _camp_groups = _dd(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': ''})
+            _camp_groups = _dd(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': '', 'kiosk_ids': []})
             for t in loc_tasks:
                 # 🌟 May 2026 — Blank client_company / campaign falls back to the
                 # task type text so the accordion row still shows meaningful info
@@ -6515,6 +6515,9 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 grp['cmp'] = cmp
                 grp['tt_badge'] = tt_badge
                 grp['count'] += 1
+                _kid = str(t.get('kiosk_id') or t.get('kioskId') or '').strip()
+                if _kid and _kid not in grp['kiosk_ids']:
+                    grp['kiosk_ids'].append(_kid)
                 if t.get('escalated'): grp['esc'] += 1
                 bs = str(t.get('boosted_standard','')).lower()
                 if 'local plus' in bs: grp['lplus'] += 1
@@ -6526,11 +6529,13 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
                 boost_pill = f" <span style='color:#dc2626;font-weight:800;'>🔥 {grp['boost']}</span>" if grp['boost'] > 0 else ""
                 lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
+                kiosk_text = (f" &nbsp;·&nbsp; Kiosk ID{'s' if len(grp['kiosk_ids']) > 1 else ''}: "
+                              f"{esc(', '.join(grp['kiosk_ids']))}") if grp['kiosk_ids'] else ""
                 row = (
                     f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
-                    f"• <span style='color:#0f172a;font-weight:600;'>{cmp}</span>"
+                    f"• <span style='color:#0f172a;font-weight:600;'>{esc(cmp)}</span>"
                     f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{tt_badge}</span>"
-                    f"{count_suffix}{esc_pill}{boost_pill}{lplus_pill}"
+                    f"{count_suffix}{esc_pill}{boost_pill}{lplus_pill}{kiosk_text}"
                     f"</div>"
                 )
                 camp_rows.append(row)
