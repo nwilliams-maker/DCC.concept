@@ -1608,6 +1608,10 @@ def revert_fn_posted_to_pending(engine: sa.Engine, work_orders: list[str]) -> di
                 skipped.append(wo)
                 continue
             payload.pop("fn_posted_ts", None)
+            payload.pop("fn_csv_downloaded_at", None)
+            payload.pop("fn_csv_downloaded_by", None)
+            payload.pop("fn_csv_download_signature", None)
+            payload.pop("fn_csv_file_sha256", None)
             conn.execute(sa.text("UPDATE field_nation_orders SET payload=CAST(:payload AS jsonb), updated_at=now() WHERE work_order=:wo AND status='posted'"), {"wo": wo, "payload": json.dumps(payload)})
             reverted.append({"work_order": wo, "cluster_hash": payload.get("cluster_hash", "")})
     return {"reverted": reverted, "skipped": skipped}
