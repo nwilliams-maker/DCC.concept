@@ -239,6 +239,37 @@ def test_failed_onfleet_rename_keeps_posted_and_no_accepted_route(database, monk
     assert remote.plans["rp-1"]["name"] == original
 
 
+
+def test_retry_after_rejected_onfleet_rename_keeps_single_accepted_route(database, monkeypatch):
+    original = "FN10142026-Chicago IL-1"
+    seed(database, original)
+    remote = FakeOnfleet(old_name=original)
+    remote.fail_plan_put = True
+    monkeypatch.setattr(fx, "onfleet_fetch_with_backoff", remote)
+    first = da.mark_fn_assigned(database, original)
+    assert not first["success"]
+    posted, accepted = database_states(database)
+    assert posted[0]["status"] == "posted" and not accepted
+
+    # A subsequent Assign retries the *same* FN reservation, not a new WO.
+    remote.fail_plan_put = False
+    second = da.mark_fn_assigned(database, original)
+    assert second["success"]
+    assert remote.plans["rp-1"]["name"] == second["wo"]
+    fn, accepted = database_states(database)
+    assert len(fn) == 1 and fn[0]["status"] == "assigned"
+    assert len(accepted) == 1 and accepted[0]["wo"] == second["wo"]
+
+
+def test_supports_legacy_list_task_ids(monkeypatch):
+    remote = FakeOnfleet()
+    monkeypatch.setattr(fx, "onfleet_fetch_with_backoff", remote)
+    response = fx.apply_fn_assigned_side_effects(
+        {"taskIds": ["task-1", "task-2"], "locs": ""},
+        "FN-List-Work-Order", "Acme Installs", "rp-1")
+    assert response["partial"] is False
+    assert remote.plans["rp-1"]["name"] == "FN-List-Work-Order"
+
 def test_confirmed_assign_updates_same_wo_in_onfleet_and_dcc(database, monkeypatch):
     original = "FN10142026-Chicago IL-1"
     seed(database, original)
