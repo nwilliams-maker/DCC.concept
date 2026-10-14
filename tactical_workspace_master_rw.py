@@ -8177,8 +8177,14 @@ def make_venue_details(data):
             else:
                 camp_block = "<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No detail available for this stop.</div>"
 
+        _search_text = " ".join(str(t.get(field) or "") for t in loc_tasks for field in
+                                ("client_company", "task_type", "kiosk_id", "venue_id", "venue_name", "full", "sio"))
+        _search_text += " " + str(loc)
+        _query = str(st.session_state.get("revamp_search") or "").strip().lower()
+        _open_match = bool(_query and _query in _search_text.lower())
+        _open_attr = " open" if _open_match else ""
         rows.append(
-            f"<details class='fn-loc-row'>"
+            f"<details class='fn-loc-row'{_open_attr}>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
             f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(task_location_address(loc, loc_tasks))}</span>"
@@ -8325,8 +8331,17 @@ def make_venue_details_ghost(locs_list, stop_data=None):
             camp_block += ("<div style='font-size:10px;color:#667085;padding:4px 8px;'>"
                            "Per-task identifiers were not saved on this older route.</div>")
 
+        _search_text = " ".join(str(sd.get(field) or "") for field in
+                                ("venue", "addr", "venueId", "kioskId"))
+        _search_text += " " + " ".join(str(t.get(field) or "") for t in (sd.get("tasks") or [])
+                                        if isinstance(t, dict) for field in
+                                        ("taskType", "clientCompany", "venueId", "kioskId", "sio"))
+        _search_text += " " + " ".join(str(camp) for camp in (sd.get("campaigns") or []))
+        _query = str(st.session_state.get("revamp_search") or "").strip().lower()
+        _open_match = bool(_query and _query in _search_text.lower())
+        _open_attr = " open" if _open_match else ""
         rows.append(
-            f"<details class='fn-loc-row'>"
+            f"<details class='fn-loc-row'{_open_attr}>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
             f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(address_with_zip(addr, sd.get('zip')))}</span>{id_tag}"
