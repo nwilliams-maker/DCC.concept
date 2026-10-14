@@ -8097,7 +8097,7 @@ def make_venue_details(data):
         # marker pills (escalation, boosted, local plus) carry their per-group counts
         # too, mirroring the header style.
         from collections import defaultdict
-        camp_groups = defaultdict(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': ''})
+        camp_groups = defaultdict(lambda: {'count': 0, 'esc': 0, 'boost': 0, 'lplus': 0, 'tt_badge': '', 'cmp': '', 'kiosk_ids': []})
         for t in loc_tasks:
             # 🌟 May 2026 — Blank client_company / campaign falls back to the
             # task type text so the accordion row still shows meaningful info.
@@ -8121,6 +8121,9 @@ def make_venue_details(data):
             grp['cmp'] = cmp
             grp['tt_badge'] = tt_badge
             grp['count'] += 1
+            _kid = str(t.get('kiosk_id') or t.get('kioskId') or '').strip()
+            if _kid and _kid not in grp['kiosk_ids']:
+                grp['kiosk_ids'].append(_kid)
             if t.get('escalated'): grp['esc'] += 1
             bs = str(t.get('boosted_standard','')).lower()
             if 'local plus' in bs: grp['lplus'] += 1
@@ -8133,12 +8136,14 @@ def make_venue_details(data):
             esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
             boost_pill = f" <span style='color:#dc2626;font-weight:800;'>🔥 {grp['boost']}</span>" if grp['boost'] > 0 else ""
             lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
+            kiosk_text = (f" &nbsp;·&nbsp; Kiosk ID{'s' if len(grp['kiosk_ids']) > 1 else ''}: "
+                          f"{esc(', '.join(grp['kiosk_ids']))}") if grp['kiosk_ids'] else ""
             row = (
                 f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
                 f"• <span style='color:#0f172a;font-weight:600;'>{esc(cmp)}</span>"
                 f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{esc(tt_badge)}</span>"
                 f"{count_suffix}"
-                f"{esc_pill}{boost_pill}{lplus_pill}"
+                f"{esc_pill}{boost_pill}{lplus_pill}{kiosk_text}"
                 f"</div>"
             )
             camp_rows.append(row)
@@ -8172,35 +8177,11 @@ def make_venue_details(data):
             else:
                 camp_block = "<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No detail available for this stop.</div>"
 
-        # Stop summary shows all distinct IDs, not just those of the first
-        # task at this address. Keep the campaign aggregation above intact.
-        venue_ids = list(dict.fromkeys(str(t.get('venue_id') or '').strip()
-                                            for t in loc_tasks if str(t.get('venue_id') or '').strip()))
-        kiosk_ids = list(dict.fromkeys(str(t.get('kiosk_id') or '').strip()
-                                            for t in loc_tasks if str(t.get('kiosk_id') or '').strip()))
-        venue_value = esc(', '.join(venue_ids) if venue_ids else '—')
-        kiosk_value = esc(', '.join(kiosk_ids) if kiosk_ids else '—')
-        id_tag = (f" <span style='color:#475467;font-size:10px;'>"
-                  f"Venue ID{'s' if len(venue_ids) > 1 else ''}: {venue_value}"
-                  f" · Kiosk ID{'s' if len(kiosk_ids) > 1 else ''}: {kiosk_value}</span>")
-        # Task-level rows remain separate even when client/type aggregates.
-        task_details = []
-        for task_idx, task in enumerate(loc_tasks, 1):
-            task_details.append(
-                f"<div style='padding:3px 4px;font-size:11px;color:#344054;'>"
-                f"Task {task_idx} · {esc(str(task.get('task_type') or 'Task'))}"
-                f" · Venue ID: {esc(str(task.get('venue_id') or '').strip() or '—')}"
-                f" · Kiosk ID: {esc(str(task.get('kiosk_id') or '').strip() or '—')}"
-                f"</div>"
-            )
-        camp_block += ("<div style='padding:5px 8px;margin-top:5px;border-top:1px solid #e4e7ec;'>"
-                       + ''.join(task_details) + "</div>")
-
         rows.append(
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(task_location_address(loc, loc_tasks))}</span>{id_tag}"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(task_location_address(loc, loc_tasks))}</span>"
             f"{k_tag}{digi_ins_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}{_icon_html}"
             f"</summary>{camp_block}</details>"
         )
