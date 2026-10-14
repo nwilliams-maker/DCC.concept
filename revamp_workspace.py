@@ -2584,9 +2584,14 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                 successes = 0
                 for pod, route, _, route_hash, _ in pending:
                     try:
-                        result = fn_data.mirror_mark_fn_posted_by_cluster_hash(db_engine, route_hash)
-                        if not result.get("success"):
-                            raise RuntimeError(result.get("skipped") or result.get("error") or "Order not found")
+                        work_order = str((route.get("_ghost_record") or {}).get("wo")
+                                         or route.get("wo") or "").strip()
+                        if not work_order:
+                            raise ValueError("No saved Field Nation work order for this card.")
+                        # Use the exact work-order identity, not a potentially
+                        # reused cluster hash. The database independently
+                        # requires this WO's verified downloaded CSV.
+                        fn_data.mark_fn_posted(db_engine, work_order)
                         successes += 1
                         st.session_state.setdefault("_revamp_fn_clear_next", []).append(f"{pod}:{route_hash}")
                     except Exception as exc:
