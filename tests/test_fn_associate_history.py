@@ -97,17 +97,30 @@ def recover(engine, expected, user, pods, configs):
             r['Posted (Central)'] = ''
     return {'reverted': [{'work_order': wo, 'cluster_hash': 'hash'} for wo in expected], 'skipped': []}
 
-with patch.dict(sys.modules, {
+# Stub only external app modules. Never snapshot/restore all of sys.modules:
+# that unloads native pandas/numpy imports performed while rendering History.
+stubs = {
     'revamp_fn_queue': SimpleNamespace(recover_queued=lambda *a, **kw: None),
     'migration.data_access': SimpleNamespace(get_fn_assigned_orders=lambda *a: []),
     'fn_utils': SimpleNamespace(generate_combined_fn_upload=lambda *a: (None, 0, [])),
-}), patch.object(rw, '_load_bundle_labels', lambda *a: []), \
-    patch.object(history, 'load_records', lambda *a: fixture_rows()), \
-    patch.object(history, 'restore_posted', recover):
-    rw.render_workspace(
-        lambda p: True, lambda *a, **kw: None, lambda *a: None,
-        lambda *a: 0, Engine(), lambda *a, **kw: None, Fetch(),
-        pod_configs={p: {'states': []} for p in rw.PODS})
+}
+previous = {name: sys.modules.get(name) for name in stubs}
+sys.modules.update(stubs)
+try:
+    with patch.object(rw, '_load_bundle_labels', lambda *a: []), \
+        patch.object(history, 'load_records', lambda *a: fixture_rows()), \
+        patch.object(history, 'restore_posted', recover):
+        rw.render_workspace(
+            lambda p: True, lambda *a, **kw: None, lambda *a: None,
+            lambda *a: 0, Engine(), lambda *a, **kw: None, Fetch(),
+            pod_configs={p: {'states': []} for p in rw.PODS})
+finally:
+    for name, old in previous.items():
+        if old is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = old
+
 '''
 
 
