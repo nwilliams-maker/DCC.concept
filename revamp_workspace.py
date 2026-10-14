@@ -536,64 +536,6 @@ def _fn_dates(route, route_hash, fn_posted):
     return created or "—", posted or "—", due or "—"
 
 
-def _route_card_identifier_line(route, status):
-    """Compact IDs on the LEFT route cards. Field Nation = Venue ID only.
-
-    Details on the right retain the complete per-stop and per-task breakdown.
-    Use task-specific IDs where available; only use old stop-level IDs as
-    fallback for historical records without original task details.
-    """
-    if not isinstance(route, dict):
-        return ""
-    ghost = route.get("_ghost_record") or {}
-    stop_data = ghost.get("stop_data") or []
-    if isinstance(stop_data, str):
-        try:
-            stop_data = json.loads(stop_data)
-        except (TypeError, ValueError):
-            stop_data = []
-    if not isinstance(stop_data, list):
-        stop_data = []
-    venue_ids, kiosk_ids = [], []
-
-    def add(target, value):
-        value = str(value or "").strip()
-        if value and value.lower() not in ("none", "null", "nan", "n/a", "unknown") and value not in target:
-            target.append(value)
-
-    for task in route.get("data") or []:
-        if isinstance(task, dict):
-            add(venue_ids, task.get("venue_id") or task.get("venueId"))
-            if status != "Field Nation":
-                add(kiosk_ids, task.get("kiosk_id") or task.get("kioskId"))
-    for stop in stop_data:
-        if not isinstance(stop, dict):
-            continue
-        tasks = [t for t in (stop.get("tasks") or []) if isinstance(t, dict)]
-        if tasks:
-            for task in tasks:
-                add(venue_ids, task.get("venueId") or task.get("venue_id"))
-                if status != "Field Nation":
-                    add(kiosk_ids, task.get("kioskId") or task.get("kiosk_id"))
-        else:
-            add(venue_ids, stop.get("venueId") or stop.get("venue_id"))
-            if status != "Field Nation":
-                add(kiosk_ids, stop.get("kioskId") or stop.get("kiosk_id"))
-
-    def format_ids(name, values):
-        # Full per-task lists remain in the selected route detail; avoid
-        # making a 60-task list card several screens tall.
-        preview = values[:4]
-        more = f" (+{len(values) - 4} more)" if len(values) > 4 else ""
-        label = name + ("s" if len(values) > 1 else "")
-        return f"{label}: {', '.join(preview) if preview else '—'}{more}"
-
-    venue_label = format_ids("Venue ID", venue_ids)
-    if status == "Field Nation":
-        return venue_label
-    return venue_label + "  ·  " + format_ids("Kiosk ID", kiosk_ids)
-
-
 def _fn_stop_markup(stop, number, address):
     """Field Nation cards show Venue IDs only, never Kiosk IDs.
 
@@ -1407,9 +1349,6 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     _important = _important_route_badges(route)
                     if _important:
                         label += "\n" + "  ·  ".join(_important)
-                    if status in ("Routes", "CVS Removal", "Field Nation",
-                                  "Sent", "Accepted", "Declined", "Finalized"):
-                        label += "\n" + _route_card_identifier_line(route, status)
                     if status == "Field Nation":
                         _created, _posted, _due = _fn_dates(route, route_hash, fn_posted)
                         _date_bits = [f"Due {_due}"]
