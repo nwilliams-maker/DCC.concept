@@ -3031,6 +3031,42 @@ def _fn_ghost_to_cluster(g, skip_geocode=False):
         _state = (_parts[2] if len(_parts) > 2 else (g.get('state') or '')).strip().upper()[:2]
         _zip   = (_parts[3] if len(_parts) > 3 else '').strip()
 
+        # New FN rows carry exact task IDs plus Venue/Kiosk IDs. The older
+        # fallback below can only reconstruct a stop-level ID, and must not
+        # overwrite these task-level associations on multi-kiosk stops.
+        _saved_tasks = sd.get('tasks')
+        if isinstance(_saved_tasks, list) and _saved_tasks:
+            _matched_tasks = 0
+            for _saved_task in _saved_tasks:
+                if not isinstance(_saved_task, dict):
+                    continue
+                _tid = str(_saved_task.get('taskId') or '').strip()
+                if not _tid or _tid not in id_queue:
+                    continue
+                id_queue.remove(_tid)
+                _task_type = str(_saved_task.get('taskType') or 'Task').strip()
+                synthetic.append({
+                    'id': _tid,
+                    'full': addr,
+                    'state': _state,
+                    'zip': str(sd.get('zip') or '').strip() or _zip,
+                    'venue_name': venue,
+                    'venue_id': str(_saved_task.get('venueId') or '').strip(),
+                    'kiosk_id': str(_saved_task.get('kioskId') or '').strip(),
+                    'location_in_venue': str(_saved_task.get('locationInVenue') or '').strip(),
+                    'task_type': _task_type,
+                    'client_company': str(_saved_task.get('clientCompany') or '').strip(),
+                    'is_digital': any(x in _task_type.lower() for x in ('service', 'offline', 'ins/rem')),
+                    'boosted_standard': _stop_boosted,
+                    'art_file': _art_file,
+                    'customer_type': _customer_type,
+                    'sio': str(_saved_task.get('sio') or '').strip(),
+                    'escalated': bool(sd.get('esc')),
+                })
+                _matched_tasks += 1
+            if _matched_tasks:
+                continue
+
         # Per-stop task counter for round-robin campaign assignment.
         _stop_task_idx = 0
 
