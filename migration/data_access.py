@@ -1414,7 +1414,7 @@ def get_fn_assignment_history(engine: sa.Engine, username: str, limit: int = 500
 
 
 def revert_fn_posted_to_pending(engine: sa.Engine, work_orders: list[str]) -> dict[str, Any]:
-    """Revert exact posted orders; never change assigned orders."""
+    """Clear posting marker on exact orders; retain 'posted' storage state so FN queue still loads them as Pending. Never touch assigned orders."""
     selected = list(dict.fromkeys(str(w).strip() for w in work_orders if str(w).strip()))
     if not 1 <= len(selected) <= 100:
         raise ValueError("Select 1 to 100 work orders.")
@@ -1430,7 +1430,7 @@ def revert_fn_posted_to_pending(engine: sa.Engine, work_orders: list[str]) -> di
                 skipped.append(wo)
                 continue
             payload.pop("fn_posted_ts", None)
-            conn.execute(sa.text("UPDATE field_nation_orders SET status='pending', payload=CAST(:payload AS jsonb), updated_at=now() WHERE work_order=:wo AND status='posted'"), {"wo": wo, "payload": json.dumps(payload)})
+            conn.execute(sa.text("UPDATE field_nation_orders SET payload=CAST(:payload AS jsonb), updated_at=now() WHERE work_order=:wo AND status='posted'"), {"wo": wo, "payload": json.dumps(payload)})
             reverted.append({"work_order": wo, "cluster_hash": payload.get("cluster_hash", "")})
     return {"reverted": reverted, "skipped": skipped}
 
