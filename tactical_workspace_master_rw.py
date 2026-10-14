@@ -6510,7 +6510,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 elif any(x in tt for x in ['default','pull down']): tt_badge = "⚪ Default"
                 elif any(x in tt for x in ['new ad','art change','top']) or not tt: tt_badge = "🆕 New Ad"
                 else: tt_badge = f"📋 {tt.title()}"
-                key = (cmp, tt_badge)
+                key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip())
                 grp = _camp_groups[key]
                 grp['cmp'] = cmp
                 grp['tt_badge'] = tt_badge
@@ -6523,7 +6523,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 if 'local plus' in bs: grp['lplus'] += 1
                 elif 'boosted' in bs: grp['boost'] += 1
             camp_rows = []
-            for (cmp, tt_badge), grp in _camp_groups.items():
+            for (cmp, tt_badge, _kiosk_id), grp in _camp_groups.items():
                 cnt = grp['count']
                 count_suffix = f" <span style='color:#94a3b8;font-weight:600;'>× {cnt}</span>" if cnt > 1 else ""
                 esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
@@ -8116,7 +8116,7 @@ def make_venue_details(data):
             elif any(x in tt for x in ['default','pull down']): tt_badge = "⚪ Default"
             elif any(x in tt for x in ['new ad','art change','top']) or not tt: tt_badge = "🆕 New Ad"
             else: tt_badge = f"📋 {tt.title()}"
-            key = (cmp, tt_badge)
+            key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip())
             grp = camp_groups[key]
             grp['cmp'] = cmp
             grp['tt_badge'] = tt_badge
@@ -8130,7 +8130,7 @@ def make_venue_details(data):
             elif 'boosted' in bs: grp['boost'] += 1
 
         camp_rows = []
-        for (cmp, tt_badge), grp in camp_groups.items():
+        for (cmp, tt_badge, _kiosk_id), grp in camp_groups.items():
             cnt = grp['count']
             count_suffix = f" <span style='color:#94a3b8;font-weight:600;'>× {cnt}</span>" if cnt > 1 else ""
             esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
