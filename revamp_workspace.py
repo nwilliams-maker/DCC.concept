@@ -537,23 +537,25 @@ def _fn_dates(route, route_hash, fn_posted):
 
 
 def _fn_stop_markup(stop, number, address):
-    """Show accurate Venue/Kiosk IDs at stop level and per saved task."""
+    """Field Nation cards show Venue IDs only, never Kiosk IDs.
+
+    The kiosk identifiers remain saved for Routes/Sent/Accepted and other
+    non-Field-Nation views, but must not be rendered on Field Nation cards.
+    """
     if not isinstance(stop, dict):
         return ""
     esc = lambda value: html.escape(str(value))
     tasks = [task for task in (stop.get("tasks") or []) if isinstance(task, dict)]
-    def ids(field, legacy):
-        values = [str(task.get(field) or "").strip() for task in tasks]
-        values = list(dict.fromkeys(value for value in values if value))
-        if not tasks:
-            old = str(stop.get(legacy) or "").strip()
-            values = [old] if old else []
-        return values
-    venue_ids = ids("venueId", "venueId")
-    kiosk_ids = ids("kioskId", "kioskId")
-    def summary_label(singular, values):
-        name = singular if len(values) <= 1 else singular + "s"
-        return f"{name}: {esc(', '.join(values) if values else '—')}"
+    venue_ids = list(dict.fromkeys(
+        str(task.get("venueId") or "").strip()
+        for task in tasks if str(task.get("venueId") or "").strip()
+    ))
+    if not tasks:
+        legacy_venue = str(stop.get("venueId") or "").strip()
+        if legacy_venue:
+            venue_ids = [legacy_venue]
+    venue_label = "Venue IDs" if len(venue_ids) > 1 else "Venue ID"
+    venue_value = esc(", ".join(venue_ids) if venue_ids else "—")
     task_count = len(tasks) if tasks else int(stop.get("t_count") or stop.get("tCnt") or 0)
     venue = str(stop.get("venue") or "Location")
     head = (
@@ -561,8 +563,7 @@ def _fn_stop_markup(stop, number, address):
         f' · {task_count} task{"s" if task_count != 1 else ""}<br>'
         f'{esc(address)}'
         f'<div style="font-size:11px;color:#344054;margin-top:5px;">'
-        f'{summary_label("Venue ID", venue_ids)}'
-        f' &nbsp;·&nbsp; {summary_label("Kiosk ID", kiosk_ids)}</div>'
+        f'{venue_label}: {venue_value}</div>'
     )
     if tasks:
         rows = []
@@ -575,16 +576,14 @@ def _fn_stop_markup(stop, number, address):
                 f'<b>{esc(label)}</b> · {esc(task_type)}'
                 f'<div style="color:#475467;">'
                 f'Venue ID: {esc(str(task.get("venueId") or "").strip() or "—")}'
-                f' &nbsp;·&nbsp; Kiosk ID: {esc(str(task.get("kioskId") or "").strip() or "—")}'
                 f'</div></div>'
             )
         head += ('<div style="font-size:11px;margin-top:7px;">'
                  + "".join(rows) + '</div>')
     else:
         head += ('<div style="color:#667085;font-size:10px;margin-top:5px;">'
-                 'Per-task identifiers were not saved on this older work order.</div>')
+                 'Per-task Venue IDs were not saved on this older work order.</div>')
     return head + '</div>'
-
 
 def _fn_ghost_tasks(ghost):
     """Rebuild enough route task detail from persisted FN stop_data to keep
