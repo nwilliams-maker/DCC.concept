@@ -4020,7 +4020,7 @@ def get_gmaps(home, waypoints, tasks=None):
     """
     _wp_tuple = tuple(waypoints) if waypoints else ()
     _known_pins = task_stop_locations(tasks or [], _wp_tuple)
-    _key = ("continuous-v2", home, _wp_tuple, _known_pins)
+    _key = ("continuous-v3", home, _wp_tuple, _known_pins)
     _now = time.time()
     _cache = _gmaps_route_cache()
     _entry = _cache.get(_key)
@@ -4036,6 +4036,7 @@ def get_gmaps(home, waypoints, tasks=None):
     # Geocode home + each waypoint to (lng, lat). Each is cached forever.
     home_ll = _mapbox_geocode(home)
     if not home_ll:
+        _log_err("get_gmaps/geocode", ValueError("Home address could not be geocoded"))
         return 0, 0, "0h 0m", []
     # First-time routes can contain 20 uncached addresses. Geocoding them
     # serially holds the entire dispatch screen for many request timeouts.
@@ -4053,6 +4054,8 @@ def get_gmaps(home, waypoints, tasks=None):
     wp_lls = [pin or geocode_cache.get(str(w).strip()) or resolved.get(w)
               for w, pin in zip(waypoints, _known_pins)]
     if any(c is None for c in wp_lls):
+        _log_err("get_gmaps/geocode", ValueError(
+            f"{sum(c is None for c in wp_lls)} stop address(es) could not be geocoded"))
         return 0, 0, "0h 0m", []
 
     try:
@@ -4060,7 +4063,7 @@ def get_gmaps(home, waypoints, tasks=None):
             home_ll, wp_lls, MAPBOX_TOKEN, requests.get)
     except Exception as e:
         # Do not cache or use partial mileage/order when any road request fails.
-        _log_err("get_gmaps", type(e).__name__)
+        _log_err("get_gmaps", e)
         return 0, 0, "0h 0m", []
 
     service_hrs = len(waypoints) * (10 / 60)
