@@ -1,7 +1,7 @@
 import math
 import time
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 
 import pytest
 from route_planning import geographic_order, plan_round_trip, RoutePlanningError, task_stop_locations
@@ -21,9 +21,16 @@ class FakeRoads:
         path = urlsplit(url).path
         coords = [tuple(map(float, c.split(','))) for c in path.split('/')[-1].split(';')]
         optimization = 'optimized-trips' in path
-        self.calls.append((optimization, coords))
-        if self.fail == ('optimization' if optimization else 'directions'):
+        matrix = 'directions-matrix' in path
+        self.calls.append((optimization or matrix, coords))
+        if self.fail == ('optimization' if (optimization or matrix) else 'directions'):
             result = {'code': 'NoRoute'}
+        elif matrix:
+            params = parse_qs(urlsplit(url).query)
+            sources = [int(i) for i in params['sources'][0].split(';')]
+            targets = [int(i) for i in params['destinations'][0].split(';')]
+            result = {'code': 'Ok', 'durations': [
+                [math.dist(coords[i], coords[j]) * 100 for j in targets] for i in sources]}
         elif optimization:
             assert len(coords) <= 12
             middle = list(range(1, len(coords)-1))
@@ -55,8 +62,9 @@ def test_every_stop_once_continuous_trip_and_measured_final_order(count):
     assert sum(chunk.count(home) for chunk in measured) == 2
     assert miles == pytest.approx(path_length(expected)*1000*.000621371)
     assert hours == pytest.approx(path_length(expected)*1000/10/3600)
-    optimization_calls = [coords for optimization, coords in roads.calls if optimization]
-    assert sum(chunk.count(home) for chunk in optimization_calls) == 2
+    # Matrix calls measure road legs, not intermediate returns home.
+    # The only dispatched path is the concatenated Directions sequence.
+    assert combined[0] == combined[-1] == home
 
 
 def test_global_seed_fixes_scattered_tucson_order():
@@ -152,7 +160,7 @@ def test_live_pin_changes_invalidate_routing_cache_and_override_old_geocoding():
     get = scope['get_gmaps']
     tasks = [{'full': 'stop', 'lat': 32.01, 'lon': -111.01}]
     first = get('home', ('stop',), tasks=tasks)
-    assert roads.calls[0][1][1] == (-111.01, 32.01)
+    assert any((-111.01, 32.01) in coords for _, coords in roads.calls)
     tasks[0]['lon'] = -111.02
     second = get('home', ('stop',), tasks=tasks)
     assert second[1] > first[1]
@@ -165,3 +173,20 @@ def test_dispatch_order_groups_campaigns_without_duplicating_task_ids():
              {'id': 'a2', 'full': 'a'}, {'id': 'b1', 'full': 'b'},
              {'id': 'c1', 'full': 'c'}]
     assert ordered_route_task_ids(tasks, ['c', 'b', 'a']) == ['c1', 'b1', 'a1', 'a2']
+
+
+def test_global_road_optimizer_beats_interleaved_geographic_clusters():
+    from route_planning import _road_costs, _global_road_order
+    home = (0.0, 0.0)
+    west = [(-10.0, float(i)) for i in range(17)]
+    east = [(10.0, float(i)) for i in range(17)]
+    stops = [point for pair in zip(west, east) for point in pair]
+    roads = FakeRoads()
+    matrix = _road_costs([home, *stops], 'test', roads)
+    original = list(range(len(stops)))
+    optimized = _global_road_order(matrix, [original])
+    def duration(order):
+        path = [0, *[i+1 for i in order], 0]
+        return sum(matrix[a][b] for a,b in zip(path,path[1:]))
+    assert sorted(optimized) == original
+    assert duration(optimized) < duration(original) * .3
