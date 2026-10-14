@@ -579,6 +579,27 @@ def _fn_ghost_tasks(ghost):
             "sio": str(stop.get("sio") or ""),
             "escalated": bool(stop.get("esc")),
         }
+        # New FN work orders retain the original task-level IDs and types.
+        # Never copy the first kiosk's ID onto other tasks at the same stop.
+        saved_tasks = stop.get("tasks")
+        if isinstance(saved_tasks, list) and saved_tasks:
+            added = 0
+            for task in saved_tasks:
+                if not isinstance(task, dict):
+                    continue
+                rebuilt.append({
+                    **common,
+                    "id": str(task.get("taskId") or "").strip(),
+                    "venue_id": str(task.get("venueId") or "").strip(),
+                    "kiosk_id": str(task.get("kioskId") or "").strip(),
+                    "location_in_venue": str(task.get("locationInVenue") or "").strip(),
+                    "client_company": str(task.get("clientCompany") or "").strip() or client,
+                    "sio": str(task.get("sio") or "").strip(),
+                    "task_type": str(task.get("taskType") or "").strip() or "Task",
+                })
+                added += 1
+            if added:
+                continue
         category_counts = [
             ("Kiosk Install", int(stop.get("inst") or 0)),
             ("Kiosk Removal", int(stop.get("remov") or 0)),
@@ -605,7 +626,20 @@ def _fn_ghost_tasks(ghost):
 def _fn_csv_route(route, route_hash, ghost_to_cluster):
     if route.get("_is_ghost"):
         ghost = route.get("_ghost_record") or {}
-        rebuilt = ghost_to_cluster(ghost, skip_geocode=True) if ghost_to_cluster else None
+        stop_data = ghost.get("stop_data") or []
+        if isinstance(stop_data, str):
+            try:
+                stop_data = json.loads(stop_data)
+            except (ValueError, TypeError):
+                stop_data = []
+        has_task_details = any(
+            isinstance(stop, dict) and isinstance(stop.get("tasks"), list)
+            and stop["tasks"] for stop in stop_data
+        )
+        # Prefer persisted per-task identifiers over older synthetic rows,
+        # which stamped one stop-level kiosk ID across every task.
+        rebuilt = (ghost_to_cluster(ghost, skip_geocode=True)
+                   if ghost_to_cluster and not has_task_details else None)
         if rebuilt and rebuilt.get("data"):
             route = rebuilt
         else:
