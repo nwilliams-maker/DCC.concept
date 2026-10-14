@@ -848,3 +848,27 @@ def test_route_venue_accordions_show_multiple_task_identifiers():
     }])
     assert "Venue IDs: VEN-1, VEN-2" in ghost
     assert "Kiosk ID: K-202" in ghost
+
+
+def test_legacy_fn_ghost_rebuild_uses_saved_per_task_ids_not_first_kiosk():
+    build = load_functions("tactical_workspace_master_rw.py", ["_fn_ghost_to_cluster"])["_fn_ghost_to_cluster"]
+    saved = {
+        "wo": "FN10142026-Seward AK-1", "task_ids": ["task-A", "task-B"],
+        "city": "Seward", "state": "AK",
+        "stop_data": [{
+            "addr": "100 Main St, Seward, AK 99664", "venue": "Market",
+            "venueId": "VEN-1", "kioskId": "K-101",
+            "inst": 1, "n_ad": 1,
+            "tasks": [
+                {"taskId": "task-A", "venueId": "VEN-1", "kioskId": "K-101",
+                 "taskType": "New Ad", "clientCompany": "Client A"},
+                {"taskId": "task-B", "venueId": "VEN-2", "kioskId": "K-202",
+                 "taskType": "Kiosk Install", "clientCompany": "Client B"},
+            ],
+        }],
+    }
+    route = build(saved, skip_geocode=True)
+    assert route is not None
+    assert [(task["id"], task["venue_id"], task["kiosk_id"]) for task in route["data"]] == [
+        ("task-A", "VEN-1", "K-101"), ("task-B", "VEN-2", "K-202")
+    ]
