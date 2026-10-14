@@ -1332,6 +1332,13 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                         heading += " · CVS Removal"
                     if heading is None:
                         heading = f"{city}, {route.get('state', '')}    {status_text}"
+                    if status == "Field Nation" and route.get("_fn_assigned_history"):
+                        # The Assigned card must display the new, confirmed
+                        # work-order name, not merely the city or original FN
+                        # queue identity. The detail pane already uses this WO.
+                        assigned_wo = str(route.get("wo") or _ghost.get("wo") or "").strip()
+                        if assigned_wo:
+                            heading = f"{assigned_wo} · {heading}"
                     bundle = route.get('_bundle_label') or _bundle_label(route, _bundle_sets_for_pod(pod))
                     if bundle:
                         heading += f" · {bundle}"
@@ -2788,7 +2795,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                             raise RuntimeError(saved.get("skipped") or saved.get("error") or "Order not found")
                         result = fn_data.mark_fn_assigned(db_engine, saved["work_order"])
                         if not result.get("success"):
-                            raise RuntimeError(result.get("error") or "Assignment failed")
+                            raise RuntimeError(result.get("error") or
+                                               "OnFleet rename was not confirmed; route remains Posted.")
                         fetch_sent_records_from_sheet.clear()
                         st.session_state.pop(f"route_state_{route_hash}", None)
                         st.session_state[f"revamp_fn_{pod}:{route_hash}"] = False
