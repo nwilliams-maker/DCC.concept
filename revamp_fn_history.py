@@ -152,6 +152,10 @@ def restore_posted(engine, expected, user, selected_pods, configs):
                            "from": "Posted", "to": "Pending", "posted_at": old_posted})
             p["fn_history"] = events
             p.pop("fn_posted_ts", None)
+            p.pop("fn_csv_downloaded_at", None)
+            p.pop("fn_csv_downloaded_by", None)
+            p.pop("fn_csv_download_signature", None)
+            p.pop("fn_csv_file_sha256", None)
             conn.execute(sa.text("""
                 UPDATE field_nation_orders
                 SET payload = CAST(:payload AS jsonb), updated_at = now()

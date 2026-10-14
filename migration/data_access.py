@@ -598,24 +598,141 @@ def resolve_fn_return_order(engine: sa.Engine, cluster_hash: str, work_order: st
     return _match_fn_return_order(rows, cluster_hash, work_order, task_ids)
 
 
-def mark_fn_posted(engine: sa.Engine, work_order: str) -> None:
-    """Replaces `markFNPosted`."""
+def fn_csv_download_signature(payload: dict[str, Any]) -> str:
+    """Bind a downloaded FN CSV to the saved work order's meaningful content.
+
+    Changing task identities, addresses, saved stop details or due date after
+    an export invalidates the green check until a fresh CSV is downloaded.
+    Download timestamp/audit fields are deliberately excluded.
+    """
+    p = payload or {}
+    snapshot = {
+        "work_order": str(p.get("fn_original_wo") or p.get("wo") or ""),
+        "cluster_hash": str(p.get("cluster_hash") or ""),
+        "task_ids": sorted(_fn_return_task_ids(p.get("taskIds") or p.get("task_ids"))),
+        "locs": p.get("locs"),
+        "stop_data": p.get("stopData"),
+        "due": p.get("due"),
+    }
+    return hashlib.sha256(
+        json.dumps(snapshot, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def fn_csv_downloaded(payload: dict[str, Any]) -> bool:
+    """Truth for the green checkmark AND the server-side Posted requirement."""
+    p = payload or {}
+    return bool(
+        p.get("fn_csv_downloaded_at")
+        and p.get("fn_csv_download_signature")
+        and p["fn_csv_download_signature"] == fn_csv_download_signature(p)
+    )
+
+
+def record_fn_csv_download(
+    engine: sa.Engine, routes: list[dict[str, str]], *,
+    csv_sha256: str, actor: str = "",
+) -> dict[str, Any]:
+    """Durably acknowledge only the saved PENDING routes actually exported.
+
+    Invoked by the Download CSV button's on_click callback. Nothing is marked
+    if the generated CSV is missing, the route identity has changed, the
+    OnFleet handoff is still running, or any selected record is ineligible.
+    Atomic batch protects the user from half-green checkmarks.
+    """
+    csv_sha256 = str(csv_sha256 or "").lower().strip()
+    if len(csv_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in csv_sha256):
+        raise ValueError("Invalid downloaded CSV checksum; no routes marked exported.")
+    if not routes or len(routes) > 500:
+        raise ValueError("Choose between 1 and 500 routes to download.")
+    by_wo = {}
+    for candidate in routes:
+        work_order = str(candidate.get("work_order") or "").strip()
+        route_hash = str(candidate.get("cluster_hash") or "").strip()
+        if not work_order or not route_hash:
+            raise ValueError("Every CSV route needs a saved work order and route ID.")
+        if work_order in by_wo and by_wo[work_order] != route_hash:
+            raise ValueError("One work order has conflicting route IDs.")
+        by_wo[work_order] = route_hash
+
+    now = datetime.now(timezone.utc).isoformat()
+    actor = str(actor or "Field Nation Dispatch").strip()[:150]
+    marked = []
     with engine.begin() as conn:
-        row = conn.execute(
-            sa.text("SELECT payload FROM field_nation_orders WHERE work_order = :wo FOR UPDATE"),
-            {"wo": work_order},
-        ).first()
+        for wo, route_hash in sorted(by_wo.items()):
+            row = conn.execute(sa.text("""
+                SELECT status::text AS status, provider, payload
+                FROM field_nation_orders WHERE work_order = :wo FOR UPDATE
+            """), {"wo": wo}).mappings().first()
+            if not row:
+                raise ValueError(f"{wo}: saved work order not found; refresh before downloading.")
+            payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+            payload = dict(payload or {})
+            if str(row["status"]) != "posted" or row["provider"] or payload.get("fn_provider") or payload.get("fn_assigned_ts"):
+                raise ValueError(f"{wo}: route is Assigned, not eligible for Pending CSV.")
+            if payload.get("fn_posted_ts"):
+                raise ValueError(f"{wo}: route is already Posted.")
+            if str(payload.get("cluster_hash") or "") != route_hash:
+                raise ValueError(f"{wo}: route identity changed; refresh before downloading.")
+            if str(payload.get("fn_handoff_state") or "").lower() in ("queued", "running", "error"):
+                raise ValueError(f"{wo}: OnFleet handoff is incomplete; CSV is not ready.")
+            if not _fn_return_task_ids(payload.get("taskIds") or payload.get("task_ids")):
+                raise ValueError(f"{wo}: no saved task IDs were found.")
+
+            payload["fn_csv_downloaded_at"] = now
+            payload["fn_csv_downloaded_by"] = actor
+            payload["fn_csv_download_signature"] = fn_csv_download_signature(payload)
+            payload["fn_csv_file_sha256"] = csv_sha256
+            conn.execute(sa.text("""
+                UPDATE field_nation_orders
+                SET payload = CAST(:payload AS jsonb), updated_at = now()
+                WHERE work_order = :wo AND status = 'posted'
+            """), {"wo": wo, "payload": json.dumps(payload)})
+            marked.append({"work_order": wo, "cluster_hash": route_hash})
+
+        conn.execute(sa.text("""
+            INSERT INTO route_events (route_id, action, payload)
+            VALUES (NULL, 'fnCsvDownloaded', CAST(:payload AS jsonb))
+        """), {"payload": json.dumps({
+            "actor": actor, "at": now, "csv_sha256": csv_sha256,
+            "work_orders": [row["work_order"] for row in marked],
+        })})
+    return {"marked": marked, "downloaded_at": now}
+
+
+def mark_fn_posted(engine: sa.Engine, work_order: str) -> None:
+    """Block Posted unless the same saved route has a valid downloaded CSV."""
+    with engine.begin() as conn:
+        row = conn.execute(sa.text("""
+            SELECT status::text AS status, provider, payload
+            FROM field_nation_orders WHERE work_order = :wo FOR UPDATE
+        """), {"wo": work_order}).mappings().first()
         if row is None:
             raise ValueError(f"Field Nation order not found: {work_order}")
-        payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-        payload = dict(payload)
-        payload.setdefault("fn_posted_ts", datetime.now(timezone.utc).isoformat())
-        conn.execute(
-            sa.text("""UPDATE field_nation_orders
-                       SET status = 'posted', payload = :payload, updated_at = now()
-                       WHERE work_order = :wo"""),
-            {"wo": work_order, "payload": json.dumps(payload)},
-        )
+        payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+        payload = dict(payload or {})
+        if str(row["status"]) != "posted" or row["provider"] or payload.get("fn_provider") or payload.get("fn_assigned_ts"):
+            raise ValueError(f"{work_order}: only Pending routes can be marked Posted.")
+        if payload.get("fn_posted_ts"):
+            raise ValueError(f"{work_order}: route is already Posted.")
+        if not fn_csv_downloaded(payload):
+            raise ValueError(
+                f"{work_order}: download the current CSV and confirm the green checkmark before Mark Posted.")
+        if str(payload.get("fn_handoff_state") or "").lower() in ("queued", "running", "error"):
+            raise ValueError(f"{work_order}: OnFleet handoff is not ready.")
+        payload["fn_posted_ts"] = datetime.now(timezone.utc).isoformat()
+        conn.execute(sa.text("""
+            UPDATE field_nation_orders
+            SET payload = CAST(:payload AS jsonb), updated_at = now()
+            WHERE work_order = :wo AND status = 'posted'
+        """), {"wo": work_order, "payload": json.dumps(payload)})
+        conn.execute(sa.text("""
+            INSERT INTO route_events (route_id, action, payload)
+            VALUES (NULL, 'fnMarkedPosted', CAST(:payload AS jsonb))
+        """), {"payload": json.dumps({
+            "work_order": work_order, "fn_posted_ts": payload["fn_posted_ts"],
+        })})
+
 
 def mirror_mark_fn_posted_by_cluster_hash(engine: sa.Engine, cluster_hash: str) -> dict[str, Any]:
     """Dual-write mirror for markFNPosted (2026-09-21). Same cluster_hash
@@ -1214,6 +1331,8 @@ def _ingest_sent_record(
                 "fn_handoff_error": p.get("fn_handoff_error", ""),
                 "locs": p.get("locs", ""),
                 "stop_data": stop_data,
+                "fn_csv_downloaded": (fn_csv_downloaded(p) if status_label == "field_nation" else False),
+                "fn_csv_downloaded_at": str(p.get("fn_csv_downloaded_at") or ""),
                 "task_ids": tids,
                 "kCnt": _k_cnt_final,
             })
@@ -1489,6 +1608,10 @@ def revert_fn_posted_to_pending(engine: sa.Engine, work_orders: list[str]) -> di
                 skipped.append(wo)
                 continue
             payload.pop("fn_posted_ts", None)
+            payload.pop("fn_csv_downloaded_at", None)
+            payload.pop("fn_csv_downloaded_by", None)
+            payload.pop("fn_csv_download_signature", None)
+            payload.pop("fn_csv_file_sha256", None)
             conn.execute(sa.text("UPDATE field_nation_orders SET payload=CAST(:payload AS jsonb), updated_at=now() WHERE work_order=:wo AND status='posted'"), {"wo": wo, "payload": json.dumps(payload)})
             reverted.append({"work_order": wo, "cluster_hash": payload.get("cluster_hash", "")})
     return {"reverted": reverted, "skipped": skipped}

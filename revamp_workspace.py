@@ -700,6 +700,46 @@ def _fn_csv_route(route, route_hash, ghost_to_cluster):
     return {**route, "_cluster_hash": route_hash}
 
 
+
+def _fn_csv_download_callback(db_engine, work_orders, csv_digest, actor, refresh_saved):
+    """Acknowledge actual Download CSV clicks with a durable, per-WO check.
+
+    Streamlit runs this immediately after a browser download click, before the
+    next route-list render. If saving fails, no green check is shown and the
+    database independently blocks the Posted transition.
+    """
+    from migration import data_access as fn_data
+
+    try:
+        result = fn_data.record_fn_csv_download(
+            db_engine, list(work_orders), csv_sha256=csv_digest, actor=actor)
+        marked = result.get("marked") or []
+        refresh_saved.clear()
+        st.session_state.pop("_revamp_fn_checked_entries", None)
+        st.session_state.pop("_revamp_saved_event_version", None)
+        st.session_state["_revamp_notice"] = (
+            "success",
+            f"✅ CSV downloaded — {len(marked)} route(s) now have a green checkmark "
+            "and can be marked Posted.",
+        )
+    except Exception as exc:
+        print(f"[revamp/fn-csv-download] {type(exc).__name__}: {exc}", flush=True)
+        st.session_state["_revamp_notice"] = (
+            "warning",
+            "CSV download started, but the green check could not be saved: "
+            f"{exc}. No unchecked route can be marked Posted. "
+            "Refresh, select the Pending routes, and download again.",
+        )
+
+
+def _fn_csv_pending_checked(entries):
+    """Every selected Pending WO must have a durable verified CSV check."""
+    return bool(entries) and all(
+        bool((entry[1].get("_ghost_record") or {}).get("fn_csv_downloaded"))
+        for entry in entries
+    )
+
+
 def _toggle_state_group(key):
     st.session_state[key] = not st.session_state.get(key, False)
 
@@ -1332,6 +1372,11 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                         heading += " · CVS Removal"
                     if heading is None:
                         heading = f"{city}, {route.get('state', '')}    {status_text}"
+                    if status == "Field Nation" and card_state == "Pending" and _ghost.get("fn_csv_downloaded"):
+                        # Green check must appear ON the exact route card.
+                        # Durable saved-WO proof survives refresh/sign-in and
+                        # is also required by the PostgreSQL Posted transition.
+                        heading = f"✅ {heading} · CSV downloaded"
                     if status == "Field Nation" and route.get("_fn_assigned_history"):
                         # The Assigned card must display the new, confirmed
                         # work-order name, not merely the city or original FN
@@ -2394,12 +2439,29 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         csv_routes = [route for route in csv_routes if route]
         csv_data = None
         stop_count = 0
+        csv_included_hashes = []
         bulk_return_clicked = False
         if csv_routes:
             try:
-                csv_data, stop_count, _ = generate_combined_fn_upload(csv_routes)
+                csv_data, stop_count, csv_included_hashes = generate_combined_fn_upload(csv_routes)
             except Exception as exc:
                 st.error(f"Could not build Field Nation CSV: {exc}")
+        # Match CSV membership back to exact saved WOs. Checking Download on
+        # a batch must not turn unrelated selected/Posted cards green.
+        csv_hashes = set(csv_included_hashes or [])
+        csv_pending = [
+            {"work_order": str((entry[1].get("_ghost_record") or {}).get("wo")
+                               or entry[1].get("wo") or "").strip(),
+             "cluster_hash": str(entry[3])}
+            for entry in pending if str(entry[3]) in csv_hashes
+        ]
+        # Every selected Pending route must contribute to this CSV before
+        # recording a successful batch download.
+        csv_complete = (not pending or len(csv_pending) == len(pending))
+        csv_bytes = csv_data.getvalue() if csv_data else b""
+        csv_digest = hashlib.sha256(csv_bytes).hexdigest() if csv_bytes else ""
+        csv_available = bool(csv_bytes and stop_count > 0 and csv_complete)
+        pending_csv_checked = _fn_csv_pending_checked(pending)
         with st.container(key="revamp_fn_toolbar"):
             sel_col, select_col, csv_col, posted_col, return_col, link_col, clear_col = st.columns(
                 [1.0, .85, 1.35, 1.15, 1.25, 1.0, .65], vertical_alignment="center"
@@ -2416,15 +2478,26 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                           on_click=select_visible, disabled=not _pending_selectable,
                           use_container_width=True)
             with csv_col:
-                st.download_button(f"Download CSV ({len(csv_routes)})",
-                                   data=csv_data.getvalue() if csv_data else b"",
-                                   file_name=f"FN_Combined_{date.today():%Y%m%d}.csv",
-                                   mime="text/csv", disabled=csv_data is None,
-                                   use_container_width=True, key="revamp_fn_csv")
+                st.download_button(
+                    f"Download CSV ({len(csv_routes)})",
+                    data=csv_bytes,
+                    file_name=f"FN_Combined_{date.today():%Y%m%d}.csv",
+                    mime="text/csv", disabled=not csv_available or (bool(pending) and db_engine is None),
+                    use_container_width=True, key="revamp_fn_csv",
+                    on_click=_fn_csv_download_callback if csv_pending else "rerun",
+                    args=(db_engine, tuple(csv_pending), csv_digest,
+                          str(st.session_state.get("_auth_user", {}).get("username")
+                              or "Field Nation Dispatch"),
+                          fetch_sent_records_from_sheet) if csv_pending else None,
+                )
             with posted_col:
-                posted_clicked = st.button(f"Mark Posted ({len(pending)})",
-                                           disabled=not pending or db_engine is None,
-                                           use_container_width=True, key="revamp_fn_posted")
+                posted_clicked = st.button(
+                    f"Mark Posted ({len(pending)})",
+                    disabled=not pending_csv_checked or db_engine is None,
+                    use_container_width=True, key="revamp_fn_posted",
+                    help=("Every selected Pending route must show ✅ CSV downloaded "
+                          "before it can be marked Posted."),
+                )
             bulk_return_clicked = False
             if not fn_only:
                 with return_col:
@@ -2442,6 +2515,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                           disabled=not visible_keys, use_container_width=True)
         if fn_selected and not csv_routes:
             st.warning("Selected routes have no task addresses available for a CSV.")
+        if pending and not pending_csv_checked:
+            not_checked = sum(not bool((entry[1].get("_ghost_record") or {}).get("fn_csv_downloaded"))
+                              for entry in pending)
+            st.caption(f"Download CSV to get the green ✅ checkmark for {not_checked} "
+                       "selected Pending route(s) before Mark Posted.")
 
         if bulk_return_clicked:
             st.session_state["_revamp_fn_bulk_return_confirm"] = True
@@ -2496,20 +2574,42 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                         st.rerun()
 
         if posted_clicked:
-            failures = []
-            for pod, route, _, route_hash, _ in pending:
-                try:
-                    result = fn_data.mirror_mark_fn_posted_by_cluster_hash(db_engine, route_hash)
-                    if not result.get("success"):
-                        raise RuntimeError(result.get("skipped") or result.get("error") or "Order not found")
-                    st.session_state.setdefault("_revamp_fn_clear_next", []).append(f"{pod}:{route_hash}")
-                except Exception as exc:
-                    failures.append(f"{route.get('city', 'Route')}: {exc}")
-            if failures:
-                st.error("Could not mark Posted: " + "; ".join(failures[:3]))
+            # UI gate AND transactional server gate: a stale browser cannot
+            # force an unexported or changed work order to Posted.
+            if not _fn_csv_pending_checked(pending):
+                st.error("Download the CSV and get a green checkmark on every selected "
+                         "Pending route before Mark Posted.")
             else:
-                fetch_sent_records_from_sheet.clear()
-                st.rerun()
+                failures = []
+                successes = 0
+                for pod, route, _, route_hash, _ in pending:
+                    try:
+                        work_order = str((route.get("_ghost_record") or {}).get("wo")
+                                         or route.get("wo") or "").strip()
+                        if not work_order:
+                            raise ValueError("No saved Field Nation work order for this card.")
+                        # Use the exact work-order identity, not a potentially
+                        # reused cluster hash. The database independently
+                        # requires this WO's verified downloaded CSV.
+                        fn_data.mark_fn_posted(db_engine, work_order)
+                        successes += 1
+                        st.session_state.setdefault("_revamp_fn_clear_next", []).append(f"{pod}:{route_hash}")
+                    except Exception as exc:
+                        failures.append(f"{route.get('city', 'Route')}: {exc}")
+                if successes:
+                    fetch_sent_records_from_sheet.clear()
+                    st.session_state.pop("_revamp_fn_checked_entries", None)
+                    st.session_state.pop("_revamp_saved_event_version", None)
+                if failures:
+                    if successes:
+                        st.session_state["_revamp_notice"] = (
+                            "warning", f"Marked {successes} checked route(s) Posted; "
+                            f"{len(failures)} could not be Posted: " + "; ".join(failures[:3]))
+                        st.rerun()
+                    else:
+                        st.error("Could not mark Posted: " + "; ".join(failures[:3]))
+                else:
+                    st.rerun()
     chosen = [entry for entry in all_routes if entry[2] in ("Ready", "Flagged")
               and st.session_state.get(f"revamp_bulk_{entry[0]}:{entry[3]}", False)]
     fn_team_id = st.session_state.get("_fn_team_id")
