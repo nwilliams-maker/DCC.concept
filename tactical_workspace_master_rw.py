@@ -9660,7 +9660,7 @@ def run_pod_tab(pod_name):
         t_ready, t_flagged, t_fn, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "🔌 Digital"])
 
         with t_fn:
-            _fn_posted_subtab, _fn_assigned_subtab = st.tabs(["📤 Posted", "✅ Assigned"])
+            _fn_posted_subtab, _fn_assigned_subtab, _fn_history_subtab = st.tabs(["📤 Posted", "✅ Assigned", "📜 History"])
 
         with t_ready:
             if _is_dispatch_associate():
@@ -9775,36 +9775,58 @@ def run_pod_tab(pod_name):
             if DB_ENGINE is None:
                 st.warning("Assignment history is unavailable while Railway Postgres is disconnected.")
 
+        with _fn_history_subtab:
+            st.subheader("Field Nation — History")
+            _fn_history_category = st.radio(
+                "History category", ["Pending", "Posted", "Assigned"],
+                horizontal=True, key=f"fn_history_category_{pod_name}",
+            )
+            if DB_ENGINE is None:
+                st.warning("Database unavailable — history cannot be loaded.")
+            elif _fn_history_category == "Pending":
+                st.caption("Pending routes have not yet been posted. Current pending routes are managed using the interactive Pending button in Posted.")
+                _fn_pending_history = [r for r in (field_nation or []) if not r.get("fn_posted_ts") and not r.get("fn_provider")]
+                st.info(f"{len(_fn_pending_history)} route(s) currently in the live Field Nation queue. Use the Pending button to manage them.")
+            elif _fn_history_category == "Posted":
+                try:
+                    _fn_history_posted = _da.get_fn_posted_orders(DB_ENGINE, limit=1000)
+                    st.caption(f"{len(_fn_history_posted)} currently Posted routes. Select only routes you want to restore to Pending.")
+                    _fn_history_search = st.text_input("Search Posted history", key=f"fn_history_posted_search_{pod_name}")
+                    _fn_history_filtered = {r["work_order"]: r for r in _fn_history_posted if _fn_history_search.lower() in str(r["work_order"]).lower()}
+                    if _fn_history_filtered:
+                        st.dataframe(pd.DataFrame(list(_fn_history_filtered.values())), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No matching Posted routes.")
+                    _fn_history_selected = st.multiselect("Select Posted routes to restore", options=list(_fn_history_filtered), key=f"fn_history_restore_selected_{pod_name}")
+                    _fn_history_confirm = st.checkbox("Confirm restore of selected Posted routes", key=f"fn_history_restore_confirm_{pod_name}")
+                    if st.button("Restore selected routes to Pending", key=f"fn_history_restore_apply_{pod_name}", disabled=not (_fn_history_selected and _fn_history_confirm), type="primary"):
+                        _fn_history_result = _da.revert_fn_posted_to_pending(DB_ENGINE, _fn_history_selected)
+                        for _fn_history_row in _fn_history_result["reverted"]:
+                            _fn_history_hash = _fn_history_row.get("cluster_hash")
+                            if _fn_history_hash:
+                                st.session_state.get("_fn_posted", {}).pop(_fn_history_hash, None)
+                                st.session_state.get("_fn_exported", {}).pop(_fn_history_hash, None)
+                        _cached_fetch_sent_records_from_db.clear()
+                        st.success(f"Restored {len(_fn_history_result['reverted'])} routes; skipped {len(_fn_history_result['skipped'])}.")
+                        st.rerun()
+                except Exception as _fn_history_error:
+                    _log_err("fn_history_posted", _fn_history_error)
+                    st.error(f"Could not load Posted history: {_fn_history_error}")
+            else:
+                try:
+                    _fn_history_username = str(st.session_state.get("_auth_user", {}).get("username") or "").strip().lower()
+                    _fn_history_assigned = _da.get_fn_assignment_history(DB_ENGINE, _fn_history_username) if _fn_history_username else []
+                    _fn_history_assigned_search = st.text_input("Search Assigned history", key=f"fn_history_assigned_search_{pod_name}")
+                    _fn_history_assigned = [r for r in _fn_history_assigned if _fn_history_assigned_search.lower() in (str(r.get("work_order", "")) + " " + str(r.get("assigned_work_order", "")) + " " + str(r.get("provider", ""))).lower()]
+                    if _fn_history_assigned:
+                        st.dataframe(pd.DataFrame(_fn_history_assigned), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No matching Assigned history for this account.")
+                except Exception as _fn_history_error:
+                    _log_err("fn_history_assigned", _fn_history_error)
+                    st.error(f"Could not load Assigned history: {_fn_history_error}")
+
         with _fn_posted_subtab:
-            # Always-visible recovery access, independent of the live route queue.
-            _fn_recovery_open_key = f"fn_recovery_open_{pod_name}"
-            if st.button("HISTORY — Restore Posted routes", key=f"fn_history_always_visible_{pod_name}", use_container_width=True):
-                st.session_state[_fn_recovery_open_key] = not st.session_state.get(_fn_recovery_open_key, False)
-            if st.session_state.get(_fn_recovery_open_key, False):
-                st.subheader("Posting history / Restore Posted to Pending")
-                if DB_ENGINE is None:
-                    st.warning("Database unavailable — recovery is disabled.")
-                else:
-                    try:
-                        _fn_recovery_rows = _da.get_fn_posted_orders(DB_ENGINE, limit=1000)
-                        st.caption(f"{len(_fn_recovery_rows)} currently Posted routes eligible for recovery. Assigned routes are protected.")
-                        _fn_recovery_search = st.text_input("Search work order to restore", key=f"fn_recovery_always_search_{pod_name}")
-                        _fn_recovery_options = {r["work_order"]: r for r in _fn_recovery_rows if _fn_recovery_search.lower() in r["work_order"].lower()}
-                        _fn_recovery_selected = st.multiselect("Select Posted routes", list(_fn_recovery_options), key=f"fn_recovery_always_selected_{pod_name}")
-                        _fn_recovery_confirmed = st.checkbox("Confirm selected routes should return to Pending", key=f"fn_recovery_always_confirm_{pod_name}")
-                        if st.button("Restore selected routes to Pending", key=f"fn_recovery_always_apply_{pod_name}", disabled=not (_fn_recovery_selected and _fn_recovery_confirmed), type="primary"):
-                            _fn_recovery_result = _da.revert_fn_posted_to_pending(DB_ENGINE, _fn_recovery_selected)
-                            for _fn_recovered in _fn_recovery_result["reverted"]:
-                                _fn_recovered_hash = _fn_recovered.get("cluster_hash")
-                                if _fn_recovered_hash:
-                                    st.session_state.get("_fn_posted", {}).pop(_fn_recovered_hash, None)
-                                    st.session_state.get("_fn_exported", {}).pop(_fn_recovered_hash, None)
-                            _cached_fetch_sent_records_from_db.clear()
-                            st.success(f"Restored {len(_fn_recovery_result['reverted'])} routes; skipped {len(_fn_recovery_result['skipped'])}.")
-                            st.rerun()
-                    except Exception as _fn_recovery_error:
-                        _log_err("fn_recovery_always", _fn_recovery_error)
-                        st.error(f"Could not load recovery list: {_fn_recovery_error}")
             if not field_nation: st.info("No routes currently moved to Field Nation.")
             else:
                 sorted_fn = group_and_sort_by_proximity(field_nation)
@@ -10184,12 +10206,11 @@ def run_pod_tab(pod_name):
                 _fn_filter_key = f"fn_status_filter_{pod_name}"
                 if _fn_filter_key not in st.session_state:
                     st.session_state[_fn_filter_key] = "posted"
-                _fn_status_cols = st.columns(4)
+                _fn_status_cols = st.columns(3)
                 for _fn_idx, (_fn_status, _fn_caption, _fn_count) in enumerate([
                     ("pending", "PENDING", len(_fn_pending_list)),
                     ("posted", "POSTED", len(_fn_posted_list)),
                     ("assigned", "ASSIGNED", len(_fn_assigned_list)),
-                    ("history", "HISTORY", ""),
                 ]):
                     with _fn_status_cols[_fn_idx]:
                         _fn_active = st.session_state[_fn_filter_key] == _fn_status
@@ -10201,57 +10222,11 @@ def run_pod_tab(pod_name):
                         ):
                             st.session_state[_fn_filter_key] = _fn_status
                             st.rerun()
-                if st.session_state[_fn_filter_key] == "history":
-                    # Durable FN posting history and recovery. This operates on the
-                    # Postgres source of truth, not a browser-only session flag.
-                    with st.expander("📜 Posting history / Restore Posted to Pending", expanded=True):
-                        if DB_ENGINE is None:
-                            st.warning("Database unavailable — recovery is disabled.")
-                        else:
-                            try:
-                                _fn_history = _da.get_fn_posted_orders(DB_ENGINE, limit=1000)
-                                st.caption(f"{len(_fn_history)} currently Posted routes · most recently updated first. Assigned routes are protected.")
-                                _fn_hist_query = st.text_input("Find work order", key=f"fn_recovery_search_{pod_name}", placeholder="Search work order name")
-                                _fn_filtered = [x for x in _fn_history if _fn_hist_query.lower() in x["work_order"].lower()]
-                                _fn_hist_by_wo = {x["work_order"]: x for x in _fn_filtered}
-                                _fn_recover_selection = st.multiselect(
-                                    "Select Posted routes to restore",
-                                    options=list(_fn_hist_by_wo),
-                                    format_func=lambda wo: f"{wo}  |  Posted {_fn_hist_by_wo[wo]['posted_at']}  |  {_fn_hist_by_wo[wo]['tasks']} tasks",
-                                    key=f"fn_recovery_selection_{pod_name}",
-                                )
-                                st.caption("Only selected Posted routes will move to Pending. Work orders and tasks stay intact.")
-                                _fn_recover_confirm = st.checkbox(
-                                    f"Confirm restore of {len(_fn_recover_selection)} selected route(s)",
-                                    key=f"fn_recovery_confirm_{pod_name}",
-                                )
-                                if st.button(
-                                    f"Restore {len(_fn_recover_selection)} to Pending",
-                                    key=f"fn_recovery_apply_{pod_name}",
-                                    disabled=not (_fn_recover_selection and _fn_recover_confirm),
-                                    type="primary",
-                                ):
-                                    _fn_restore_result = _da.revert_fn_posted_to_pending(DB_ENGINE, _fn_recover_selection)
-                                    for _fn_restored in _fn_restore_result["reverted"]:
-                                        _fn_hash = _fn_restored.get("cluster_hash")
-                                        if _fn_hash:
-                                            st.session_state.get("_fn_posted", {}).pop(_fn_hash, None)
-                                            st.session_state.get("_fn_exported", {}).pop(_fn_hash, None)
-                                    _cached_fetch_sent_records_from_db.clear()
-                                    st.success(f"Restored {len(_fn_restore_result['reverted'])} route(s) to Pending; skipped {len(_fn_restore_result['skipped'])}.")
-                                    st.rerun()
-                            except Exception as _fn_history_error:
-                                _log_err("fn_recovery_history", _fn_history_error)
-                                st.error(f"Could not load or restore posting history: {_fn_history_error}")
-
-
-
                 _fn_current_status = st.session_state[_fn_filter_key]
                 _fn_ordered = {
                     "pending": _fn_pending_list,
                     "posted": _fn_posted_list,
                     "assigned": _fn_assigned_list,
-                    "history": [],
                 }[_fn_current_status]
                 if not _fn_ordered and _fn_current_status != "history":
                     st.info(f"No {_fn_current_status} Field Nation routes currently in the queue.")
