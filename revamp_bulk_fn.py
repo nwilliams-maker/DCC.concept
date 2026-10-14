@@ -36,9 +36,20 @@ def _payload(route, pod, due, work_order, route_hash):
             "n_ad": sum("new ad" in str(t.get("task_type", "")).lower() for t in at_stop),
             "c_ad": sum("continuity" in str(t.get("task_type", "")).lower() for t in at_stop),
             "d_ad": sum("default" in str(t.get("task_type", "")).lower() for t in at_stop),
+            # Legacy stop-level values remain for previously deployed readers.
+            # The first task cannot represent another kiosk at this address.
             "kioskId": first.get("kiosk_id", ""),
             "venueId": first.get("venue_id", ""),
             "locationInVenue": first.get("location_in_venue", ""),
+            "tasks": [{
+                "taskId": str(task.get("id") or "").strip(),
+                "venueId": str(task.get("venue_id") or "").strip(),
+                "kioskId": str(task.get("kiosk_id") or "").strip(),
+                "taskType": str(task.get("task_type") or "").strip(),
+                "clientCompany": str(task.get("client_company") or "").strip(),
+                "locationInVenue": str(task.get("location_in_venue") or "").strip(),
+                "sio": str(task.get("sio") or "").strip(),
+            } for task in at_stop],
             "campaigns": list({
                 str(t.get("client_company", "")): {"name": t.get("client_company", ""),
                     "esc": bool(t.get("escalated")), "bs": str(t.get("boosted_standard", "")).lower()}
