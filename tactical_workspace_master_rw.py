@@ -8177,17 +8177,20 @@ def make_venue_details(data):
             else:
                 camp_block = "<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No detail available for this stop.</div>"
 
+        _venue_ids = list(dict.fromkeys(str(t.get('venue_id') or t.get('venueId') or '').strip()
+                         for t in loc_tasks if str(t.get('venue_id') or t.get('venueId') or '').strip()))
         _search_text = " ".join(str(t.get(field) or "") for t in loc_tasks for field in
                                 ("client_company", "task_type", "kiosk_id", "venue_id", "venue_name", "full", "sio"))
-        _search_text += " " + str(loc)
+        _search_text += " " + str(loc) + " " + " ".join(str(t) for t in loc_tasks)
         _query = str(st.session_state.get("revamp_search") or "").strip().lower()
-        _open_match = bool(_query and _query in _search_text.lower())
+        _open_match = bool(_query and all(part in _search_text.lower() for part in _query.split()))
         _open_attr = " open" if _open_match else ""
         rows.append(
             f"<details class='fn-loc-row'{_open_attr}>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
             f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(task_location_address(loc, loc_tasks))}</span>"
+            f"{(' &nbsp;·&nbsp; Venue ID' + ('s' if len(_venue_ids) > 1 else '') + ': ' + esc(', '.join(_venue_ids))) if _venue_ids else ''}"
             f"{k_tag}{digi_ins_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}{_icon_html}"
             f"</summary>{camp_block}</details>"
         )
@@ -8312,7 +8315,6 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         id_tag = (
             f" <span style='color:#475467;font-size:10px;'>"
             f"Venue ID{'s' if len(venue_ids) > 1 else ''}: {esc(', '.join(venue_ids) if venue_ids else '—')}"
-            f" · Kiosk ID{'s' if len(kiosk_ids) > 1 else ''}: {esc(', '.join(kiosk_ids) if kiosk_ids else '—')}"
             f"</span>"
         )
         if saved_tasks:
@@ -8336,9 +8338,9 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         _search_text += " " + " ".join(str(t.get(field) or "") for t in (sd.get("tasks") or [])
                                         if isinstance(t, dict) for field in
                                         ("taskType", "clientCompany", "venueId", "kioskId", "sio"))
-        _search_text += " " + " ".join(str(camp) for camp in (sd.get("campaigns") or []))
+        _search_text += " " + " ".join(str(camp) for camp in (sd.get("campaigns") or [])) + " " + str(loc)
         _query = str(st.session_state.get("revamp_search") or "").strip().lower()
-        _open_match = bool(_query and _query in _search_text.lower())
+        _open_match = bool(_query and all(part in _search_text.lower() for part in _query.split()))
         _open_attr = " open" if _open_match else ""
         rows.append(
             f"<details class='fn-loc-row'{_open_attr}>"
