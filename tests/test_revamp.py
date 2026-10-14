@@ -660,3 +660,74 @@ def test_fn_return_keeps_tracking_if_onfleet_release_fails(monkeypatch):
             {"data": [{"id": "a"}, {"id": "b"}]}, "new-hash", "Blue",
             object(), fail_release, SimpleNamespace(clear=lambda: None))
     assert deleted == []
+
+
+def test_fn_saved_entries_hide_missing_work_orders_and_keep_actual_fn_routes():
+    scope = load_functions("revamp_workspace.py",
+        ["_has_linked_fn_work_order", "_fn_saved_entries"], {
+            "st": SimpleNamespace(session_state={}),
+            "_fn_ghost_tasks": lambda ghost: [],
+            "_bundle_label": lambda route, bundles: "",
+            "_bundle_sets_for_pod": lambda pod: [],
+            "_dedupe_route_entries": lambda routes: routes,
+        })
+    fn = scope["_has_linked_fn_work_order"]
+    assert not fn({})
+    assert not fn({"wo": "none"})
+    assert not fn({"wo": "Field Nation route (no linked work order)"})
+    assert fn({"wo": "FN10142026-Seward AK-1"})
+    ghosts = {"Orange": [
+        {"wo": "none", "hash": "orphan-juneau", "status": "field_nation",
+         "city": "Juneau", "state": "AK"},
+        {"wo": "", "hash": "orphan-wasilla", "status": "posted",
+         "city": "Wasilla", "state": "AK"},
+        {"wo": "FN10142026-Seward AK-1", "hash": "saved-seward",
+         "status": "field_nation", "city": "Seward", "state": "AK"},
+        {"wo": "FN10142026-Another AK-1", "hash": "assigned-history",
+         "status": "assigned", "city": "Juneau", "state": "AK"},
+    ]}
+    entries = scope["_fn_saved_entries"](ghosts, ["Orange"])
+    assert len(entries) == 1
+    assert entries[0][3] == "saved-seward"
+    assert entries[0][1]["wo"] == "FN10142026-Seward AK-1"
+
+
+def test_field_nation_dispatcher_view_omits_unlinked_live_cluster():
+    from streamlit.testing.v1 import AppTest
+    source = f"""
+import sys
+sys.path.insert(0, {str(ROOT)!r})
+import streamlit as st
+import pandas as pd
+from revamp_workspace import render_workspace
+st.session_state.setdefault("ic_df", pd.DataFrame())
+st.session_state.setdefault("clusters_Orange", [
+    {{"city": "Juneau", "state": "AK", "stops": 1,
+      "data": [{{"id": "orphan-task", "full": "Juneau, AK", "state": "AK"}}]}}
+])
+def records():
+    return ({{"orphan-task": {{"status": "field_nation"}}}},
+        {{"Orange": [{{"wo": "FN10142026-Seward AK-1", "hash": "persisted-123",
+                      "status": "field_nation", "city": "Seward", "state": "AK",
+                      "stops": 1, "tasks": 2, "task_ids": ["s1", "s2"]}}]}},
+        set(), {{}})
+records.clear = lambda: None
+helpers = dict(
+    make_venue_details=lambda *args: "",
+    make_venue_details_ghost=lambda *args, **kw: "",
+    venue_section=lambda content: content,
+    render_finalization_checklist=lambda *args, **kw: None,
+    move_to_dispatch=lambda *args, **kw: None,
+    is_dispatch_associate=lambda: True)
+render_workspace(lambda pod: pod == "Orange", lambda pod: None,
+    lambda *args: None, lambda *args: 0, None, lambda *args: None,
+    records, saved_route_helpers=helpers)
+"""
+    app = AppTest.from_string(source).run(timeout=30)
+    assert not app.exception
+    app.radio(key="revamp_status").set_value("Field Nation").run(timeout=30)
+    assert not app.exception
+    labels = " ".join(x.label for x in app.button)
+    assert "Seward" in labels
+    assert "Juneau" not in labels
+    assert "no linked work order" not in labels.lower()
