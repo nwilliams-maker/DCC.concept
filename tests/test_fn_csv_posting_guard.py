@@ -240,6 +240,36 @@ with patch.object(rw, '_load_bundle_labels', no_bundle), \
 '''
 
 
+
+def test_selecting_one_unchecked_route_disables_post_for_entire_batch(db, tmp_path):
+    from streamlit.testing.v1 import AppTest
+    seed(db)
+    seed(db, wo="FN10142026-Phoenix AZ-2", cluster_hash="fn-hash-2")
+    file = tmp_path / "fn_csv_two_routes.py"
+    file.write_text(APP, encoding="utf-8")
+    at = AppTest.from_file(str(file), default_timeout=25).run()
+    assert not at.exception, [e.message for e in at.exception]
+
+    # Download only the first route and verify it alone gets a green check.
+    at.checkbox(key="revamp_fn_Orange:fn-hash-1").check().run()
+    at.button(key="revamp_fn_csv").click().run()
+    assert da.fn_csv_downloaded(fetch_row(db, "FN10142026-Phoenix AZ-1")["payload"])
+    assert not da.fn_csv_downloaded(fetch_row(db, "FN10142026-Phoenix AZ-2")["payload"])
+
+    # Selecting a new unchecked WO MUST turn Mark Posted back off.
+    at.checkbox(key="revamp_fn_Orange:fn-hash-2").check().run()
+    assert at.button(key="revamp_fn_posted").disabled is True
+    assert not at.exception, [e.message for e in at.exception]
+
+    # Combined CSV download adds a green check to BOTH saved work orders.
+    at.button(key="revamp_fn_csv").click().run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert all(
+        da.fn_csv_downloaded(fetch_row(db, wo)["payload"])
+        for wo in ("FN10142026-Phoenix AZ-1", "FN10142026-Phoenix AZ-2"))
+    assert at.button(key="revamp_fn_posted").disabled is False
+
+
 def test_associate_route_card_shows_green_check_after_csv_click_and_posts(db, tmp_path):
     from streamlit.testing.v1 import AppTest
     seed(db)
