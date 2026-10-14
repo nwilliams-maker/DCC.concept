@@ -9660,7 +9660,7 @@ def run_pod_tab(pod_name):
         t_ready, t_flagged, t_fn, t_digital = st.tabs(["📥 Ready", "⚠️ Flagged", "🌐 Field Nation", "🔌 Digital"])
 
         with t_fn:
-            _fn_posted_subtab, _fn_assigned_subtab = st.tabs(["📤 Posted", "✅ Assigned"])
+            _fn_posted_subtab, _fn_assigned_subtab, _fn_history_subtab = st.tabs(["📤 Posted", "✅ Assigned", "📜 Posting History"])
 
         with t_ready:
             if _is_dispatch_associate():
@@ -9729,6 +9729,27 @@ def run_pod_tab(pod_name):
 
         with _fn_posted_subtab:
             st.subheader("Field Nation — Posted")
+            if DB_ENGINE is None:
+                st.warning("Posted history is unavailable while Railway Postgres is disconnected.")
+            else:
+                try:
+                    _fn_posted_rows = _da.get_fn_posted_orders(DB_ENGINE)
+                    _fn_posted_search = st.text_input("Search posted work orders", key=f"fn_posted_search_{pod_name}")
+                    _fn_posted_matches = [r for r in _fn_posted_rows if _fn_posted_search.lower() in (str(r["work_order"]) + " " + str(r["provider"])).lower()]
+                    st.caption(f"{len(_fn_posted_matches)} posted work orders")
+                    if _fn_posted_matches:
+                        st.dataframe(pd.DataFrame(_fn_posted_matches).rename(columns={
+                            "work_order": "Work Order", "provider": "Provider",
+                            "posted_at": "Posted At", "tasks": "Tasks",
+                        }), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No posted work orders found.")
+                except Exception as _fn_posted_err:
+                    _log_err("fn_posted_history", _fn_posted_err)
+                    st.warning("Posted work orders are temporarily unavailable.")
+
+        with _fn_history_subtab:
+            st.subheader("Field Nation — Posting History / Restore to Pending")
             # Durable FN posting history and recovery. This operates on the
             # Postgres source of truth, not a browser-only session flag.
             with st.expander("📜 Posting history / Restore Posted to Pending", expanded=False):
@@ -9738,7 +9759,7 @@ def run_pod_tab(pod_name):
                     try:
                         _fn_history = _da.get_fn_posted_orders(DB_ENGINE, limit=1000)
                         st.caption(f"{len(_fn_history)} currently Posted routes · most recently updated first. Assigned routes are protected.")
-                        _fn_hist_query = st.text_input("Find work order", key=f"fn_history_search_{pod_name}", placeholder="Search work order name")
+                        _fn_hist_query = st.text_input("Find work order", key=f"fn_recovery_search_{pod_name}", placeholder="Search work order name")
                         _fn_filtered = [x for x in _fn_history if _fn_hist_query.lower() in x["work_order"].lower()]
                         _fn_hist_by_wo = {x["work_order"]: x for x in _fn_filtered}
                         _fn_recover_selection = st.multiselect(
@@ -9771,25 +9792,6 @@ def run_pod_tab(pod_name):
                         _log_err("fn_recovery_history", _fn_history_error)
                         st.error(f"Could not load or restore posting history: {_fn_history_error}")
 
-
-            if DB_ENGINE is None:
-                st.warning("Posted history is unavailable while Railway Postgres is disconnected.")
-            else:
-                try:
-                    _fn_posted_rows = _da.get_fn_posted_orders(DB_ENGINE)
-                    _fn_posted_search = st.text_input("Search posted work orders", key=f"fn_posted_search_{pod_name}")
-                    _fn_posted_matches = [r for r in _fn_posted_rows if _fn_posted_search.lower() in (str(r["work_order"]) + " " + str(r["provider"])).lower()]
-                    st.caption(f"{len(_fn_posted_matches)} posted work orders")
-                    if _fn_posted_matches:
-                        st.dataframe(pd.DataFrame(_fn_posted_matches).rename(columns={
-                            "work_order": "Work Order", "provider": "Provider",
-                            "posted_at": "Posted At", "tasks": "Tasks",
-                        }), use_container_width=True, hide_index=True)
-                    else:
-                        st.info("No posted work orders found.")
-                except Exception as _fn_posted_err:
-                    _log_err("fn_posted_history", _fn_posted_err)
-                    st.warning("Posted work orders are temporarily unavailable.")
 
         with _fn_assigned_subtab:
             st.subheader("Field Nation — Assigned")
