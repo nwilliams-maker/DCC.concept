@@ -724,109 +724,222 @@ _FA_BUDGET_S = 5 * 60  # 5 min, same headroom GAS left under its 6-min hard kill
 def sync_onfleet_for_fn_assignment(
     task_ids: list[str], wo: str, provider: str, route_plan_id_hint: str | None = None,
 ) -> dict[str, Any]:
-    """Port of markFNAssigned's Part A (discover-and-rename the OnFleet
-    routePlan) + Part B (per-task metadata + worker re-PUT so the
-    task.assigned webhook fires and Make/Monday pick up the new WO/installer).
-    Returns the resolved routePlanId (if any) so the caller can persist it on
-    the field_nation_orders row for the fast path next time."""
-    start = time.time()
-    partial = False
-    partial_reason = ""
-    resolved_route_plan_id = route_plan_id_hint
+    """Confirm that an FN assignment's *entire* OnFleet route gets renamed.
 
-    if not task_ids:
-        return {"partial": True, "partialReason": "No Onfleet task IDs available to locate the Route Plan Name", "routePlanId": resolved_route_plan_id}
+    Do not treat a 2xx PUT alone as proof of a rename: read the Route Plan
+    back by ID and check its name and exact tasks. All task metadata updates
+    happen before the route rename. If anything fails, report an actionable
+    error so Postgres can keep the order Posted and the user can retry Assign.
+    No new OnFleet Route Plan or worker is created in this operation.
+    """
+    start = time.monotonic()
+    ids = list(dict.fromkeys(str(t).strip() for t in (task_ids or []) if str(t).strip()))
+    hint = str(route_plan_id_hint or "").strip()
+    provider = " ".join(str(provider or "").split())
+    wo = str(wo or "").strip()
 
-    headers = _onfleet_auth_header()
-    new_meta = [
-        {"name": "WO_NAME", "value": wo, "type": "string", "visibility": ["api"]},
-        {"name": "INSTALLER_NAME", "value": provider or "", "type": "string", "visibility": ["api"]},
-    ]
+    def failure(reason, plan_id=None):
+        return {
+            "partial": True,
+            "partialReason": str(reason),
+            "routePlanId": plan_id or hint or None,
+            "routePlanNameVerified": False,
+        }
 
-    # Part A: discover-and-rename.
-    rp_id = resolved_route_plan_id
-    if not rp_id and task_ids:
+    if not ids:
+        return failure("No task IDs available to locate the OnFleet Route Plan.")
+    if not wo or not provider:
+        return failure("A work-order name and confirmed Field Nation representative are required.")
+    if not os.environ.get("ONFLEET_KEY"):
+        return failure("ONFLEET_KEY is not configured; no OnFleet rename was attempted.")
+
+    def read_json(response, label):
         try:
-            task_get = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{task_ids[0]}")
-            if task_get.status_code == 200:
-                task_json = task_get.json()
-                if task_json.get("routePlan"):
-                    rp_id = str(task_json["routePlan"])
-        except Exception:  # noqa: BLE001
-            pass
+            value = response.json()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label}: invalid OnFleet JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"{label}: unexpected OnFleet response")
+        return value
 
-    if rp_id:
+    # GET each task before mutation. The task's routePlan is authoritative
+    # when an earlier DB hint is stale; never rename some other route.
+    details = {}
+    discovered_ids = set()
+    for tid in ids:
+        if time.monotonic() - start > _FA_BUDGET_S - 20:
+            return failure("OnFleet task verification timed out; retry Assign.")
         try:
-            rename_resp = onfleet_fetch_with_backoff("put", f"{ONFLEET_BASE}/routePlans/{rp_id}", json_body={"name": wo})
-            if rename_resp.status_code < 400:
-                resolved_route_plan_id = rp_id
-            else:
-                partial = True
-                partial_reason = f"Onfleet Route Plan Name update returned HTTP {rename_resp.status_code}"
-        except Exception as exc:  # noqa: BLE001
-            partial = True
-            partial_reason = f"Onfleet Route Plan Name update failed: {exc}"
+            response = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}")
+            if response.status_code != 200:
+                return failure(f"Cannot verify OnFleet task {tid}: HTTP {response.status_code}")
+            task = read_json(response, f"Task {tid}")
+        except Exception as exc:
+            return failure(f"Cannot verify OnFleet task {tid}: {exc}")
+        details[tid] = task
+        if task.get("routePlan"):
+            discovered_ids.add(str(task["routePlan"]).strip())
+
+    if len(discovered_ids) > 1:
+        return failure("The selected tasks belong to more than one OnFleet Route Plan; nothing was renamed.")
+    plan_id = next(iter(discovered_ids), None) or hint
+    if not plan_id:
+        return failure("No OnFleet Route Plan ID found. Retry the Field Nation OnFleet handoff before Assign.")
+    plan_url = f"{ONFLEET_BASE}/routePlans/{plan_id}"
+
+    def verify_plan(label):
+        response = onfleet_fetch_with_backoff("get", plan_url)
+        if response.status_code != 200:
+            raise ValueError(f"{label}: OnFleet Route Plan HTTP {response.status_code}")
+        plan = read_json(response, label)
+        # OnFleet's Route Plan GET always includes its ordered task IDs. An
+        # exact match prevents accidentally renaming a different/bundled route.
+        raw_tasks = plan.get("tasks")
+        if not isinstance(raw_tasks, list):
+            raise ValueError(f"{label}: Route Plan is missing its task list")
+        plan_ids = {str(t.get("id") if isinstance(t, dict) else t).strip()
+                    for t in raw_tasks}
+        if plan_ids != set(ids):
+            raise ValueError(
+                f"{label}: Route Plan tasks differ (expected {len(ids)}, found "
+                f"{len(plan_ids)}); no cross-route rename is allowed")
+        return plan
+
+    try:
+        plan = verify_plan("Before rename")
+    except Exception as exc:
+        return failure(str(exc), plan_id)
+
+    # Preserve kiosk/client/custom metadata. The previous implementation
+    # replaced ALL metadata with two keys and swallowed non-2xx failures.
+    worker_warnings = []
+    for i, tid in enumerate(ids):
+        if time.monotonic() - start > _FA_BUDGET_S - 20:
+            return failure(f"OnFleet sync timed out after {i}/{len(ids)} tasks; retry Assign.", plan_id)
+        task = details[tid]
+        current_meta = task.get("metadata") or []
+        if not isinstance(current_meta, list):
+            return failure(f"Task {tid} metadata has an invalid format.", plan_id)
+        metadata = [m for m in current_meta
+                    if not (isinstance(m, dict) and
+                            str(m.get("name") or "").upper() in ("WO_NAME", "INSTALLER_NAME"))]
+        metadata.extend([
+            {"name": "WO_NAME", "value": wo, "type": "string",
+             "visibility": ["api", "dashboard"]},
+            {"name": "INSTALLER_NAME", "value": provider, "type": "string",
+             "visibility": ["api", "dashboard"]},
+        ])
+        try:
+            updated = onfleet_fetch_with_backoff(
+                "put", f"{ONFLEET_BASE}/tasks/{tid}", json_body={"metadata": metadata})
+            if not (200 <= updated.status_code < 300):
+                return failure(f"Task {tid} metadata rename failed: HTTP {updated.status_code}", plan_id)
+
+            # Verify the task-level work-order fields, not only the Route
+            # Plan header (the task fields feed downstream integrations).
+            check = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}")
+            if check.status_code != 200:
+                return failure(f"Cannot confirm task {tid} rename: HTTP {check.status_code}", plan_id)
+            saved = read_json(check, f"Verify task {tid}")
+            names = {str(m.get("name") or "").upper(): str(m.get("value") or "")
+                     for m in (saved.get("metadata") or []) if isinstance(m, dict)}
+            if names.get("WO_NAME") != wo or names.get("INSTALLER_NAME") != provider:
+                return failure(f"Task {tid} did not retain the new work-order metadata.", plan_id)
+
+            # Maintain the legacy task.assigned webhook notification when
+            # possible, without changing the driver. A webhook retry failure
+            # is reported separately from a verified name mismatch.
+            if task.get("worker"):
+                worker_put = onfleet_fetch_with_backoff(
+                    "put", f"{ONFLEET_BASE}/tasks/{tid}",
+                    json_body={"worker": task["worker"], "metadata": metadata})
+                if not (200 <= worker_put.status_code < 300):
+                    worker_warnings.append(f"Worker refresh {tid}: HTTP {worker_put.status_code}")
+        except Exception as exc:
+            return failure(f"Task {tid} OnFleet update failed: {exc}", plan_id)
+        if i < len(ids) - 1:
+            time.sleep(0.05)
+
+    # Rename the Route Plan after its tasks have the same WO metadata.
+    if str(plan.get("name") or "") != wo:
+        try:
+            response = onfleet_fetch_with_backoff(
+                "put", plan_url, json_body={"name": wo})
+            if not (200 <= response.status_code < 300):
+                return failure(f"Route Plan rename failed: HTTP {response.status_code}", plan_id)
+        except Exception as exc:
+            return failure(f"Route Plan rename request failed: {exc}", plan_id)
+
+    # Explicit read-after-write. If OnFleet is eventually consistent, give it
+    # two short retries; do not claim success for an unconfirmed rename.
+    final_error = ""
+    for attempt in range(3):
+        try:
+            current = verify_plan("After rename")
+            if str(current.get("name") or "") == wo:
+                return {
+                    "partial": False,
+                    "partialReason": "",
+                    "routePlanId": plan_id,
+                    "routePlanNameVerified": True,
+                    "workerRefreshWarnings": worker_warnings,
+                }
+            final_error = f"Route Plan still named {current.get('name')!r}"
+        except Exception as exc:
+            final_error = str(exc)
+        if attempt < 2:
+            time.sleep(0.3 * (attempt + 1))
+    return failure(
+        f"OnFleet did not confirm the new Route Plan name ({final_error}). Retry Assign.",
+        plan_id,
+    )
+
+
+def apply_fn_assigned_side_effects(
+    payload: dict[str, Any], wo: str, provider: str,
+    route_plan_id_hint: str | None = None,
+) -> dict[str, Any]:
+    """Require verified OnFleet names before callers promote a WO to Accepted."""
+    raw_ids = payload.get("taskIds") or payload.get("task_ids") or ""
+    if isinstance(raw_ids, (list, tuple)):
+        task_ids = [str(t).strip() for t in raw_ids if str(t).strip()]
     else:
-        partial = True
-        partial_reason = "Onfleet route plan was not found for this route"
+        task_ids = [t.strip() for t in str(raw_ids).replace("|", ",").split(",") if t.strip()]
 
-    # Part B: per-task metadata + worker re-PUT.
-    for i, tid in enumerate(task_ids):
-        if time.time() - start > _FA_BUDGET_S:
-            partial = True
-            partial_reason = (partial_reason + "; " if partial_reason else "") + f"time budget reached during Onfleet sync ({i}/{len(task_ids)} tasks)"
-            break
-
-        current_worker = None
-        try:
-            task_resp = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}")
-            if task_resp.status_code == 200:
-                current_worker = task_resp.json().get("worker")
-        except Exception:  # noqa: BLE001
-            pass
-
-        try:
-            onfleet_fetch_with_backoff("put", f"{ONFLEET_BASE}/tasks/{tid}", json_body={"metadata": new_meta})
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(0.04)
-
-        if current_worker:
-            try:
-                onfleet_fetch_with_backoff("put", f"{ONFLEET_BASE}/tasks/{tid}", json_body={"worker": current_worker, "metadata": new_meta})
-            except Exception:  # noqa: BLE001
-                pass
-
-        if i < len(task_ids) - 1:
-            time.sleep(0.07)
-
-    return {"partial": partial, "partialReason": partial_reason, "routePlanId": resolved_route_plan_id}
-
-
-def apply_fn_assigned_side_effects(payload: dict[str, Any], wo: str, provider: str, route_plan_id_hint: str | None = None) -> dict[str, Any]:
-    """Orchestrates the OnFleet + Monday side effects for markFNAssigned,
-    given the already-renamed WO and the confirmed provider name. Wrapped so
-    a failure in either sync never raises -- matches GAS's "Don't fail the
-    action -- the sheet move already succeeded" comment."""
-    task_ids = [t.strip() for t in str(payload.get("taskIds") or "").split(",") if t.strip()]
-
-    onfleet_result = {"partial": False, "partialReason": "", "routePlanId": route_plan_id_hint}
     try:
-        onfleet_result = sync_onfleet_for_fn_assignment(task_ids, wo, provider, route_plan_id_hint)
-    except Exception as exc:  # noqa: BLE001
-        onfleet_result["partialReason"] = f"Onfleet sync exception: {exc}"
-        onfleet_result["partial"] = True
+        onfleet_result = sync_onfleet_for_fn_assignment(
+            task_ids, wo, provider, route_plan_id_hint)
+    except Exception as exc:
+        onfleet_result = {
+            "partial": True,
+            "partialReason": f"OnFleet sync exception: {type(exc).__name__}: {exc}",
+            "routePlanId": route_plan_id_hint,
+            "routePlanNameVerified": False,
+        }
 
-    monday_result: dict[str, Any] = {}
+    if onfleet_result.get("partial") or not onfleet_result.get("routePlanNameVerified"):
+        return {
+            "partial": True,
+            "partialReason": onfleet_result.get("partialReason") or "OnFleet Route Plan rename not verified",
+            "routePlanId": onfleet_result.get("routePlanId"),
+            "routePlanNameVerified": False,
+            "monday": {"skipped": "OnFleet name was not confirmed; FN order remains Posted"},
+        }
+
+    # Terraboost disabled Monday write sync on 2026-09-21, but retain the
+    # existing safe helper for any legacy consumer.
     try:
-        monday_result = sync_monday_for_stops(payload.get("locs") or "", wo, provider, debug_label="markFNAssigned")
-    except Exception as exc:  # noqa: BLE001
+        monday_result = sync_monday_for_stops(
+            payload.get("locs") or "", wo, provider, debug_label="markFNAssigned")
+    except Exception as exc:
         monday_result = {"skipped": f"exception: {exc}"}
 
     return {
-        "partial": onfleet_result.get("partial", False),
-        "partialReason": onfleet_result.get("partialReason", ""),
+        "partial": False,
+        "partialReason": "",
         "routePlanId": onfleet_result.get("routePlanId"),
+        "routePlanNameVerified": True,
+        "workerRefreshWarnings": onfleet_result.get("workerRefreshWarnings") or [],
         "monday": monday_result,
     }
 
