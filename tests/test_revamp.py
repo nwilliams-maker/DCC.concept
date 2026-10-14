@@ -786,7 +786,7 @@ def test_fn_saved_task_rebuild_and_csv_keep_distinct_kiosk_ids():
     assert [t["kiosk_id"] for t in output["data"]] == ["K-101", "K-202"]
 
 
-def test_fn_route_stop_details_show_ids_per_stop_and_task_without_guessing():
+def test_fn_route_stop_details_show_venue_id_only_per_stop_and_task():
     scope = load_functions("revamp_workspace.py", ["_fn_stop_markup"],
                            {"html": __import__("html")})
     saved = {"venue": "Test & Shop", "t_count": 2,
@@ -800,14 +800,15 @@ def test_fn_route_stop_details_show_ids_per_stop_and_task_without_guessing():
     markup = scope["_fn_stop_markup"](saved, 1, "100 Main St")
     assert "Test &amp; Shop" in markup
     assert "Venue IDs: VEN-1, VEN-2" in markup
-    assert "Kiosk IDs: K-101, K-202" in markup
     assert "Task 1 (task-A)" in markup and "Task 2 (task-B)" in markup
-    assert "Kiosk ID: K-202" in markup
+    assert "Venue ID: VEN-2" in markup
+    assert "Kiosk ID" not in markup and "K-101" not in markup and "K-202" not in markup
     legacy = scope["_fn_stop_markup"]({
         "venue": "Market", "kioskId": "K-101", "venueId": "VEN-1",
         "t_count": 2}, 2, "200 Main St")
-    assert "Per-task identifiers were not saved" in legacy
-    assert "Kiosk IDs: K-101, K-202" not in legacy
+    assert "Per-task Venue IDs were not saved" in legacy
+    assert "Venue ID: VEN-1" in legacy
+    assert "Kiosk ID" not in legacy and "K-101" not in legacy
 
 
 def test_field_nation_csv_remains_original_venue_id_only_template():
@@ -897,3 +898,63 @@ def test_legacy_fn_ghost_rebuild_uses_saved_per_task_ids_not_first_kiosk():
     assert [(task["id"], task["venue_id"], task["kiosk_id"]) for task in route["data"]] == [
         ("task-A", "VEN-1", "K-101"), ("task-B", "VEN-2", "K-202")
     ]
+
+
+def test_route_card_identifiers_follow_tab_rules_for_live_and_historical_routes():
+    ids = load_functions(
+        "revamp_workspace.py", ["_route_card_identifier_line"], {"json": json}
+    )["_route_card_identifier_line"]
+    live = {
+        "city": "Juneau", "state": "AK",
+        "data": [
+            {"venue_id": "VEN-1", "kiosk_id": "K-101"},
+            {"venue_id": "VEN-2", "kiosk_id": "K-202"},
+            {"venue_id": "VEN-1", "kiosk_id": "K-101"},
+        ],
+    }
+    for tab in ("Routes", "CVS Removal", "Sent", "Accepted", "Declined", "Finalized"):
+        text = ids(live, tab)
+        assert "Venue IDs: VEN-1, VEN-2" in text, (tab, text)
+        assert "Kiosk IDs: K-101, K-202" in text, (tab, text)
+    fn = ids(live, "Field Nation")
+    assert "Venue IDs: VEN-1, VEN-2" in fn
+    assert "Kiosk ID" not in fn and "K-101" not in fn and "K-202" not in fn
+
+    ghost = {"_is_ghost": True, "_ghost_record": {
+        "stop_data": json.dumps([{
+            "venueId": "WRONG-LEGACY-VENUE", "kioskId": "WRONG-LEGACY-KIOSK",
+            "tasks": [
+                {"taskId": "one", "venueId": "VEN-1", "kioskId": "K-101"},
+                {"taskId": "two", "venueId": "VEN-2", "kioskId": "K-202"},
+            ],
+        }])}}
+    for tab in ("Sent", "Accepted", "Declined", "Finalized"):
+        text = ids(ghost, tab)
+        assert "Venue IDs: VEN-1, VEN-2" in text
+        assert "Kiosk IDs: K-101, K-202" in text
+        assert "WRONG-LEGACY" not in text
+    fn = ids(ghost, "Field Nation")
+    assert "Venue IDs: VEN-1, VEN-2" in fn
+    assert "Kiosk ID" not in fn and "K-101" not in fn and "K-202" not in fn
+
+    legacy = {"_ghost_record": {"stop_data": [
+        {"venueId": "VEN-OLD", "kioskId": "K-OLD"}]}}
+    assert "Venue ID: VEN-OLD" in ids(legacy, "Field Nation")
+    assert "Kiosk ID" not in ids(legacy, "Field Nation")
+    assert "Kiosk ID: K-OLD" in ids(legacy, "Accepted")
+
+
+def test_route_card_identifier_preview_keeps_large_routes_compact():
+    formatter = load_functions(
+        "revamp_workspace.py", ["_route_card_identifier_line"], {"json": json}
+    )["_route_card_identifier_line"]
+    route = {"data": [
+        {"venue_id": f"V{i}", "kiosk_id": f"K{i}"} for i in range(10)
+    ]}
+    text = formatter(route, "Routes")
+    assert "V0, V1, V2, V3 (+6 more)" in text
+    assert "K0, K1, K2, K3 (+6 more)" in text
+    assert "V4" not in text and "K4" not in text
+    fn = formatter(route, "Field Nation")
+    assert "V0, V1, V2, V3 (+6 more)" in fn
+    assert "Kiosk ID" not in fn
