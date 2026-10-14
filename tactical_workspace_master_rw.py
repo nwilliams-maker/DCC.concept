@@ -8131,11 +8131,35 @@ def make_venue_details(data):
             else:
                 camp_block = "<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;font-size:10px;color:#94a3b8;'>No detail available for this stop.</div>"
 
+        # Stop summary shows all distinct IDs, not just those of the first
+        # task at this address. Keep the campaign aggregation above intact.
+        venue_ids = list(dict.fromkeys(str(t.get('venue_id') or '').strip()
+                                            for t in loc_tasks if str(t.get('venue_id') or '').strip()))
+        kiosk_ids = list(dict.fromkeys(str(t.get('kiosk_id') or '').strip()
+                                            for t in loc_tasks if str(t.get('kiosk_id') or '').strip()))
+        venue_value = esc(', '.join(venue_ids) if venue_ids else '—')
+        kiosk_value = esc(', '.join(kiosk_ids) if kiosk_ids else '—')
+        id_tag = (f" <span style='color:#475467;font-size:10px;'>"
+                  f"Venue ID{'s' if len(venue_ids) > 1 else ''}: {venue_value}"
+                  f" · Kiosk ID{'s' if len(kiosk_ids) > 1 else ''}: {kiosk_value}</span>")
+        # Task-level rows remain separate even when client/type aggregates.
+        task_details = []
+        for task_idx, task in enumerate(loc_tasks, 1):
+            task_details.append(
+                f"<div style='padding:3px 4px;font-size:11px;color:#344054;'>"
+                f"Task {task_idx} · {esc(str(task.get('task_type') or 'Task'))}"
+                f" · Venue ID: {esc(str(task.get('venue_id') or '').strip() or '—')}"
+                f" · Kiosk ID: {esc(str(task.get('kiosk_id') or '').strip() or '—')}"
+                f"</div>"
+            )
+        camp_block += ("<div style='padding:5px 8px;margin-top:5px;border-top:1px solid #e4e7ec;'>"
+                       + ''.join(task_details) + "</div>")
+
         rows.append(
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(task_location_address(loc, loc_tasks))}</span>"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(task_location_address(loc, loc_tasks))}</span>{id_tag}"
             f"{k_tag}{digi_ins_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}{_icon_html}"
             f"</summary>{camp_block}</details>"
         )
@@ -8246,11 +8270,44 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         else:
             camp_block = f"<div style='padding:6px 8px;background:#f8fafc;border-radius:6px;margin-top:4px;'>{''.join(camp_rows)}</div>"
 
+        # Persisted Field Nation stopData may contain task-level IDs (new
+        # rows) or only one legacy ID per stop. Do not project the first
+        # kiosk's ID onto every task in older records.
+        saved_tasks = [t for t in (sd.get('tasks') or []) if isinstance(t, dict)]
+        venue_ids = list(dict.fromkeys(str(t.get('venueId') or '').strip()
+                    for t in saved_tasks if str(t.get('venueId') or '').strip()))
+        kiosk_ids = list(dict.fromkeys(str(t.get('kioskId') or '').strip()
+                    for t in saved_tasks if str(t.get('kioskId') or '').strip()))
+        if not saved_tasks:
+            venue_ids = [str(sd.get('venueId'))] if sd.get('venueId') else []
+            kiosk_ids = [str(sd.get('kioskId'))] if sd.get('kioskId') else []
+        id_tag = (
+            f" <span style='color:#475467;font-size:10px;'>"
+            f"Venue ID{'s' if len(venue_ids) > 1 else ''}: {esc(', '.join(venue_ids) if venue_ids else '—')}"
+            f" · Kiosk ID{'s' if len(kiosk_ids) > 1 else ''}: {esc(', '.join(kiosk_ids) if kiosk_ids else '—')}"
+            f"</span>"
+        )
+        if saved_tasks:
+            task_details = []
+            for task_idx, task in enumerate(saved_tasks, 1):
+                task_details.append(
+                    f"<div style='padding:3px 4px;font-size:11px;color:#344054;'>"
+                    f"Task {task_idx} · {esc(str(task.get('taskType') or 'Task'))}"
+                    f" · Venue ID: {esc(str(task.get('venueId') or '').strip() or '—')}"
+                    f" · Kiosk ID: {esc(str(task.get('kioskId') or '').strip() or '—')}"
+                    f"</div>"
+                )
+            camp_block += ("<div style='padding:5px 8px;margin-top:5px;border-top:1px solid #e4e7ec;'>"
+                           + ''.join(task_details) + "</div>")
+        else:
+            camp_block += ("<div style='font-size:10px;color:#667085;padding:4px 8px;'>"
+                           "Per-task identifiers were not saved on this older route.</div>")
+
         rows.append(
             f"<details class='fn-loc-row'>"
             f"<summary class='fn-loc-summary'>"
             f"<span class='fn-chevron'>›</span>"
-            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(address_with_zip(addr, sd.get('zip')))}</span>"
+            f"{venue_prefix}<span style='font-weight:700;color:#0f172a;'>{esc(address_with_zip(addr, sd.get('zip')))}</span>{id_tag}"
             f"{k_tag}{remov_tag}{boost_tag}{lplus_tag}{esc_tag} &nbsp;{t_pill}"
             f"</summary>{camp_block}</details>"
         )
