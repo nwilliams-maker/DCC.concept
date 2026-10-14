@@ -920,3 +920,14 @@ def test_kiosk_id_appears_on_campaign_lines_not_route_selection_cards():
     assert "{id_tag}" not in saved
     ast.parse(source)
     ast.parse(revamp)
+
+
+def test_same_campaign_different_kiosks_get_separate_campaign_lines():
+    with open("tactical_workspace_master_rw.py", encoding="utf-8") as handle:
+        source = handle.read()
+    dispatch = source[source.index("def render_dispatch("):source.index("def make_venue_details(")]
+    saved = source[source.index("def make_venue_details("):source.index("def make_venue_details_ghost(")]
+    for segment in (dispatch, saved):
+        assert "key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip())" in segment
+        assert "for (cmp, tt_badge, _kiosk_id), grp in" in segment
+        assert "kiosk_text" in segment
