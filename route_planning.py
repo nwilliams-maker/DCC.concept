@@ -79,7 +79,13 @@ def geographic_order(home, stops):
 
 
 def _road_costs(points, token, request_get):
-    """Build a directed road-time matrix across the entire route in 12-stop blocks."""
+    """Use 12-point blocks and the 25-coordinate *driving* Matrix API.
+
+    Traffic-aware matrices are limited to TEN coordinates, including when
+    selecting sources and destinations. The cross-block requests below may
+    contain 24 coordinates; using driving-traffic made those requests invalid.
+    Directions still uses traffic-aware road miles and travel times.
+    """
     n = len(points)
     blocks = [list(range(i, min(i + 12, n))) for i in range(0, n, 12)]
     costs = [[float('inf')] * n for _ in range(n)]
@@ -93,14 +99,21 @@ def _road_costs(points, token, request_get):
         coords = ';'.join(f'{points[i][0]},{points[i][1]}' for i in indices)
         sources = ';'.join(str(i) for i in range(len(src)))
         targets = ';'.join(str(i if a == b else len(src) + i) for i in range(len(dst)))
-        url = (f'https://api.mapbox.com/directions-matrix/v1/mapbox/driving-traffic/{coords}'
+        url = (f'https://api.mapbox.com/directions-matrix/v1/mapbox/driving/{coords}'
                f'?annotations=duration&sources={sources}&destinations={targets}&access_token={token}')
-        result = request_get(url, timeout=20).json()
+        try:
+            result = request_get(url, timeout=20).json()
+        except Exception as exc:
+            raise RoutePlanningError(f'Matrix request failed: {type(exc).__name__}') from exc
+        if not isinstance(result, dict):
+            raise RoutePlanningError('Matrix returned invalid JSON')
         rows = result.get('durations')
         if (result.get('code') != 'Ok' or not isinstance(rows, list)
                 or len(rows) != len(src)
                 or any(not isinstance(row, list) or len(row) != len(dst) for row in rows)):
-            raise RoutePlanningError('Incomplete road-time matrix; route not dispatched')
+            message = str(result.get('message') or '')[:140]
+            raise RoutePlanningError(
+                f'Matrix unavailable ({result.get("code", "unknown")}: {message})')
         return src, dst, rows
 
     pairs = [(i, j) for i in range(len(blocks)) for j in range(len(blocks))]
@@ -153,62 +166,119 @@ def _global_road_order(costs, seeds):
 
 
 def plan_round_trip(home, stops, token, request_get):
-    """Return road miles, driving hours, and indices of every stop exactly once."""
+    """Return road miles, driving hours, and an order visiting every stop once.
+
+    The trip ALWAYS begins and ends at home. The global Mapbox Matrix is used
+    for modest routes; larger routes use geographic sequencing with local road
+    optimization to avoid matrix rate limits. All reported miles and hours are
+    measured on Mapbox Directions road routes, never straight-line estimates.
+    """
     if not stops:
         return 0.0, 0.0, []
     seed = geographic_order(home, stops)
-    # A single global road-time optimization for normal-sized routes.
-    # Never dispatch a worse order than the existing stop sequence.
-    if len(stops) <= 75:
-        costs = _road_costs([home, *stops], token, request_get)
-        order = _global_road_order(
-            costs, [list(range(len(stops))), seed, list(reversed(seed))])
-    else:
-        order = None
-    def fetch(endpoint, coords, params):
+
+    # Matrix is optional route-order refinement, NOT a dependency for mileage.
+    # With 12-point blocks, 35 stops require <=9 driving-matrix calls; 75
+    # stops would require 49, competing with the provider's 60/minute limit.
+    order = None
+    if len(stops) <= 35:
+        try:
+            costs = _road_costs([home, *stops], token, request_get)
+            order = _global_road_order(
+                costs, [list(range(len(stops))), seed, list(reversed(seed))])
+        except Exception as exc:
+            print(f'[route_planning] Matrix fallback: {type(exc).__name__}: {exc}', flush=True)
+
+    def fetch(endpoint, profile, coords, params):
         coord_text = ';'.join(f'{lng},{lat}' for lng, lat in coords)
-        response = request_get(
-            f'https://api.mapbox.com/{endpoint}/mapbox/driving-traffic/{coord_text}'
-            f'?{params}&access_token={token}', timeout=15).json()
+        url = (f'https://api.mapbox.com/{endpoint}/mapbox/{profile}/{coord_text}'
+               f'?{params}&access_token={token}')
+        try:
+            response = request_get(url, timeout=20).json()
+        except Exception as exc:
+            raise RoutePlanningError(
+                f'{endpoint}/{profile} request failed: {type(exc).__name__}') from exc
+        if not isinstance(response, dict):
+            raise RoutePlanningError(f'{endpoint}/{profile} returned invalid JSON')
         if response.get('code') != 'Ok':
-            raise RoutePlanningError('Road routing failed: ' + str(response.get('code')))
+            code = str(response.get('code') or 'unknown')
+            message = str(response.get('message') or '')[:140]
+            raise RoutePlanningError(f'{endpoint}/{profile}: {code}: {message}')
         return response
+
     def refine(offset):
+        # Optimization v1 accepts up to 12 coordinates per request. Only the
+        # first/last are fixed endpoints; no chunk returns to the depot.
         chunk = seed[offset:offset+10]
         start = home if offset == 0 else stops[seed[offset-1]]
         end = home if offset+10 >= len(seed) else stops[seed[offset+10]]
-        result = fetch('optimized-trips/v1', [start, *[stops[i] for i in chunk], end],
-                       'source=first&destination=last&roundtrip=false')
-        wps = result.get('waypoints', [])
-        ranks = [wp.get('waypoint_index') for wp in wps]
-        if (not result.get('trips') or len(wps) != len(chunk)+2
-                or any(type(rank) is not int for rank in ranks)
-                or sorted(ranks) != list(range(len(wps)))
-                or ranks[0] != 0 or ranks[-1] != len(wps)-1):
-            raise RoutePlanningError('Incomplete optimized stop order')
-        return [chunk[i] for i in sorted(range(len(chunk)), key=lambda i: ranks[i+1])]
+        try:
+            # Optimization v1 is a *driving* route-order service. Traffic
+            # profile support is not reliable; use traffic-aware Directions
+            # below for actual road mileage and duration.
+            result = fetch('optimized-trips/v1', 'driving',
+                           [start, *[stops[i] for i in chunk], end],
+                           'source=first&destination=last&roundtrip=false')
+            wps = result.get('waypoints', [])
+            ranks = [wp.get('waypoint_index') for wp in wps]
+            if (not result.get('trips') or len(wps) != len(chunk)+2
+                    or any(type(rank) is not int for rank in ranks)
+                    or sorted(ranks) != list(range(len(wps)))
+                    or ranks[0] != 0 or ranks[-1] != len(wps)-1):
+                raise RoutePlanningError('Incomplete optimized stop order')
+            return [chunk[i] for i in sorted(range(len(chunk)),
+                                             key=lambda i: ranks[i+1])]
+        except Exception as exc:
+            # A failed optimization must not invalidate the full route. Keep
+            # the existing global geographic seed for this chunk, and still
+            # measure every stop on actual roads below.
+            print(f'[route_planning] Optimization chunk {offset // 10 + 1} fallback: '
+                  f'{type(exc).__name__}: {exc}', flush=True)
+            return chunk
+
     if order is None:
-        # Large routes use shared chunk endpoints, never intermediate
-        # depot returns. The final measured path is still one round trip.
         offsets = list(range(0, len(seed), 10))
         with ThreadPoolExecutor(max_workers=min(4, len(offsets))) as pool:
             order = [i for chunk in pool.map(refine, offsets) for i in chunk]
+
     if sorted(order) != list(range(len(stops))):
-        raise RoutePlanningError('Route did not include every stop once')
-    # Directions measures precisely the final dispatch order. Adjacent requests
-    # share one endpoint, so each road leg is measured once; home only at ends.
+        raise RoutePlanningError('Route did not include every stop exactly once')
+
+    # Every chunk shares exactly one endpoint with the next, so the complete
+    # measured path is home -> ALL stops -> home, without intermediate returns.
     points = [home, *[stops[i] for i in order], home]
     chunks = [points[i:i+25] for i in range(0, len(points)-1, 24)]
+
     def measure(coords):
-        result = fetch('directions/v5', coords, 'overview=false&steps=false&continue_straight=false')
-        routes = result.get('routes') or []
-        if not routes:
-            raise RoutePlanningError('No road route')
-        miles = routes[0]['distance'] * 0.000621371
-        hours = routes[0]['duration'] / 3600
-        if not (math.isfinite(miles) and math.isfinite(hours) and miles >= 0 and hours >= 0):
-            raise RoutePlanningError('Invalid road totals')
-        return miles, hours
+        def measure_profile(profile):
+            result = fetch('directions/v5', profile, coords,
+                           'overview=false&steps=false&continue_straight=false')
+            routes = result.get('routes') or []
+            if not routes:
+                raise RoutePlanningError(f'Directions/{profile}: no road route')
+            try:
+                miles = float(routes[0]['distance']) * 0.000621371
+                hours = float(routes[0]['duration']) / 3600
+            except (TypeError, ValueError, KeyError, IndexError) as exc:
+                raise RoutePlanningError('Directions missing road totals') from exc
+            if not (math.isfinite(miles) and math.isfinite(hours)
+                    and miles >= 0 and hours >= 0):
+                raise RoutePlanningError('Directions returned invalid road totals')
+            return miles, hours
+
+        try:
+            return measure_profile('driving-traffic')
+        except RoutePlanningError as traffic_error:
+            # Traffic routing can fail for specific regions or coordinates.
+            # The driving profile is a legitimate road-distance alternative,
+            # never a geodesic approximation.
+            try:
+                return measure_profile('driving')
+            except RoutePlanningError as driving_error:
+                raise RoutePlanningError(
+                    f'Road directions failed ({len(coords)} waypoints): '
+                    f'traffic: {traffic_error}; driving: {driving_error}') from driving_error
+
     with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as pool:
         totals = list(pool.map(measure, chunks))
     return sum(x[0] for x in totals), sum(x[1] for x in totals), order
