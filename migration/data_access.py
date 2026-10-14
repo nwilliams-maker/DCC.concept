@@ -631,120 +631,179 @@ def mirror_mark_fn_posted_by_cluster_hash(engine: sa.Engine, cluster_hash: str) 
     mark_fn_posted(engine, work_order)
     return {"success": True, "work_order": work_order}
 
-def mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | None = None, *, mirror_only: bool = False) -> dict[str, Any]:
-    """Replaces `markFNAssigned`.
+def mark_fn_assigned(
+    engine: sa.Engine, work_order: str, route_plan_id: str | None = None,
+    *, mirror_only: bool = False,
+) -> dict[str, Any]:
+    """Assign a posted FN order with the SAME confirmed name in DCC and OnFleet.
 
-    GAS's markFNAssigned does more than flip a status: it MOVES the Field
-    Nation sheet row into "Accepted routes" -- renaming the WO to
-    "FN-<Provider>-<MMDD>" along the way -- so the order becomes a full
-    accepted route from that point on (Accepted bucket, finalization
-    checklist, everything `get_routes()` callers expect). The original
-    version of this function (before 2026-09-19, written without the actual
-    GAS source available) only updated `field_nation_orders` in place and
-    did not replicate that move -- a real functional gap, not just a missing
-    side effect, since nothing would ever promote the order into `routes`.
-    Fixed here: this now also inserts the corresponding `routes` row.
-    `field_nation_orders` is kept (status='assigned') for FN-specific
-    tracking rather than deleted, since Postgres doesn't need the
-    delete-to-move dance a spreadsheet does.
+    The original field_nation_orders.work_order is its permanent identity.
+    The new name lives in payload.wo, the Accepted routes.wo and the OnFleet
+    Route Plan name/WO_NAME metadata. A failed OnFleet rename leaves the order
+    Posted and does not create a misleading Accepted card.
 
-    Also runs the OnFleet routePlan rename + per-task metadata/worker re-PUT
-    and the Monday.com address-matched sync (fn_side_effects.py), exactly
-    like the live GAS action -- see that module's docstring for the source.
+    mirror_only is strictly for the retired GAS dual-write compatibility
+    path, where OnFleet has already been updated by the originating action.
+    """
+    work_order = str(work_order or "").strip()
+    if not work_order:
+        return {"success": False, "error": "Missing Field Nation work order."}
 
-    mirror_only=True (2026-09-21, dual-write path): skips
-    fn_side_effects.apply_fn_assigned_side_effects() entirely -- no OnFleet
-    routePlan rename/re-PUT, no Monday sync -- because GAS already performed
-    those live. Everything else (the new_wo computation, the
-    field_nation_orders update, the routes insert/upsert, the event log)
-    still runs exactly as it would live, so the Postgres row ends up
-    identical to what the non-mirror call would produce, just without
-    re-triggering the side effects a second time. mirror_mark_fn_assigned()
-    / mirror_mark_fn_assigned_by_cluster_hash() below are the intended entry
-    points -- don't pass mirror_only=True directly unless you have a
-    specific reason to call mark_fn_assigned() itself this way."""
     with engine.begin() as conn:
-        row = conn.execute(
-            sa.text("SELECT payload, provider, route_plan_id FROM field_nation_orders WHERE work_order = :wo"),
-            {"wo": work_order},
-        ).mappings().first()
+        row = conn.execute(sa.text("""
+            SELECT status::text AS status, payload, provider, route_plan_id
+            FROM field_nation_orders
+            WHERE work_order = :wo FOR UPDATE
+        """), {"wo": work_order}).mappings().first()
         if not row:
-            return {"success": False, "error": "Route hash not found in Field Nation tab."}
+            return {"success": False, "error": "Field Nation work order not found."}
 
         payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
-        provider = (row["provider"] or payload.get("fn_provider") or "").strip()
-        legacy_wo = str(payload.get("wo") or work_order)
+        payload = dict(payload or {})
+        if row["status"] == "assigned":
+            previous_name = str(payload.get("wo") or "").strip()
+            existing = conn.execute(sa.text("""
+                SELECT 1 FROM routes WHERE wo = :wo AND CAST(status AS text) IN ('accepted', 'finalized')
+            """), {"wo": previous_name}).first() if previous_name else None
+            if existing:
+                return {
+                    "success": True, "wo": previous_name,
+                    "alreadyAssigned": True, "partial": False,
+                    "partialReason": "",
+                }
+            return {
+                "success": False,
+                "error": "This order is already marked Assigned, but its Accepted DCC route is missing. "
+                         "It requires reconciliation; no OnFleet change was attempted.",
+            }
+        if row["status"] != "posted":
+            return {"success": False, "error": "Only Posted Field Nation routes can be assigned."}
 
-        from datetime import datetime as _dt
-        date_stamp = _dt.now().strftime("%-m/%-d")
-        if provider:
-            new_wo = f"FN-{' '.join(provider.split())}-{date_stamp}"
-        else:
-            new_wo = legacy_wo or f"FN-Unassigned-{date_stamp}"
+        provider = " ".join(str(row["provider"] or payload.get("fn_provider") or "").split())
+        if not provider:
+            return {"success": False, "error": "Enter the confirmed Field Nation representative."}
 
-        payload = dict(payload)
+        now = datetime.now(timezone.utc)
+        date_stamp = f"{now.month}/{now.day}"
+        base_wo = f"FN-{provider}-{date_stamp}"
+
+        # A provider can accept multiple FN routes in one day. The previous
+        # name generator reused the same WO and ON CONFLICT overwrote another
+        # accepted route's tasks. Serialize suffix reservation across clients.
+        if conn.dialect.name == "postgresql":
+            conn.execute(sa.text(
+                "SELECT pg_advisory_xact_lock(hashtextextended(:name, 0))"
+            ), {"name": f"dcc-fn-assigned-name:{base_wo}"})
+
+        candidate = base_wo
+        suffix = 2
+        while True:
+            conflict_route = conn.execute(sa.text("""
+                SELECT 1 FROM routes WHERE wo = :candidate LIMIT 1
+            """), {"candidate": candidate}).first()
+            conflict_fn = conn.execute(sa.text("""
+                SELECT 1 FROM field_nation_orders
+                WHERE status = 'assigned'
+                  AND payload->>'wo' = :candidate
+                  AND work_order <> :original
+                LIMIT 1
+            """), {"candidate": candidate, "original": work_order}).first()
+            if not conflict_route and not conflict_fn:
+                break
+            candidate = f"{base_wo}-{suffix}"
+            suffix += 1
+        new_wo = candidate
+
+        payload["fn_original_wo"] = work_order
         payload["assigned_to_fn"] = True
-        payload["fn_assigned_ts"] = _dt.utcnow().isoformat() + "Z"
-        # FN assignment promotes the route directly into Accepted.
-        payload.setdefault("accepted_at", datetime.now(timezone.utc).isoformat())
+        payload["fn_assigned_ts"] = now.isoformat()
+        payload.setdefault("accepted_at", now.isoformat())
         payload["wo"] = new_wo
-        # 2026-09-22 (read-side rewrite prep): stamp fn_provider onto the
-        # payload that lands in `routes`, not just the field_nation_orders
-        # `provider` column. extract_fn_provider() (fn_utils.py, and its
-        # data_access counterpart used by get_sent_records_from_db below)
-        # reads payload["fn_provider"] to render "FN: <name>" on the now-
-        # accepted route's card. Without this line the DB-side payload never
-        # carried that key, so a Postgres-only read would show a bare "FN"
-        # for every FN-assigned route regardless of provider -- a real
-        # data gap, not just a read-side one, caught while building the
-        # read-side reconstruction rather than something the read side can
-        # work around on its own.
-        if provider:
-            payload["fn_provider"] = provider
+        payload["fn_provider"] = provider
 
-        side_effects: dict[str, Any] = {"partial": False, "partialReason": "", "routePlanId": route_plan_id or row["route_plan_id"]}
+        plan_hint = route_plan_id or row["route_plan_id"]
+        side_effects: dict[str, Any] = {
+            "partial": False, "partialReason": "",
+            "routePlanId": plan_hint, "routePlanNameVerified": bool(mirror_only),
+        }
         if not mirror_only:
             try:
-                side_effects = _fx.apply_fn_assigned_side_effects(payload, new_wo, provider, route_plan_id or row["route_plan_id"])
-            except Exception as exc:  # noqa: BLE001 -- sheet/row move already committed logically below; never block on this
-                side_effects = {"partial": True, "partialReason": f"side-effect exception: {exc}", "routePlanId": route_plan_id or row["route_plan_id"]}
+                side_effects = _fx.apply_fn_assigned_side_effects(
+                    payload, new_wo, provider, plan_hint)
+            except Exception as exc:
+                side_effects = {
+                    "partial": True,
+                    "partialReason": f"OnFleet assignment exception: {type(exc).__name__}: {exc}",
+                    "routePlanId": plan_hint, "routePlanNameVerified": False,
+                }
+            if (side_effects.get("partial") or
+                    not side_effects.get("routePlanNameVerified")):
+                return {
+                    "success": False, "wo": work_order,
+                    "error": "OnFleet did not confirm the work-order rename. "
+                             "The route remains Posted and can be retried. "
+                             + str(side_effects.get("partialReason") or "Unknown OnFleet error"),
+                    "partial": True,
+                    "partialReason": side_effects.get("partialReason") or "",
+                }
 
-        resolved_route_plan_id = side_effects.get("routePlanId") or route_plan_id or row["route_plan_id"]
+        resolved_plan_id = side_effects.get("routePlanId") or plan_hint
+        payload["fn_onfleet_name_verified"] = bool(side_effects.get("routePlanNameVerified"))
+        if resolved_plan_id:
+            payload["fn_route_plan_id"] = str(resolved_plan_id)
 
-        conn.execute(
-            sa.text(
-                """
-                UPDATE field_nation_orders
-                SET status = 'assigned', route_plan_id = :route_plan_id, payload = :payload, updated_at = now()
-                WHERE work_order = :wo
-                """
-            ),
-            {"wo": work_order, "route_plan_id": resolved_route_plan_id, "payload": json.dumps(payload)},
-        )
-        conn.execute(
-            sa.text(
-                """
-                INSERT INTO routes (wo, contractor_name, status, comp, due, locs, stop_data, cluster_hash, payload)
-                VALUES (:wo, :contractor_name, 'accepted', :comp, :due, :locs, :stop_data, :cluster_hash, :payload)
-                ON CONFLICT (wo) DO UPDATE SET
-                    status = 'accepted', payload = EXCLUDED.payload, updated_at = now()
-                """
-            ),
-            {
-                "wo": new_wo,
-                "contractor_name": provider or "Assigned Contractor",
-                "comp": payload.get("comp"),
-                "due": payload.get("due"),
-                "locs": json.dumps(payload.get("locs")) if payload.get("locs") is not None else None,
-                "stop_data": json.dumps(payload.get("stopData")) if payload.get("stopData") is not None else None,
-                "cluster_hash": payload.get("cluster_hash"),
-                "payload": json.dumps(payload),
-            },
-        )
-        _log_event(conn, new_wo, "markFNAssigned", {"work_order": work_order, "provider": provider, "side_effects": side_effects})
+        updated = conn.execute(sa.text("""
+            UPDATE field_nation_orders
+            SET status = 'assigned', provider = :provider,
+                route_plan_id = :plan_id,
+                payload = CAST(:payload AS jsonb), updated_at = now()
+            WHERE work_order = :wo AND status = 'posted'
+        """), {
+            "wo": work_order, "provider": provider,
+            "plan_id": resolved_plan_id, "payload": json.dumps(payload),
+        })
+        if updated.rowcount != 1:
+            raise RuntimeError("Field Nation order changed during assignment; no DCC route was created.")
+
+        # DO NOTHING on collision, rather than overwriting some unrelated
+        # route. A second click is idempotent through status='assigned' above.
+        added = conn.execute(sa.text("""
+            INSERT INTO routes
+              (wo, contractor_name, status, comp, due, locs, stop_data, cluster_hash, payload)
+            VALUES
+              (:wo, :contractor_name, 'accepted', :comp, :due, :locs,
+               :stop_data, :cluster_hash, CAST(:payload AS jsonb))
+            ON CONFLICT (wo) DO NOTHING
+            RETURNING wo
+        """), {
+            "wo": new_wo,
+            "contractor_name": provider,
+            "comp": payload.get("comp"),
+            "due": payload.get("due"),
+            "locs": json.dumps(payload.get("locs")) if payload.get("locs") is not None else None,
+            "stop_data": json.dumps(payload.get("stopData")) if payload.get("stopData") is not None else None,
+            "cluster_hash": payload.get("cluster_hash"),
+            "payload": json.dumps(payload),
+        }).first()
+        if not added:
+            raise RuntimeError(
+                f"The new work-order name {new_wo!r} is already used by another route. "
+                "The database transaction was rolled back; retry Assign.")
+
+        _log_event(conn, new_wo, "markFNAssigned", {
+            "work_order": work_order, "provider": provider,
+            "routePlanId": resolved_plan_id,
+            "routePlanNameVerified": bool(side_effects.get("routePlanNameVerified")),
+            "side_effects": side_effects,
+        })
 
     _mirror_route_to_peer(engine, new_wo)
-    return {"success": True, "wo": new_wo, "partial": side_effects.get("partial", False), "partialReason": side_effects.get("partialReason", "")}
+    return {
+        "success": True, "wo": new_wo, "originalWorkOrder": work_order,
+        "routePlanId": resolved_plan_id,
+        "partial": False, "partialReason": "",
+        "workerRefreshWarnings": side_effects.get("workerRefreshWarnings") or [],
+    }
 
 def mirror_mark_fn_assigned(engine: sa.Engine, work_order: str, route_plan_id: str | None = None) -> dict[str, Any]:
     """Dual-write mirror for markFNAssigned (2026-09-21), for a caller that
