@@ -260,6 +260,15 @@ def test_confirmed_assign_updates_same_wo_in_onfleet_and_dcc(database, monkeypat
     assert all(
         [m["value"] for m in t["metadata"] if m["name"] == "WO_NAME"] == [new_name]
         for t in remote.tasks.values())
+    # The ordinary DCC Accepted queue must also use the renamed WO, not
+    # merely the dedicated Field Nation Assigned history card.
+    sent, ghosts, _, _ = da.get_sent_records_from_db(
+        database, {"Orange": {"states": ["IL"]}}, {"ILLINOIS": "IL"})
+    assert sent["task-1"]["status"] == "accepted"
+    assert sent["task-1"]["wo"] == new_name
+    assert sent["task-2"]["wo"] == new_name
+    assert any(g["wo"] == new_name and g["status"] == "accepted"
+               for g in ghosts["Orange"])
     # Verify the exact Associate's Assigned history payload points at the
     # renamed route, rather than the original FN reservation name.
     records = da.get_fn_assigned_orders(database)
