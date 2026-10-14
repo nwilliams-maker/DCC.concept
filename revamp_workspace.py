@@ -2233,6 +2233,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if st.session_state.get("revamp_status") in ("Ready", "Flagged", "Over 50 mi", "Selected"):
         st.session_state["revamp_status"] = "Routes"
     allowed_statuses = _workspace_statuses(auth_user)
+    # Dedicated FN Associate History: do not change the other workspaces.
+    if fn_only and auth_user.get("scope") == "field_nation":
+        allowed_statuses = ("Field Nation", "History")
     if st.session_state.get("revamp_status") not in allowed_statuses:
         st.session_state["revamp_status"] = remembered_status if remembered_status in allowed_statuses else allowed_statuses[0]
     if st.session_state.pop("_revamp_show_fn_next", False):
@@ -2249,6 +2252,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     notice = st.session_state.pop("_revamp_notice", None)
     if notice:
         (st.warning if notice[0] == "warning" else st.success)(notice[1])
+    if fn_only and auth_user.get("scope") == "field_nation" and status == "History":
+        from revamp_fn_history import render_history
+        render_history(db_engine, auth_user, selected_pods, pod_configs,
+                       fetch_sent_records_from_sheet, search=search)
+        return
     matching = [entry for entry in all_routes if _entry_matches(entry, status, search)]
     if status in ('Ready', 'Flagged') and not matching:
         print(f"[revamp/queue] pods={selected_pods} view={status} "
