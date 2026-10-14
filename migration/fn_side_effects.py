@@ -900,7 +900,11 @@ def apply_fn_assigned_side_effects(
     route_plan_id_hint: str | None = None,
 ) -> dict[str, Any]:
     """Require verified OnFleet names before callers promote a WO to Accepted."""
-    task_ids = [t.strip() for t in str(payload.get("taskIds") or "").split(",") if t.strip()]
+    raw_ids = payload.get("taskIds") or payload.get("task_ids") or ""
+    if isinstance(raw_ids, (list, tuple)):
+        task_ids = [str(t).strip() for t in raw_ids if str(t).strip()]
+    else:
+        task_ids = [t.strip() for t in str(raw_ids).replace("|", ",").split(",") if t.strip()]
 
     try:
         onfleet_result = sync_onfleet_for_fn_assignment(
