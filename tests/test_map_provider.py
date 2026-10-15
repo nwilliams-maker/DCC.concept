@@ -129,6 +129,7 @@ def test_no_key_goes_straight_to_osrm(monkeypatch):
 
 def test_provider_switch_defaults_to_mapbox(monkeypatch):
     monkeypatch.delenv("MAP_PROVIDER", raising=False)
+    monkeypatch.setenv("MAPBOX_TOKEN", "pk.x")
     assert not mp.use_free()
     monkeypatch.setenv("MAP_PROVIDER", "Free")
     assert mp.use_free()
@@ -192,3 +193,22 @@ def test_get_gmaps_free_mode_uses_ors_and_persists_route(tmp_path):
     after_redeploy = build()('home', stops)  # new process-wide cache, same DB
     assert tuple(after_redeploy) == tuple(first)
     assert len(post.calls) == calls  # no new API calls
+
+
+def test_missing_mapbox_token_switches_to_free(monkeypatch):
+    monkeypatch.delenv("MAP_PROVIDER", raising=False)
+    monkeypatch.delenv("MAPBOX_TOKEN", raising=False)
+    assert mp.use_free()
+    monkeypatch.setenv("MAPBOX_TOKEN", "pk.x")
+    assert not mp.use_free()
+    monkeypatch.setenv("MAP_PROVIDER", "mapbox")
+    monkeypatch.delenv("MAPBOX_TOKEN", raising=False)
+    assert not mp.use_free()  # explicit choice wins
+
+
+def test_contractor_sync_geocode_uses_free_without_token(monkeypatch):
+    from migration import contractor_sync as cs
+    monkeypatch.delenv("MAP_PROVIDER", raising=False)
+    monkeypatch.delenv("MAPBOX_TOKEN", raising=False)
+    monkeypatch.setattr(mp, "free_geocode", lambda loc, strict=True: (-96.8, 32.78))
+    assert cs._geocode("1 Main St, Dallas, TX 75201") == (32.78, -96.8)
