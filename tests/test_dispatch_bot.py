@@ -35,11 +35,13 @@ def ic_df(rows):
                          for i, (n, s, miles, ph) in enumerate(rows)])
 
 
-def plan(entries, df, counts=None, waiting=None, hours=1.0, **settings):
+def plan(entries, df, counts=None, waiting=None, hours=1.0, mode="routes",
+         declined_by=None, **settings):
     ics = bot.candidate_ics(df)
     return bot.plan_routes(entries, ics, haversine, center, lambda ic, r: hours,
                            counts if counts is not None else {}, waiting or {},
-                           lambda row: f"id:{row['id']}", bot.BotSettings(**settings))
+                           lambda row: f"id:{row['id']}", bot.BotSettings(**settings),
+                           mode=mode, declined_by=declined_by)
 
 
 class RateRule(unittest.TestCase):
@@ -118,6 +120,78 @@ class Planning(unittest.TestCase):
                    "t2": {"name": "Ann", "status": "sent", "wo": "Ann-1"},
                    "t3": {"name": "Ann", "status": "accepted", "wo": "Ann-2"}}
         self.assertEqual(bot.waiting_routes_by_ic(sent_db), {"ann": 1})
+
+
+
+class Reoffer(unittest.TestCase):
+    def test_next_closest_ic_skipping_decliners(self):
+        df = ic_df([("Ann", "ACTIVE", 1, "1"), ("Ben", "ACTIVE", 10, "2"), ("Cy", "ACTIVE", 20, "3")])
+        p, = plan([("Red", route(3), "Declined", "h1", None)], df, counts={"1": 1, "2": 1, "3": 1},
+                  mode="reoffer", declined_by={"Red:h1": {"ann", "ben"}})
+        self.assertEqual((p.action, p.ic_name), ("ic", "Cy"))
+        self.assertIn("2 IC(s) who declined", p.reason)
+
+    def test_small_route_reoffer_goes_past_25_miles(self):
+        df = ic_df([("Ann", "ACTIVE", 1, "1"), ("Far Fay", "ACTIVE", 35, "2")])
+        p, = plan([("Red", route(2), "Declined", "h1", None)], df, counts={"1": 1, "2": 1},
+                  mode="reoffer", declined_by={"Red:h1": {"ann"}})
+        self.assertEqual((p.action, p.ic_name), ("ic", "Far Fay"))
+
+    def test_field_nation_when_nobody_left_within_40(self):
+        df = ic_df([("Ann", "ACTIVE", 1, "1"), ("Too Far", "ACTIVE", 45, "2")])
+        p, = plan([("Red", route(8), "Declined", "h1", None)], df, counts={"1": 1, "2": 1},
+                  mode="reoffer", declined_by={"Red:h1": {"ann"}})
+        self.assertEqual(p.action, "fn")
+
+    def test_reoffer_only_looks_at_declined_routes(self):
+        df = ic_df([("Ann", "ACTIVE", 1, "1")])
+        self.assertEqual(plan([("Red", route(3), "Ready", "h1", None)], df, mode="reoffer"), [])
+
+    def test_routes_mode_never_picks_a_past_decliner(self):
+        df = ic_df([("Ann", "ACTIVE", 1, "1"), ("Ben", "ACTIVE", 4, "2")])
+        p, = plan([("Red", route(8), "Ready", "h1", None)], df, counts={"1": 1, "2": 1},
+                  declined_by={"Red:h1": {"ann"}})
+        self.assertEqual(p.ic_name, "Ben")
+
+    def test_decliners_from_sent_db_and_history(self):
+        r = route(2)
+        r["data"][0]["id"], r["data"][1]["id"] = "t1", "t2"
+        sent_db = {"t1": {"name": "Ann", "status": "declined", "wo": "Ann-1"},
+                   "t2": {"name": "Zed", "status": "sent", "wo": "Zed-1"}}
+        got = bot.decliners_by_key([("Red", r, "Declined", "h1", None)], sent_db,
+                                   [("Ben", ["t2", "x9"]), ("Old Ole", ["other"])])
+        self.assertEqual(got, {"Red:h1": {"ann", "ben"}})
+
+
+class Removals(unittest.TestCase):
+    def test_spread_across_ics_before_doubling_up(self):
+        df = ic_df([("Ann", "ACTIVE", 1, "1"), ("Ben", "ACTIVE", 12, "2")])
+        entries = [("Red", route(1, city=c), "Ready", f"h{i}", None) for i, c in enumerate("ABC")]
+        out = plan(entries, df, mode="removals")
+        names = sorted(p.ic_name for p in out)
+        self.assertEqual(names, ["Ann", "Ann", "Ben"])  # third one doubles only after both have one
+
+    def test_waiting_route_request_counts_as_having_one(self):
+        df = ic_df([("Ann", "ACTIVE", 1, "1"), ("Ben", "ACTIVE", 12, "2")])
+        p, = plan([("Red", route(1), "Ready", "h1", None)], df, mode="removals", waiting={"ann": 1})
+        self.assertEqual(p.ic_name, "Ben")
+
+    def test_ignores_load_limits_and_new_ic_rule(self):
+        df = ic_df([("Busy Bo", "ACTIVE", 1, "1"), ("New Nia", "IN TRAINING", 3, "2")])
+        p, = plan([("Red", route(1), "Ready", "h1", None)], df, mode="removals",
+                  counts={"1": 99, "2": 0})
+        self.assertEqual(p.ic_name, "Busy Bo")
+
+    def test_field_nation_past_30_miles(self):
+        df = ic_df([("Far Fran", "ACTIVE", 31, "1")])
+        p, = plan([("Red", route(1), "Ready", "h1", None)], df, mode="removals")
+        self.assertEqual(p.action, "fn")
+
+    def test_declined_removal_skips_decliner(self):
+        df = ic_df([("Ann", "ACTIVE", 1, "1"), ("Ben", "ACTIVE", 12, "2")])
+        p, = plan([("Red", route(1), "Ready", "h1", None)], df, mode="removals",
+                  declined_by={"Red:h1": {"ann"}})
+        self.assertEqual(p.ic_name, "Ben")
 
 
 if __name__ == "__main__":
