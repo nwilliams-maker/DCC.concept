@@ -6537,7 +6537,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
                 kiosk_text = (f" &nbsp;·&nbsp; Kiosk ID{'s' if len(grp['kiosk_ids']) > 1 else ''}: "
                               f"{esc(', '.join(grp['kiosk_ids']))}") if grp['kiosk_ids'] else ""
-                kiosk_location_text = (f" &nbsp;·&nbsp; Kiosk Location: {esc(_kiosk_location or '—')}") if grp['kiosk_ids'] else ""
+                kiosk_location_text = (f"&nbsp;·&nbsp; Kiosk Location: {esc(_kiosk_location or '—')}") if grp['kiosk_ids'] else ""
                 row = (
                     f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
                     f"• <span style='color:#0f172a;font-weight:600;'>{esc(cmp)}</span>"
@@ -8160,7 +8160,7 @@ def make_venue_details(data):
             lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
             kiosk_text = (f" &nbsp;·&nbsp; Kiosk ID{'s' if len(grp['kiosk_ids']) > 1 else ''}: "
                           f"{esc(', '.join(grp['kiosk_ids']))}") if grp['kiosk_ids'] else ""
-            kiosk_location_text = (f" &nbsp;·&nbsp; Kiosk Location: {esc(_kiosk_location or '—')}") if grp['kiosk_ids'] else ""
+            kiosk_location_text = (f"&nbsp;·&nbsp; Kiosk Location: {esc(_kiosk_location or '—')}") if grp['kiosk_ids'] else ""
             row = (
                 f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
                 f"• <span style='color:#0f172a;font-weight:600;'>{esc(cmp)}</span>"
