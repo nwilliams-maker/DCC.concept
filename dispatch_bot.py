@@ -33,6 +33,8 @@ class BotSettings:
     max_open_tasks: int = 25                 # OnFleet tasks already on the IC (🔵N badge)
     max_waiting_routes: int = 2              # Route Requests sent but not yet answered
     new_ic_edge_miles: float = 5.0           # a 0-task IC wins if within this of the closest IC
+    reoffer_max_miles: float = 40.0          # after a decline: keep offering out to this, then FN
+    removal_max_miles: float = 30.0          # CVS Removals: any eligible IC within this, else FN
 
 
 @dataclass
@@ -136,14 +138,23 @@ def candidate_ics(ic_df, is_fa_employee=None):
 
 def plan_routes(entries, ics, haversine, route_center, route_hours,
                 worker_counts, waiting_counts, selection_key,
-                settings=None):
+                settings=None, mode="routes", declined_by=None, states=None):
     """Build a Proposal for each Ready/Flagged route entry.
 
     entries: (pod, route, state, route_hash, nearest) tuples from the workspace.
     route_hours(ic_row, route) -> driving+stop hours for the full round trip.
     worker_counts: {phone_last10: open OnFleet tasks}; empty dict = unknown.
+    mode: "routes"   - Routes tab rules (closest open IC, new-IC edge, FN for far small routes)
+          "removals" - CVS Removal tab: any eligible IC within removal_max_miles,
+                       spread so nobody gets two while someone else nearby has none
+          "reoffer"  - a declined route: next closest open IC within reoffer_max_miles
+                       who has not declined it; Field Nation once nobody is left
+    declined_by: {entry key: {casefolded IC names who declined it}} - always skipped.
+    states: which route states to plan (default Ready/Flagged; Declined for "reoffer").
     """
     s = settings or BotSettings()
+    declined_by = declined_by or {}
+    live_states = states or (("Declined",) if mode == "reoffer" else ("Ready", "Flagged"))
     counts_known = bool(worker_counts)
     waiting = dict(waiting_counts or {})
     given_this_run = {}
@@ -151,7 +162,7 @@ def plan_routes(entries, ics, haversine, route_center, route_hours,
 
     work = []
     for pod, route, state, route_hash, _nearest in entries:
-        if state not in ("Ready", "Flagged"):
+        if state not in live_states:
             continue
         base = dict(key=f"{pod}:{route_hash}", pod=pod, route_hash=route_hash,
                     city=str(route.get("city") or ""), state=str(route.get("state") or ""),
@@ -164,8 +175,11 @@ def plan_routes(entries, ics, haversine, route_center, route_hours,
         if not center:
             proposals.append(Proposal(**base, action="skip", reason="Route has no map location"))
             continue
+        refused = {str(n).casefold() for n in declined_by.get(f"{pod}:{route_hash}", ())}
         dists = []
         for ic in ics:
+            if ic["name"].casefold() in refused:
+                continue
             d = haversine(center[0], center[1], ic["lat"], ic["lng"])
             if d is not None and d == d and d != float("inf"):
                 dists.append((d, ic))
@@ -178,8 +192,17 @@ def plan_routes(entries, ics, haversine, route_center, route_hours,
     for closest, base, route, dists in work:
         stops = base["stops"]
         closest_val = None if closest == float("inf") else round(closest, 1)
+        refused = declined_by.get(base["key"]) or ()
+        declined_note = f"; skipped {len(refused)} IC(s) who declined" if refused else ""
 
-        if stops <= SMALL_ROUTE_MAX_STOPS and closest > s.fn_distance_small_routes:
+        if mode == "removals":
+            proposals.append(_plan_removal(base, route, dists, closest_val, s, waiting,
+                                           given_this_run, route_hours, selection_key,
+                                           declined_note))
+            continue
+
+        limit = s.reoffer_max_miles if mode == "reoffer" else s.max_ic_distance
+        if mode == "routes" and stops <= SMALL_ROUTE_MAX_STOPS and closest > s.fn_distance_small_routes:
             where = "no IC on file" if closest_val is None else f"closest IC is {closest_val} mi"
             proposals.append(Proposal(**base, action="fn", closest_miles=closest_val,
                                       reason=f"{stops} stop(s) and {where} (> {s.fn_distance_small_routes:g} mi)"))
@@ -192,7 +215,7 @@ def plan_routes(entries, ics, haversine, route_center, route_hours,
 
         available, busy = [], 0
         for d, ic in dists:
-            if d > s.max_ic_distance:
+            if d > limit:
                 break
             open_tasks, pending = load(ic)
             if (open_tasks is not None and open_tasks >= s.max_open_tasks) or pending >= s.max_waiting_routes:
@@ -200,6 +223,12 @@ def plan_routes(entries, ics, haversine, route_center, route_hours,
                 continue
             available.append((d, ic, open_tasks, pending))
 
+        if not available and mode == "reoffer":
+            why = (f"all {busy} other IC(s) within {limit:g} mi are loaded up" if busy else
+                   f"no other IC within {limit:g} mi")
+            proposals.append(Proposal(**base, action="fn", closest_miles=closest_val,
+                                      reason=why + declined_note))
+            continue
         if not available:
             if closest_val is None or closest > s.max_ic_distance:
                 why = f"closest IC is {closest_val} mi" if closest_val is not None else "no IC on file"
@@ -230,6 +259,7 @@ def plan_routes(entries, ics, haversine, route_center, route_hours,
             reason = "Closest open IC"
         if busy:
             reason += f"; skipped {busy} busier IC(s)"
+        reason += declined_note
         given_this_run[ic["name"].casefold()] = given_this_run.get(ic["name"].casefold(), 0) + 1
         proposals.append(Proposal(
             **base, action="ic", reason=reason, ic_name=ic["name"],
@@ -240,3 +270,62 @@ def plan_routes(entries, ics, haversine, route_center, route_hours,
     order = {"ic": 0, "fn": 1, "skip": 2}
     proposals.sort(key=lambda p: (order[p.action], p.pod, p.state, p.city))
     return proposals
+
+
+def _plan_removal(base, route, dists, closest_val, s, waiting, given_this_run,
+                  route_hours, selection_key, declined_note=""):
+    """CVS Removal: whoever is within removal_max_miles. Nobody gets a second
+    removal while another IC in range has none (this run or still waiting)."""
+    stops = base["stops"]
+    in_range = [(d, ic) for d, ic in dists if d <= s.removal_max_miles]
+    if not in_range:
+        where = "no IC on file" if closest_val is None else f"closest IC is {closest_val} mi"
+        return Proposal(**base, action="fn", closest_miles=closest_val,
+                        reason=f"CVS Removal; {where} (> {s.removal_max_miles:g} mi){declined_note}")
+
+    def doubled(ic):
+        name = ic["name"].casefold()
+        return given_this_run.get(name, 0) + waiting.get(name, 0)
+
+    d, ic = min(in_range, key=lambda pair: (doubled(pair[1]), pair[0]))
+    name = ic["name"].casefold()
+    others_free = doubled(ic) == 0
+    given_this_run[name] = given_this_run.get(name, 0) + 1
+    try:
+        hours = float(route_hours(ic["row"], route) or 0)
+    except Exception:
+        hours = 0.0
+    calc_rate = round(hours * HOURLY / stops, 2) if hours > 0 else 0.0
+    rate = rate_for_route(stops, calc_rate)
+    reason = ("CVS Removal; closest IC without one" if others_free else
+              f"CVS Removal; everyone within {s.removal_max_miles:g} mi already has one")
+    return Proposal(**base, action="ic", reason=reason + declined_note, ic_name=ic["name"],
+                    ic_identity=selection_key(ic["row"]), ic_miles=round(d, 1),
+                    calc_rate=calc_rate, rate=rate, pay=round(rate * stops, 2),
+                    closest_miles=closest_val)
+
+
+def decliners_by_key(entries, sent_db, history_rows=()):
+    """{entry key: {casefolded IC names who declined any of its tasks}}.
+
+    sent_db gives the current decline; history_rows ((contractor_name, task_ids),
+    from every past declined Route Request) covers earlier rounds after the
+    route was re-offered and got a new WO.
+    """
+    by_task = {}
+    for task_id, record in (sent_db or {}).items():
+        if str(record.get("status") or "").lower() == "declined" and record.get("name"):
+            by_task.setdefault(str(task_id).strip(), set()).add(str(record["name"]).strip().casefold())
+    for name, task_ids in history_rows or ():
+        if not name:
+            continue
+        for tid in task_ids or ():
+            by_task.setdefault(str(tid).strip(), set()).add(str(name).strip().casefold())
+    out = {}
+    for pod, route, _state, route_hash, _nearest in entries:
+        names = set()
+        for task in route.get("data") or []:
+            names |= by_task.get(str(task.get("id") or "").strip(), set())
+        if names:
+            out[f"{pod}:{route_hash}"] = names
+    return out

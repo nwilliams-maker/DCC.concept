@@ -1693,12 +1693,41 @@ def _bot_settings_from_state():
         max_open_tasks=int(st.session_state.get("bot_max_tasks", d.max_open_tasks)),
         max_waiting_routes=int(st.session_state.get("bot_max_waiting", d.max_waiting_routes)),
         new_ic_edge_miles=float(st.session_state.get("bot_new_edge", d.new_ic_edge_miles)),
+        reoffer_max_miles=float(st.session_state.get("bot_reoffer_miles", d.reoffer_max_miles)),
+        removal_max_miles=float(st.session_state.get("bot_removal_miles", d.removal_max_miles)),
     )
 
 
-def _run_dispatch_bot(matching, helpers, haversine, sent_db):
+def _decline_history(db_engine):
+    """(contractor_name, [task ids]) for every Route Request ever declined in the
+    last 120 days, so a re-offer skips ICs who declined an earlier round."""
+    if db_engine is None:
+        return []
+    cached = st.session_state.get("_bot_decline_history")
+    if cached and time.time() - cached[0] < 60:
+        return cached[1]
+    rows = []
+    try:
+        import sqlalchemy as sa
+        with db_engine.connect() as conn:
+            result = conn.execute(sa.text("""
+                SELECT DISTINCT r.contractor_name, r.payload->>'taskIds' AS task_ids
+                FROM routes r JOIN route_events e ON e.route_id = r.id
+                WHERE e.action = 'processDecision' AND e.payload->>'decision' = 'decline'
+                  AND r.created_at >= now() - interval '120 days'""")).mappings().all()
+        rows = [(row["contractor_name"],
+                 [t.strip() for t in str(row["task_ids"] or "").split(",") if t.strip()])
+                for row in result]
+    except Exception as exc:
+        print(f"[dispatch-bot] decline history failed: {type(exc).__name__}: {exc}", flush=True)
+    st.session_state["_bot_decline_history"] = (time.time(), rows)
+    return rows
+
+
+def _run_dispatch_bot(matching, helpers, haversine, sent_db, mode="routes", db_engine=None):
     import dispatch_bot as bot
-    entries = [e for e in matching if e[2] in ("Ready", "Flagged")]
+    states = ("Declined",) if mode.startswith("reoffer") else ("Ready", "Flagged")
+    entries = [e for e in matching if e[2] in states]
     ics = bot.candidate_ics(st.session_state.get("ic_df"), helpers.get("is_fa_employee"))
     try:
         worker_counts = helpers["fetch_worker_task_counts"]() or {}
@@ -1715,10 +1744,26 @@ def _run_dispatch_bot(matching, helpers, haversine, sent_db):
                                    tuple(stops), tasks=route.get("data"))
         return hours
 
-    plan = bot.plan_routes(entries, ics, haversine, _route_center, route_hours,
-                           worker_counts, bot.waiting_routes_by_ic(sent_db),
-                           helpers["selection_key"], _bot_settings_from_state())
+    waiting = bot.waiting_routes_by_ic(sent_db)
+    settings = _bot_settings_from_state()
+    if mode.startswith("reoffer"):
+        declined = bot.decliners_by_key(entries, sent_db, _decline_history(db_engine))
+        removals = [e for e in entries if e[1].get("is_removal")]
+        regular = [e for e in entries if not e[1].get("is_removal")]
+        plan = (bot.plan_routes(regular, ics, haversine, _route_center, route_hours,
+                                worker_counts, waiting, helpers["selection_key"], settings,
+                                mode="reoffer", declined_by=declined)
+                + bot.plan_routes(removals, ics, haversine, _route_center, route_hours,
+                                  worker_counts, waiting, helpers["selection_key"], settings,
+                                  mode="removals", declined_by=declined, states=("Declined",)))
+    else:
+        # Never offer a route to someone who already declined those tasks.
+        declined = bot.decliners_by_key(entries, sent_db, _decline_history(db_engine))
+        plan = bot.plan_routes(entries, ics, haversine, _route_center, route_hours,
+                               worker_counts, waiting, helpers["selection_key"], settings,
+                               mode=mode, declined_by=declined)
     st.session_state["_dispatch_bot_plan"] = plan
+    st.session_state["_dispatch_bot_plan_mode"] = mode
     st.session_state["_dispatch_bot_counts_known"] = bool(worker_counts)
 
 
@@ -1736,15 +1781,76 @@ def _apply_bot_ic_prefill(p):
     st.session_state[f"lock_{pod}_{h}"] = True
 
 
+def _task_ids(route):
+    return frozenset(str(t.get("id") or "").strip() for t in (route.get("data") or [])
+                     if str(t.get("id") or "").strip())
+
+
+def _resolve_bot_followups(all_routes, by_key, db_engine, default_due_days,
+                           assign_tasks_to_fn_team, fetch_sent_records_from_sheet):
+    """Second half of a re-offer: once a declined route is back in Routes /
+    CVS Removal (after move_to_dispatch), prefill its next IC or queue it to FN.
+    Matches by task IDs because re-clustering can change the route hash."""
+    followups = st.session_state.get("_bot_decline_followups") or {}
+    if not followups:
+        return
+    live_entries = [e for e in all_routes if e[2] in ("Ready", "Flagged")]
+    fn_entries, ic_keys, info = [], [], {}
+    remaining = {}
+    for old_key, item in followups.items():
+        p, tids = item["proposal"], item["task_ids"]
+        match = by_key.get(old_key) if old_key in by_key and by_key[old_key][2] in ("Ready", "Flagged") else None
+        if match is None and tids:
+            match = next((e for e in live_entries if _task_ids(e[1]) and _task_ids(e[1]) <= tids
+                          and len(_task_ids(e[1])) * 2 >= len(tids)), None)
+        if match is None:
+            if time.time() - item["at"] < 300:
+                remaining[old_key] = item
+            else:
+                st.warning(f"🤖 {p.city}, {p.state}: the declined route did not come back to "
+                           "Routes within 5 minutes. Check it in the Declined tab.")
+            continue
+        key = f"{match[0]}:{match[3]}"
+        if p.action == "fn":
+            fn_entries.append(match)
+            continue
+        p.pod, p.route_hash, p.key = match[0], match[3], key
+        _apply_bot_ic_prefill(p)
+        ic_keys.append(key)
+        info[key] = {"ic": p.ic_name, "rate": p.rate, "removal": bool(match[1].get("is_removal"))}
+    st.session_state["_bot_decline_followups"] = remaining
+    if ic_keys:
+        queue = list(st.session_state.get("_dispatch_bot_queue") or [])
+        st.session_state["_dispatch_bot_queue"] = queue + [k for k in ic_keys if k not in queue]
+        st.session_state.setdefault("_dispatch_bot_info", {}).update(info)
+        st.session_state["revamp_selected_route"] = ic_keys[0]
+        st.session_state["_revamp_show_cvs_next" if info[ic_keys[0]]["removal"]
+                         else "_revamp_show_routes_next"] = True
+    if fn_entries:
+        due = min((item.get("due") or date.today() + timedelta(days=default_due_days))
+                  for item in followups.values() if item["proposal"].action == "fn")
+        if _queue_fn_entries(fn_entries, due, db_engine, assign_tasks_to_fn_team,
+                             fetch_sent_records_from_sheet,
+                             notice_prefix="🤖 Declined route(s) with nobody left nearby: "):
+            st.rerun()
+    elif ic_keys:
+        st.session_state["_revamp_notice"] = (
+            "success", f"🤖 {len(ic_keys)} declined route(s) lined up for the next IC.")
+        st.rerun()
+
+
 def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_engine,
                          default_due_days, assign_tasks_to_fn_team,
-                         fetch_sent_records_from_sheet):
+                         fetch_sent_records_from_sheet, status="Routes", move_to_dispatch=None):
     if not helpers:
         return
     by_key = {f"{e[0]}:{e[3]}": e for e in all_routes}
 
     def live(key):
         return key in by_key and by_key[key][2] in ("Ready", "Flagged")
+
+    _resolve_bot_followups(all_routes, by_key, db_engine, default_due_days,
+                           assign_tasks_to_fn_team, fetch_sent_records_from_sheet)
 
     # ── Active send queue from an approved plan ──
     if "_dispatch_bot_queue" in st.session_state:
@@ -1772,57 +1878,99 @@ def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_e
                 with next_col:
                     if st.button("Next route ▶", key="bot_queue_next", use_container_width=True):
                         pos = queue.index(selected) + 1 if selected in queue else 0
-                        st.session_state["revamp_selected_route"] = queue[pos % len(queue)]
+                        nxt = queue[pos % len(queue)]
+                        st.session_state["revamp_selected_route"] = nxt
+                        if nxt in by_key:
+                            st.session_state["_revamp_show_cvs_next" if by_key[nxt][1].get("is_removal")
+                                             else "_revamp_show_routes_next"] = True
                         st.rerun()
                 with stop_col:
                     if st.button("Stop", key="bot_queue_stop", use_container_width=True):
                         st.session_state.pop("_dispatch_bot_queue", None)
                         st.rerun()
 
-    # ── Run / review ──
-    # Nick: the bot runs on ONE pod at a time.
     pod_label = lambda pod: "Digital" if pod == "Global_Digital" else pod
-    pods = sorted({e[0] for e in matching if e[2] in ("Ready", "Flagged")}, key=pod_label)
+
+    # ── Declined routes: line up the next IC (Nick, Oct 15 2026) ──
+    pending_old = set((st.session_state.get("_bot_decline_followups") or {}).keys())
+    declined = [e for e in all_routes if e[2] == "Declined" and e[1].get("data")
+                and e[0] not in ("Global_Digital", "Digital")
+                and _display_contractor_name(e[1], "Declined").lower() != "field nation"
+                and f"{e[0]}:{e[3]}" not in pending_old]
+    if declined and callable(move_to_dispatch):
+        with st.container(key="revamp_bot_declines", border=True):
+            msg_col, btn_col = st.columns([4.4, 2], vertical_alignment="center")
+            with msg_col:
+                st.markdown(f"**🔁 {len(declined)} declined route(s).** The bot lines each one up for the "
+                            "next closest IC who hasn't declined it (Routes: 40 mi, CVS Removals: 30 mi). "
+                            "If nobody is left, it goes to Field Nation.")
+            with btn_col:
+                if st.button("🤖 Line up next IC", key="bot_reoffer", type="primary",
+                             use_container_width=True):
+                    with st.spinner("Finding the next IC for declined routes…"):
+                        _run_dispatch_bot(declined, helpers, haversine, sent_db,
+                                          mode="reoffer", db_engine=db_engine)
+                        st.session_state["_dispatch_bot_plan_pod"] = "Declined"
+
+    # ── Run / review ──
+    # Nick: the bot runs on ONE pod at a time, and only from the Routes tab
+    # (route rules) or the CVS Removal tab (removal rules).
+    bot_mode = {"Routes": "routes", "CVS Removal": "removals"}.get(status)
+    pods = sorted({e[0] for e in matching if e[2] in ("Ready", "Flagged")}, key=pod_label) if bot_mode else []
     if st.session_state.get("bot_pod") not in pods:
         st.session_state.pop("bot_pod", None)
-    with st.container(key="revamp_dispatch_bot"):
-        pod_col, run_col, set_col, info_col = st.columns([1.3, 1.7, 1.3, 2.7], vertical_alignment="center")
-        with pod_col:
-            bot_pod = st.selectbox("Pod", pods, key="bot_pod", format_func=pod_label,
-                                   index=None, placeholder="Choose a pod",
-                                   label_visibility="collapsed")
-        pod_entries = [e for e in matching if e[0] == bot_pod and e[2] in ("Ready", "Flagged")]
-        ready_count = len(pod_entries)
-        with run_col:
-            run = st.button(f"🤖 Run Dispatch Bot ({ready_count})", key="bot_run",
-                            type="primary", disabled=not ready_count, use_container_width=True)
-        with set_col:
-            with st.popover("Bot settings", use_container_width=True):
-                from dispatch_bot import BotSettings
-                d = BotSettings()
-                st.number_input("1–5 stop routes go to Field Nation when the closest IC is over (mi)",
-                                min_value=1.0, value=d.fn_distance_small_routes, step=5.0, key="bot_fn_miles")
-                st.number_input("Farthest IC the bot will pick (mi)",
-                                min_value=5.0, value=d.max_ic_distance, step=5.0, key="bot_max_miles")
-                st.number_input("Skip ICs with this many open OnFleet tasks (🔵)",
-                                min_value=1, value=d.max_open_tasks, step=1, key="bot_max_tasks")
-                st.number_input("Skip ICs with this many Route Requests waiting on a reply",
-                                min_value=1, value=d.max_waiting_routes, step=1, key="bot_max_waiting")
-                st.number_input("A new IC (0 tasks) wins if within this many miles of the closest IC",
-                                min_value=0.0, value=d.new_ic_edge_miles, step=1.0, key="bot_new_edge")
-                st.caption("Rate: 1–5 stops = calculated rate kept between $20.00 and $24.50/stop. "
-                           "6+ stops = $20.00/stop.")
-        with info_col:
-            st.caption("Pick a pod, then run. Nothing is sent until you approve.")
+    run = False
+    if bot_mode:
+        with st.container(key="revamp_dispatch_bot"):
+            pod_col, run_col, set_col, info_col = st.columns([1.3, 1.7, 1.3, 2.7], vertical_alignment="center")
+            with pod_col:
+                bot_pod = st.selectbox("Pod", pods, key="bot_pod", format_func=pod_label,
+                                       index=None, placeholder="Choose a pod",
+                                       label_visibility="collapsed")
+            pod_entries = [e for e in matching if e[0] == bot_pod and e[2] in ("Ready", "Flagged")]
+            ready_count = len(pod_entries)
+            with run_col:
+                run = st.button(f"🤖 Run Dispatch Bot ({ready_count})", key="bot_run",
+                                type="primary", disabled=not ready_count, use_container_width=True)
+            with set_col:
+                with st.popover("Bot settings", use_container_width=True):
+                    from dispatch_bot import BotSettings
+                    d = BotSettings()
+                    st.number_input("1–5 stop routes go to Field Nation when the closest IC is over (mi)",
+                                    min_value=1.0, value=d.fn_distance_small_routes, step=5.0, key="bot_fn_miles")
+                    st.number_input("Farthest IC the bot will pick (mi)",
+                                    min_value=5.0, value=d.max_ic_distance, step=5.0, key="bot_max_miles")
+                    st.number_input("Skip ICs with this many open OnFleet tasks (🔵)",
+                                    min_value=1, value=d.max_open_tasks, step=1, key="bot_max_tasks")
+                    st.number_input("Skip ICs with this many Route Requests waiting on a reply",
+                                    min_value=1, value=d.max_waiting_routes, step=1, key="bot_max_waiting")
+                    st.number_input("A new IC (0 tasks) wins if within this many miles of the closest IC",
+                                    min_value=0.0, value=d.new_ic_edge_miles, step=1.0, key="bot_new_edge")
+                    st.number_input("After a decline, keep offering out to (mi), then Field Nation",
+                                    min_value=5.0, value=d.reoffer_max_miles, step=5.0, key="bot_reoffer_miles")
+                    st.number_input("CVS Removals: any IC within (mi), else Field Nation",
+                                    min_value=5.0, value=d.removal_max_miles, step=5.0, key="bot_removal_miles")
+                    st.caption("Rate: 1–5 stops = calculated rate kept between $20.00 and $24.50/stop. "
+                               "6+ stops = $20.00/stop.")
+            with info_col:
+                st.caption(("CVS Removals: closest IC within 30 mi, nobody doubled up while others are free. "
+                            if bot_mode == "removals" else "") +
+                           "Pick a pod, then run. Nothing is sent until you approve.")
     if run:
         with st.spinner(f"Dispatch Bot is matching ICs and pricing {pod_label(bot_pod)} routes…"):
-            _run_dispatch_bot(pod_entries, helpers, haversine, sent_db)
+            _run_dispatch_bot(pod_entries, helpers, haversine, sent_db, mode=bot_mode,
+                              db_engine=db_engine)
             st.session_state["_dispatch_bot_plan_pod"] = bot_pod
 
     plan = st.session_state.get("_dispatch_bot_plan")
     if not plan:
         return
-    plan = [p for p in plan if live(p.key)]
+    plan_mode = st.session_state.get("_dispatch_bot_plan_mode", "routes")
+    reoffer = plan_mode.startswith("reoffer")
+    if reoffer:
+        plan = [p for p in plan if p.key in by_key and by_key[p.key][2] == "Declined"]
+    else:
+        plan = [p for p in plan if live(p.key)]
     actionable = [p for p in plan if p.action in ("ic", "fn")]
     skipped = [p for p in plan if p.action == "skip"]
     import pandas as pd
@@ -1830,7 +1978,10 @@ def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_e
         n_ic = sum(p.action == "ic" for p in actionable)
         n_new = sum(p.action == "ic" and p.is_new_ic for p in actionable)
         n_fn = sum(p.action == "fn" for p in actionable)
-        st.markdown(f"**🤖 {pod_label(st.session_state.get('_dispatch_bot_plan_pod', ''))} pod plan** — {n_ic} Route Request(s) "
+        title = ("Declined routes — next IC" if reoffer else
+                 f"{pod_label(st.session_state.get('_dispatch_bot_plan_pod', ''))} "
+                 f"{'CVS Removal' if plan_mode == 'removals' else 'pod'} plan")
+        st.markdown(f"**🤖 {title}** — {n_ic} Route Request(s) "
                     f"({n_new} to new ICs 🆕), {n_fn} to Field Nation, {len(skipped)} left for you. "
                     "Untick any row you don't want.")
         if not st.session_state.get("_dispatch_bot_counts_known"):
@@ -1885,6 +2036,24 @@ def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_e
             st.caption("Field Nation routes need the Railway database connection.")
     if not approve:
         return
+    if reoffer:
+        # Send each declined route back to dispatch exactly like "Remove route"
+        # does, then finish (prefill next IC / queue FN) once it is live again.
+        followups = dict(st.session_state.get("_bot_decline_followups") or {})
+        for p in chosen:
+            entry = by_key.get(p.key)
+            if not entry:
+                continue
+            pod, route, _state, route_hash, _ = entry
+            move_to_dispatch(route_hash, _display_contractor_name(route, "Declined"), pod,
+                             action_label="Revoked", check_onfleet=True, cluster_data=route)
+            followups[p.key] = {"proposal": p, "task_ids": _task_ids(route), "at": time.time(),
+                                "due": fn_due}
+        st.session_state["_bot_decline_followups"] = followups
+        st.session_state.pop("_dispatch_bot_plan", None)
+        st.session_state["_revamp_notice"] = (
+            "success", f"🤖 Moving {len(chosen)} declined route(s) back to dispatch…")
+        st.rerun()
     ic_plans = [p for p in chosen if p.action == "ic"]
     fn_plans = [p for p in chosen if p.action == "fn"]
     for p in ic_plans:
@@ -2578,6 +2747,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if st.session_state.pop("_revamp_show_routes_next", False) and not fn_only:
         st.session_state["revamp_status"] = "Routes"
         _remember_view()
+    if st.session_state.pop("_revamp_show_cvs_next", False) and not fn_only:
+        st.session_state["revamp_status"] = "CVS Removal"
+        _remember_view()
     if st.session_state.pop("_revamp_show_accepted_next", False) and not fn_only:
         st.session_state["revamp_status"] = "Accepted"
         _remember_view()
@@ -2666,7 +2838,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         if not fn_only:
             _render_dispatch_bot(matching, all_routes, dispatch_bot_helpers, haversine,
                                  sent_db, db_engine, default_due_days,
-                                 assign_tasks_to_fn_team, fetch_sent_records_from_sheet)
+                                 assign_tasks_to_fn_team, fetch_sent_records_from_sheet,
+                                 status=status, move_to_dispatch=move_to_dispatch)
     if status == "Field Nation":
         from fn_utils import generate_combined_fn_upload
         from migration import data_access as fn_data
