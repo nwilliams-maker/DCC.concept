@@ -1622,13 +1622,464 @@ def _render_workspace_summary(all_routes, pod_choice, loaded):
 
 
 
+
+def _queue_fn_entries(chosen, fn_due, db_engine, assign_tasks_to_fn_team,
+                      fetch_sent_records_from_sheet, notice_prefix=""):
+    """Queue Ready/Flagged route entries in Field Nation (shared by the bulk
+    button and the Dispatch Bot). Reruns the app on success."""
+    fn_team_id = st.session_state.get("_fn_team_id")
+    fn_worker_id = st.session_state.get("_fn_worker_id")
+    if not fn_team_id or not fn_worker_id:
+        try:
+            connection = _fetch_fn_assignment_ids()
+            fn_team_id = connection.get("fn_team_id")
+            fn_worker_id = connection.get("fn_worker_id")
+            st.session_state["_fn_team_id"] = fn_team_id
+            st.session_state["_fn_worker_id"] = fn_worker_id
+        except Exception as exc:
+            st.error(f"Could not load Field Nation from Onfleet: {exc}")
+    if not fn_team_id or not fn_worker_id:
+        st.error("Field Nation team or placeholder worker was not found in Onfleet. Selection is preserved; check the Onfleet team and worker setup.")
+        return False
+    from revamp_fn_queue import queue_bulk, schedule_queued
+    try:
+        saved, skipped, errors = queue_bulk(
+            db_engine, [(pod, route) for pod, route, _, _, _ in chosen],
+            fn_due, fn_team_id, fn_worker_id,
+        )
+    except Exception as exc:
+        st.error(f"Could not queue Field Nation routes: {exc}")
+        saved, skipped, errors = [], [], []
+    _apply_bulk_fn_results(chosen, saved, skipped)
+    if saved:
+        try:
+            schedule_queued(db_engine, [wo for _, wo in saved], assign_tasks_to_fn_team)
+        except Exception as exc:
+            st.warning("Field Nation rows were saved, but OnFleet sync could not "
+                       "start immediately. It will resume on the next refresh.")
+            print(f"[fn-handoff/schedule] {type(exc).__name__}: {exc}", flush=True)
+    if saved or skipped:
+        fetch_sent_records_from_sheet.clear()
+        message = (f"{notice_prefix}Queued {len(saved)} route(s) in Field Nation. "
+                   "OnFleet assignments and route plans are syncing separately.")
+        if skipped:
+            message += f" {len(skipped)} route(s) already existed."
+        if errors:
+            message += f" {len(errors)} could not be queued: " + "; ".join(msg for _, msg in errors[:3])
+        st.session_state["_revamp_notice"] = ("warning" if errors else "success", message)
+        if saved:
+            st.session_state["_revamp_show_fn_next"] = True
+        return True
+    if errors:
+        st.error(f"{len(errors)} route(s) could not be queued: " +
+                 "; ".join(msg for _, msg in errors[:3]))
+    return False
+
+
+# ── Dispatch Bot ───────────────────────────────────────────────────────────
+# Oct 15 2026 — Nick: "use a bot to go through my routes anytime I want,
+# prioritize new IC and rate is $20-$25/stop." The bot only PROPOSES; the
+# dispatcher reviews the plan, then the approved Field Nation routes are
+# queued through the same path as "Send N to Field Nation", and the approved
+# IC routes are pre-filled (IC + rate) on their normal dispatch cards so the
+# existing Route Request send (collision checks, WO numbers, Outlook) is used.
+
+def _bot_settings_from_state():
+    from dispatch_bot import BotSettings
+    d = BotSettings()
+    return BotSettings(
+        fn_distance_small_routes=float(st.session_state.get("bot_fn_miles", d.fn_distance_small_routes)),
+        max_ic_distance=float(st.session_state.get("bot_max_miles", d.max_ic_distance)),
+        max_open_tasks=int(st.session_state.get("bot_max_tasks", d.max_open_tasks)),
+        max_waiting_routes=int(st.session_state.get("bot_max_waiting", d.max_waiting_routes)),
+        new_ic_edge_miles=float(st.session_state.get("bot_new_edge", d.new_ic_edge_miles)),
+        reoffer_max_miles=float(st.session_state.get("bot_reoffer_miles", d.reoffer_max_miles)),
+        removal_max_miles=float(st.session_state.get("bot_removal_miles", d.removal_max_miles)),
+    )
+
+
+def _decline_history(db_engine):
+    """(contractor_name, [task ids]) for every Route Request ever declined in the
+    last 120 days, so a re-offer skips ICs who declined an earlier round."""
+    if db_engine is None:
+        return []
+    cached = st.session_state.get("_bot_decline_history")
+    if cached and time.time() - cached[0] < 60:
+        return cached[1]
+    rows = []
+    try:
+        import sqlalchemy as sa
+        with db_engine.connect() as conn:
+            result = conn.execute(sa.text("""
+                SELECT DISTINCT r.contractor_name, r.payload->>'taskIds' AS task_ids
+                FROM routes r JOIN route_events e ON e.route_id = r.id
+                WHERE e.action = 'processDecision' AND e.payload->>'decision' = 'decline'
+                  AND r.created_at >= now() - interval '120 days'""")).mappings().all()
+        rows = [(row["contractor_name"],
+                 [t.strip() for t in str(row["task_ids"] or "").split(",") if t.strip()])
+                for row in result]
+    except Exception as exc:
+        print(f"[dispatch-bot] decline history failed: {type(exc).__name__}: {exc}", flush=True)
+    st.session_state["_bot_decline_history"] = (time.time(), rows)
+    return rows
+
+
+def _run_dispatch_bot(matching, helpers, haversine, sent_db, mode="routes", db_engine=None):
+    import dispatch_bot as bot
+    states = ("Declined",) if mode.startswith("reoffer") else ("Ready", "Flagged")
+    entries = [e for e in matching if e[2] in states]
+    ics = bot.candidate_ics(st.session_state.get("ic_df"), helpers.get("is_fa_employee"))
+    try:
+        worker_counts = helpers["fetch_worker_task_counts"]() or {}
+        st.session_state["_worker_counts"] = worker_counts
+    except Exception as exc:
+        print(f"[dispatch-bot] worker counts failed: {type(exc).__name__}: {exc}", flush=True)
+        worker_counts = {}
+    get_gmaps, home_loc = helpers["get_gmaps"], helpers["ic_home_loc"]
+
+    def route_hours(ic_row, route):
+        center = _route_center(route) or route.get("center") or (0, 0)
+        stops = list(dict.fromkeys(str(t.get("full") or "") for t in route.get("data", []) if t.get("full")))
+        _, hours, _, _ = get_gmaps(home_loc(ic_row, f"{center[0]},{center[1]}"),
+                                   tuple(stops), tasks=route.get("data"))
+        return hours
+
+    waiting = bot.waiting_routes_by_ic(sent_db)
+    settings = _bot_settings_from_state()
+    if mode.startswith("reoffer"):
+        declined = bot.decliners_by_key(entries, sent_db, _decline_history(db_engine))
+        removals = [e for e in entries if e[1].get("is_removal")]
+        regular = [e for e in entries if not e[1].get("is_removal")]
+        plan = (bot.plan_routes(regular, ics, haversine, _route_center, route_hours,
+                                worker_counts, waiting, helpers["selection_key"], settings,
+                                mode="reoffer", declined_by=declined)
+                + bot.plan_routes(removals, ics, haversine, _route_center, route_hours,
+                                  worker_counts, waiting, helpers["selection_key"], settings,
+                                  mode="removals", declined_by=declined, states=("Declined",)))
+    else:
+        # Never offer a route to someone who already declined those tasks.
+        declined = bot.decliners_by_key(entries, sent_db, _decline_history(db_engine))
+        plan = bot.plan_routes(entries, ics, haversine, _route_center, route_hours,
+                               worker_counts, waiting, helpers["selection_key"], settings,
+                               mode=mode, declined_by=declined)
+    st.session_state["_dispatch_bot_plan"] = plan
+    st.session_state["_dispatch_bot_plan_mode"] = mode
+    st.session_state["_dispatch_bot_counts_known"] = bool(worker_counts)
+
+
+def _apply_bot_ic_prefill(p):
+    """Pre-select the IC and rate on the route's normal dispatch card."""
+    pod, h = p.pod, p.route_hash
+    st.session_state[f"sel_{pod}_{h}_identity_v2"] = p.ic_identity
+    st.session_state[f"last_sel_{pod}_{h}_identity_v2"] = p.ic_identity
+    st.session_state[f"_pay_master_{pod}_{h}"] = p.pay
+    st.session_state[f"_rate_master_{pod}_{h}"] = p.rate
+    st.session_state[f"_auto_rate_{pod}_{h}"] = p.rate
+    st.session_state[f"_pay_ver_{pod}_{h}"] = int(st.session_state.get(f"_pay_ver_{pod}_{h}", 0)) + 1
+    # Approving the bot plan is the dispatcher's authorization for a Flagged
+    # route whose IC is within the bot's distance limit.
+    st.session_state[f"lock_{pod}_{h}"] = True
+
+
+def _task_ids(route):
+    return frozenset(str(t.get("id") or "").strip() for t in (route.get("data") or [])
+                     if str(t.get("id") or "").strip())
+
+
+def _resolve_bot_followups(all_routes, by_key, db_engine, default_due_days,
+                           assign_tasks_to_fn_team, fetch_sent_records_from_sheet):
+    """Second half of a re-offer: once a declined route is back in Routes /
+    CVS Removal (after move_to_dispatch), prefill its next IC or queue it to FN.
+    Matches by task IDs because re-clustering can change the route hash."""
+    followups = st.session_state.get("_bot_decline_followups") or {}
+    if not followups:
+        return
+    live_entries = [e for e in all_routes if e[2] in ("Ready", "Flagged")]
+    fn_entries, ic_keys, info = [], [], {}
+    remaining = {}
+    for old_key, item in followups.items():
+        p, tids = item["proposal"], item["task_ids"]
+        match = by_key.get(old_key) if old_key in by_key and by_key[old_key][2] in ("Ready", "Flagged") else None
+        if match is None and tids:
+            match = next((e for e in live_entries if _task_ids(e[1]) and _task_ids(e[1]) <= tids
+                          and len(_task_ids(e[1])) * 2 >= len(tids)), None)
+        if match is None:
+            if time.time() - item["at"] < 300:
+                remaining[old_key] = item
+            else:
+                st.warning(f"🤖 {p.city}, {p.state}: the declined route did not come back to "
+                           "Routes within 5 minutes. Check it in the Declined tab.")
+            continue
+        key = f"{match[0]}:{match[3]}"
+        if p.action == "fn":
+            fn_entries.append(match)
+            continue
+        p.pod, p.route_hash, p.key = match[0], match[3], key
+        _apply_bot_ic_prefill(p)
+        ic_keys.append(key)
+        info[key] = {"ic": p.ic_name, "rate": p.rate, "removal": bool(match[1].get("is_removal"))}
+    st.session_state["_bot_decline_followups"] = remaining
+    if ic_keys:
+        queue = list(st.session_state.get("_dispatch_bot_queue") or [])
+        st.session_state["_dispatch_bot_queue"] = queue + [k for k in ic_keys if k not in queue]
+        st.session_state.setdefault("_dispatch_bot_info", {}).update(info)
+        st.session_state["revamp_selected_route"] = ic_keys[0]
+        st.session_state["_revamp_show_cvs_next" if info[ic_keys[0]]["removal"]
+                         else "_revamp_show_routes_next"] = True
+    if fn_entries:
+        due = min((item.get("due") or date.today() + timedelta(days=default_due_days))
+                  for item in followups.values() if item["proposal"].action == "fn")
+        if _queue_fn_entries(fn_entries, due, db_engine, assign_tasks_to_fn_team,
+                             fetch_sent_records_from_sheet,
+                             notice_prefix="🤖 Declined route(s) with nobody left nearby: "):
+            st.rerun()
+    elif ic_keys:
+        st.session_state["_revamp_notice"] = (
+            "success", f"🤖 {len(ic_keys)} declined route(s) lined up for the next IC.")
+        st.rerun()
+
+
+def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_engine,
+                         default_due_days, assign_tasks_to_fn_team,
+                         fetch_sent_records_from_sheet, status="Routes", move_to_dispatch=None):
+    if not helpers:
+        return
+    by_key = {f"{e[0]}:{e[3]}": e for e in all_routes}
+
+    def live(key):
+        return key in by_key and by_key[key][2] in ("Ready", "Flagged")
+
+    _resolve_bot_followups(all_routes, by_key, db_engine, default_due_days,
+                           assign_tasks_to_fn_team, fetch_sent_records_from_sheet)
+
+    # ── Active send queue from an approved plan ──
+    if "_dispatch_bot_queue" in st.session_state:
+        queue = [k for k in st.session_state["_dispatch_bot_queue"] if live(k)]
+        if not queue:
+            st.session_state.pop("_dispatch_bot_queue", None)
+            st.success("🤖 Bot queue finished — every approved Route Request was generated.")
+        else:
+            st.session_state["_dispatch_bot_queue"] = queue
+            visible = {f"{e[0]}:{e[3]}" for e in matching}
+            selected = st.session_state.get("revamp_selected_route")
+            if selected not in queue and selected not in visible:
+                st.session_state["revamp_selected_route"] = queue[0]
+                selected = queue[0]
+            info = st.session_state.get("_dispatch_bot_info", {})
+            current = info.get(selected if selected in queue else queue[0], {})
+            with st.container(key="revamp_bot_queue", border=True):
+                msg_col, next_col, stop_col = st.columns([5, 1.6, 1], vertical_alignment="center")
+                with msg_col:
+                    st.markdown(
+                        f"**🤖 Bot queue — {len(queue)} Route Request(s) left.** "
+                        f"The card at right has **{html.escape(current.get('ic', ''))}** at "
+                        f"**${current.get('rate', 0):.2f}/stop** filled in. Click "
+                        "**GENERATE LINK & OPEN OUTLOOK**, send the email, then go to the next one.")
+                with next_col:
+                    if st.button("Next route ▶", key="bot_queue_next", use_container_width=True):
+                        pos = queue.index(selected) + 1 if selected in queue else 0
+                        nxt = queue[pos % len(queue)]
+                        st.session_state["revamp_selected_route"] = nxt
+                        if nxt in by_key:
+                            st.session_state["_revamp_show_cvs_next" if by_key[nxt][1].get("is_removal")
+                                             else "_revamp_show_routes_next"] = True
+                        st.rerun()
+                with stop_col:
+                    if st.button("Stop", key="bot_queue_stop", use_container_width=True):
+                        st.session_state.pop("_dispatch_bot_queue", None)
+                        st.rerun()
+
+    pod_label = lambda pod: "Digital" if pod == "Global_Digital" else pod
+
+    # ── Declined routes: line up the next IC (Nick, Oct 15 2026) ──
+    pending_old = set((st.session_state.get("_bot_decline_followups") or {}).keys())
+    declined = [e for e in all_routes if e[2] == "Declined" and e[1].get("data")
+                and e[0] not in ("Global_Digital", "Digital")
+                and _display_contractor_name(e[1], "Declined").lower() != "field nation"
+                and f"{e[0]}:{e[3]}" not in pending_old]
+    if declined and callable(move_to_dispatch):
+        with st.container(key="revamp_bot_declines", border=True):
+            msg_col, btn_col = st.columns([4.4, 2], vertical_alignment="center")
+            with msg_col:
+                st.markdown(f"**🔁 {len(declined)} declined route(s).** The bot lines each one up for the "
+                            "next closest IC who hasn't declined it (Routes: 40 mi, CVS Removals: 30 mi). "
+                            "If nobody is left, it goes to Field Nation.")
+            with btn_col:
+                if st.button("🤖 Line up next IC", key="bot_reoffer", type="primary",
+                             use_container_width=True):
+                    with st.spinner("Finding the next IC for declined routes…"):
+                        _run_dispatch_bot(declined, helpers, haversine, sent_db,
+                                          mode="reoffer", db_engine=db_engine)
+                        st.session_state["_dispatch_bot_plan_pod"] = "Declined"
+
+    # ── Run / review ──
+    # Nick: the bot runs on ONE pod at a time, and only from the Routes tab
+    # (route rules) or the CVS Removal tab (removal rules).
+    bot_mode = {"Routes": "routes", "CVS Removal": "removals"}.get(status)
+    pods = sorted({e[0] for e in matching if e[2] in ("Ready", "Flagged")}, key=pod_label) if bot_mode else []
+    if st.session_state.get("bot_pod") not in pods:
+        st.session_state.pop("bot_pod", None)
+    run = False
+    if bot_mode:
+        with st.container(key="revamp_dispatch_bot"):
+            pod_col, run_col, set_col, info_col = st.columns([1.3, 1.7, 1.3, 2.7], vertical_alignment="center")
+            with pod_col:
+                bot_pod = st.selectbox("Pod", pods, key="bot_pod", format_func=pod_label,
+                                       index=None, placeholder="Choose a pod",
+                                       label_visibility="collapsed")
+            pod_entries = [e for e in matching if e[0] == bot_pod and e[2] in ("Ready", "Flagged")]
+            ready_count = len(pod_entries)
+            with run_col:
+                run = st.button(f"🤖 Run Dispatch Bot ({ready_count})", key="bot_run",
+                                type="primary", disabled=not ready_count, use_container_width=True)
+            with set_col:
+                with st.popover("Bot settings", use_container_width=True):
+                    from dispatch_bot import BotSettings
+                    d = BotSettings()
+                    st.number_input("1–5 stop routes go to Field Nation when the closest IC is over (mi)",
+                                    min_value=1.0, value=d.fn_distance_small_routes, step=5.0, key="bot_fn_miles")
+                    st.number_input("Farthest IC the bot will pick (mi)",
+                                    min_value=5.0, value=d.max_ic_distance, step=5.0, key="bot_max_miles")
+                    st.number_input("Skip ICs with this many open OnFleet tasks (🔵)",
+                                    min_value=1, value=d.max_open_tasks, step=1, key="bot_max_tasks")
+                    st.number_input("Skip ICs with this many Route Requests waiting on a reply",
+                                    min_value=1, value=d.max_waiting_routes, step=1, key="bot_max_waiting")
+                    st.number_input("A new IC (0 tasks) wins if within this many miles of the closest IC",
+                                    min_value=0.0, value=d.new_ic_edge_miles, step=1.0, key="bot_new_edge")
+                    st.number_input("After a decline, keep offering out to (mi), then Field Nation",
+                                    min_value=5.0, value=d.reoffer_max_miles, step=5.0, key="bot_reoffer_miles")
+                    st.number_input("CVS Removals: any IC within (mi), else Field Nation",
+                                    min_value=5.0, value=d.removal_max_miles, step=5.0, key="bot_removal_miles")
+                    st.caption("Rate: 1–5 stops = calculated rate kept between $20.00 and $24.50/stop. "
+                               "6+ stops = $20.00/stop.")
+            with info_col:
+                st.caption(("CVS Removals: closest IC within 30 mi, nobody doubled up while others are free. "
+                            if bot_mode == "removals" else "") +
+                           "Pick a pod, then run. Nothing is sent until you approve.")
+    if run:
+        with st.spinner(f"Dispatch Bot is matching ICs and pricing {pod_label(bot_pod)} routes…"):
+            _run_dispatch_bot(pod_entries, helpers, haversine, sent_db, mode=bot_mode,
+                              db_engine=db_engine)
+            st.session_state["_dispatch_bot_plan_pod"] = bot_pod
+
+    plan = st.session_state.get("_dispatch_bot_plan")
+    if not plan:
+        return
+    plan_mode = st.session_state.get("_dispatch_bot_plan_mode", "routes")
+    reoffer = plan_mode.startswith("reoffer")
+    if reoffer:
+        plan = [p for p in plan if p.key in by_key and by_key[p.key][2] == "Declined"]
+    else:
+        plan = [p for p in plan if live(p.key)]
+    actionable = [p for p in plan if p.action in ("ic", "fn")]
+    skipped = [p for p in plan if p.action == "skip"]
+    import pandas as pd
+    with st.container(key="revamp_bot_review", border=True):
+        n_ic = sum(p.action == "ic" for p in actionable)
+        n_new = sum(p.action == "ic" and p.is_new_ic for p in actionable)
+        n_fn = sum(p.action == "fn" for p in actionable)
+        title = ("Declined routes — next IC" if reoffer else
+                 f"{pod_label(st.session_state.get('_dispatch_bot_plan_pod', ''))} "
+                 f"{'CVS Removal' if plan_mode == 'removals' else 'pod'} plan")
+        st.markdown(f"**🤖 {title}** — {n_ic} Route Request(s) "
+                    f"({n_new} to new ICs 🆕), {n_fn} to Field Nation, {len(skipped)} left for you. "
+                    "Untick any row you don't want.")
+        if not st.session_state.get("_dispatch_bot_counts_known"):
+            st.warning("OnFleet task counts could not be loaded, so the 'new IC' and 'loaded up' "
+                       "checks only used Route Requests waiting on a reply.")
+        rows = [{
+            "Send": True,
+            "Route": f"{p.city}, {p.state}",
+            "Pod": "Digital" if p.pod == "Global_Digital" else p.pod,
+            "Stops": p.stops,
+            "Goes to": (f"🆕 {p.ic_name}" if p.is_new_ic else p.ic_name) if p.action == "ic" else "Field Nation",
+            "Mi": (f"{p.ic_miles:.1f}" if p.action == "ic" else
+                   f"{p.closest_miles:.1f}" if p.closest_miles is not None else "—"),
+            "🔵 Tasks": (str(p.ic_open_tasks) if p.action == "ic" and p.ic_open_tasks is not None
+                        else "?" if p.action == "ic" else ""),
+            "$/stop": f"${p.rate:.2f}" if p.action == "ic" else "",
+            "Pay": f"${p.pay:.2f}" if p.action == "ic" else "",
+            "Why": p.reason,
+        } for p in actionable]
+        keep = []
+        if rows:
+            edited = st.data_editor(
+                pd.DataFrame(rows), key="bot_plan_editor", hide_index=True, use_container_width=True,
+                disabled=[c for c in rows[0] if c != "Send"],
+                column_config={
+                    "Send": st.column_config.CheckboxColumn(width="small"),
+                    "Why": st.column_config.TextColumn(width="large"),
+                })
+            keep = list(edited["Send"])
+        if skipped:
+            with st.expander(f"{len(skipped)} route(s) the bot left for you"):
+                st.dataframe(pd.DataFrame([{
+                    "Route": f"{p.city}, {p.state}",
+                    "Pod": "Digital" if p.pod == "Global_Digital" else p.pod,
+                    "Stops": p.stops, "Closest IC mi": p.closest_miles, "Why": p.reason}
+                    for p in skipped]), hide_index=True, use_container_width=True)
+        chosen = [p for p, k in zip(actionable, keep) if k]
+        needs_db = any(p.action == "fn" for p in chosen) and db_engine is None
+        due_col, go_col, clear_col = st.columns([1.3, 2, 1], vertical_alignment="bottom")
+        with due_col:
+            fn_due = st.date_input("Field Nation due date",
+                                   value=date.today() + timedelta(days=default_due_days),
+                                   key="bot_fn_due")
+        with go_col:
+            approve = st.button(f"Approve {len(chosen)} route(s)", key="bot_approve", type="primary",
+                                disabled=not chosen or needs_db, use_container_width=True)
+        with clear_col:
+            if st.button("Discard plan", key="bot_discard", use_container_width=True):
+                st.session_state.pop("_dispatch_bot_plan", None)
+                st.rerun()
+        if needs_db:
+            st.caption("Field Nation routes need the Railway database connection.")
+    if not approve:
+        return
+    if reoffer:
+        # Send each declined route back to dispatch exactly like "Remove route"
+        # does, then finish (prefill next IC / queue FN) once it is live again.
+        followups = dict(st.session_state.get("_bot_decline_followups") or {})
+        for p in chosen:
+            entry = by_key.get(p.key)
+            if not entry:
+                continue
+            pod, route, _state, route_hash, _ = entry
+            move_to_dispatch(route_hash, _display_contractor_name(route, "Declined"), pod,
+                             action_label="Revoked", check_onfleet=True, cluster_data=route)
+            followups[p.key] = {"proposal": p, "task_ids": _task_ids(route), "at": time.time(),
+                                "due": fn_due}
+        st.session_state["_bot_decline_followups"] = followups
+        st.session_state.pop("_dispatch_bot_plan", None)
+        st.session_state["_revamp_notice"] = (
+            "success", f"🤖 Moving {len(chosen)} declined route(s) back to dispatch…")
+        st.rerun()
+    ic_plans = [p for p in chosen if p.action == "ic"]
+    fn_plans = [p for p in chosen if p.action == "fn"]
+    for p in ic_plans:
+        _apply_bot_ic_prefill(p)
+    if ic_plans:
+        st.session_state["_dispatch_bot_queue"] = [p.key for p in ic_plans]
+        st.session_state["_dispatch_bot_info"] = {p.key: {"ic": p.ic_name, "rate": p.rate} for p in ic_plans}
+        st.session_state["revamp_selected_route"] = ic_plans[0].key
+    st.session_state.pop("_dispatch_bot_plan", None)
+    prefix = f"🤖 {len(ic_plans)} Route Request(s) ready to send. " if ic_plans else "🤖 "
+    if fn_plans:
+        entries = [by_key[p.key] for p in fn_plans if p.key in by_key]
+        if not _queue_fn_entries(entries, fn_due, db_engine, assign_tasks_to_fn_team,
+                                 fetch_sent_records_from_sheet, notice_prefix=prefix):
+            return
+    else:
+        st.session_state["_revamp_notice"] = ("success", prefix.strip())
+    st.rerun()
+
 def render_workspace(can_access_tab, process_pod, render_dispatch,
                      haversine, db_engine, assign_tasks_to_fn_team,
                      fetch_sent_records_from_sheet, default_due_days=14,
                      fn_ghost_to_cluster=None, saved_route_helpers=None,
                      merge_same_wo_ghosts=None, cluster_store=None,
                      mapbox_geocode=None, process_digital_pool=None, fetch_open_tasks=None,
-                     pod_configs=None):
+                     pod_configs=None, dispatch_bot_helpers=None):
     """Render one selected route while retaining the existing dispatch actions."""
     move_to_dispatch = (saved_route_helpers or {}).get("move_to_dispatch")
     # Restore durable queued OnFleet handoffs after a Railway/Streamlit restart.
@@ -2296,6 +2747,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if st.session_state.pop("_revamp_show_routes_next", False) and not fn_only:
         st.session_state["revamp_status"] = "Routes"
         _remember_view()
+    if st.session_state.pop("_revamp_show_cvs_next", False) and not fn_only:
+        st.session_state["revamp_status"] = "CVS Removal"
+        _remember_view()
     if st.session_state.pop("_revamp_show_accepted_next", False) and not fn_only:
         st.session_state["revamp_status"] = "Accepted"
         _remember_view()
@@ -2381,6 +2835,11 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             with clear_col:
                 st.button("Clear", key="revamp_clear_selection", on_click=clear_visible,
                           disabled=not visible_keys, use_container_width=True)
+        if not fn_only:
+            _render_dispatch_bot(matching, all_routes, dispatch_bot_helpers, haversine,
+                                 sent_db, db_engine, default_due_days,
+                                 assign_tasks_to_fn_team, fetch_sent_records_from_sheet,
+                                 status=status, move_to_dispatch=move_to_dispatch)
     if status == "Field Nation":
         from fn_utils import generate_combined_fn_upload
         from migration import data_access as fn_data
@@ -2640,50 +3099,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             if db_engine is None:
                 st.caption("Field Nation assignment needs the Railway database connection.")
     if assign_clicked:
-        if not fn_team_id or not fn_worker_id:
-            try:
-                connection = _fetch_fn_assignment_ids()
-                fn_team_id = connection.get("fn_team_id")
-                fn_worker_id = connection.get("fn_worker_id")
-                st.session_state["_fn_team_id"] = fn_team_id
-                st.session_state["_fn_worker_id"] = fn_worker_id
-            except Exception as exc:
-                st.error(f"Could not load Field Nation from Onfleet: {exc}")
-        if not fn_team_id or not fn_worker_id:
-            st.error("Field Nation team or placeholder worker was not found in Onfleet. Selection is preserved; check the Onfleet team and worker setup.")
-        else:
-            from revamp_fn_queue import queue_bulk, schedule_queued
-            try:
-                saved, skipped, errors = queue_bulk(
-                    db_engine, [(pod, route) for pod, route, _, _, _ in chosen],
-                    fn_due, fn_team_id, fn_worker_id,
-                )
-            except Exception as exc:
-                st.error(f"Could not queue Field Nation routes: {exc}")
-                saved, skipped, errors = [], [], []
-            _apply_bulk_fn_results(chosen, saved, skipped)
-            if saved:
-                try:
-                    schedule_queued(db_engine, [wo for _, wo in saved], assign_tasks_to_fn_team)
-                except Exception as exc:
-                    st.warning("Field Nation rows were saved, but OnFleet sync could not "
-                               "start immediately. It will resume on the next refresh.")
-                    print(f"[fn-handoff/schedule] {type(exc).__name__}: {exc}", flush=True)
-            if saved or skipped:
-                fetch_sent_records_from_sheet.clear()
-                message = (f"Queued {len(saved)} route(s) in Field Nation. "
-                           "OnFleet assignments and route plans are syncing separately.")
-                if skipped:
-                    message += f" {len(skipped)} route(s) already existed."
-                if errors:
-                    message += f" {len(errors)} could not be queued: " + "; ".join(msg for _, msg in errors[:3])
-                st.session_state["_revamp_notice"] = ("warning" if errors else "success", message)
-                if saved:
-                    st.session_state["_revamp_show_fn_next"] = True
-                st.rerun()
-            elif errors:
-                st.error(f"{len(errors)} route(s) could not be queued: " +
-                         "; ".join(msg for _, msg in errors[:3]))
+        if _queue_fn_entries(chosen, fn_due, db_engine, assign_tasks_to_fn_team,
+                             fetch_sent_records_from_sheet):
+            st.rerun()
 
     left, right = st.columns([1.75, 3.25], gap="large")
     with left:
