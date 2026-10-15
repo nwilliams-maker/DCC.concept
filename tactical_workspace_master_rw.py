@@ -6513,7 +6513,10 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 elif any(x in tt for x in ['default','pull down']): tt_badge = "⚪ Default"
                 elif any(x in tt for x in ['new ad','art change','top']) or not tt: tt_badge = "🆕 New Ad"
                 else: tt_badge = f"📋 {tt.title()}"
-                key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip())
+                _kiosk_location = str(t.get('location_in_venue') or t.get('locationInVenue') or '').strip()
+                # Keep task detail lines separate when the same kiosk ID has
+                # different in-store locations; never assign the wrong location.
+                key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip(), _kiosk_location)
                 grp = _camp_groups[key]
                 grp['cmp'] = cmp
                 grp['tt_badge'] = tt_badge
@@ -6526,7 +6529,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 if 'local plus' in bs: grp['lplus'] += 1
                 elif 'boosted' in bs: grp['boost'] += 1
             camp_rows = []
-            for (cmp, tt_badge, _kiosk_id), grp in _camp_groups.items():
+            for (cmp, tt_badge, _kiosk_id, _kiosk_location), grp in _camp_groups.items():
                 cnt = grp['count']
                 count_suffix = f" <span style='color:#94a3b8;font-weight:600;'>× {cnt}</span>" if cnt > 1 else ""
                 esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
@@ -6534,11 +6537,12 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
                 kiosk_text = (f" &nbsp;·&nbsp; Kiosk ID{'s' if len(grp['kiosk_ids']) > 1 else ''}: "
                               f"{esc(', '.join(grp['kiosk_ids']))}") if grp['kiosk_ids'] else ""
+                kiosk_location_text = (f"&nbsp;·&nbsp; Kiosk Location: {esc(_kiosk_location or '—')}") if grp['kiosk_ids'] else ""
                 row = (
                     f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
                     f"• <span style='color:#0f172a;font-weight:600;'>{esc(cmp)}</span>"
                     f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{tt_badge}</span>"
-                    f"{count_suffix}{esc_pill}{boost_pill}{lplus_pill}{kiosk_text}"
+                    f"{count_suffix}{esc_pill}{boost_pill}{lplus_pill}{kiosk_text}{kiosk_location_text}"
                     f"</div>"
                 )
                 camp_rows.append(row)
@@ -8131,7 +8135,10 @@ def make_venue_details(data):
             elif any(x in tt for x in ['default','pull down']): tt_badge = "⚪ Default"
             elif any(x in tt for x in ['new ad','art change','top']) or not tt: tt_badge = "🆕 New Ad"
             else: tt_badge = f"📋 {tt.title()}"
-            key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip())
+            _kiosk_location = str(t.get('location_in_venue') or t.get('locationInVenue') or '').strip()
+            # Keep task detail lines separate when the same kiosk ID has
+            # different in-store locations; never assign the wrong location.
+            key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip(), _kiosk_location)
             grp = camp_groups[key]
             grp['cmp'] = cmp
             grp['tt_badge'] = tt_badge
@@ -8145,7 +8152,7 @@ def make_venue_details(data):
             elif 'boosted' in bs: grp['boost'] += 1
 
         camp_rows = []
-        for (cmp, tt_badge, _kiosk_id), grp in camp_groups.items():
+        for (cmp, tt_badge, _kiosk_id, _kiosk_location), grp in camp_groups.items():
             cnt = grp['count']
             count_suffix = f" <span style='color:#94a3b8;font-weight:600;'>× {cnt}</span>" if cnt > 1 else ""
             esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
@@ -8153,12 +8160,13 @@ def make_venue_details(data):
             lplus_pill = f" <span style='color:#ca8a04;font-weight:800;'>⭐ {grp['lplus']}</span>" if grp['lplus'] > 0 else ""
             kiosk_text = (f" &nbsp;·&nbsp; Kiosk ID{'s' if len(grp['kiosk_ids']) > 1 else ''}: "
                           f"{esc(', '.join(grp['kiosk_ids']))}") if grp['kiosk_ids'] else ""
+            kiosk_location_text = (f"&nbsp;·&nbsp; Kiosk Location: {esc(_kiosk_location or '—')}") if grp['kiosk_ids'] else ""
             row = (
                 f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;'>"
                 f"• <span style='color:#0f172a;font-weight:600;'>{esc(cmp)}</span>"
                 f"&nbsp;<span style='font-weight:700;color:#0f172a;'>{esc(tt_badge)}</span>"
                 f"{count_suffix}"
-                f"{esc_pill}{boost_pill}{lplus_pill}{kiosk_text}"
+                f"{esc_pill}{boost_pill}{lplus_pill}{kiosk_text}{kiosk_location_text}"
                 f"</div>"
             )
             camp_rows.append(row)
@@ -8335,11 +8343,17 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         if saved_tasks:
             task_details = []
             for task_idx, task in enumerate(saved_tasks, 1):
+                # Use this task's own kiosk location, not a location from a
+                # different kiosk at the same venue. Stop-level fallback is
+                # safe only when the saved stop contains a single task.
+                kiosk_location = (str(task.get('locationInVenue') or task.get('location_in_venue') or '').strip()
+                                  or (str(sd.get('locationInVenue') or '').strip() if len(saved_tasks) == 1 else ''))
                 task_details.append(
                     f"<div style='padding:3px 4px;font-size:11px;color:#344054;'>"
                     f"Task {task_idx} · {esc(str(task.get('taskType') or 'Task'))}"
                     f" · Venue ID: {esc(str(task.get('venueId') or '').strip() or '—')}"
                     f" · Kiosk ID: {esc(str(task.get('kioskId') or '').strip() or '—')}"
+                    f" · Kiosk Location: {esc(kiosk_location or '—')}"
                     f"</div>"
                 )
             camp_block += ("<div style='padding:5px 8px;margin-top:5px;border-top:1px solid #e4e7ec;'>"
