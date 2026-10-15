@@ -7260,6 +7260,25 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 _popup_key = f"_outlook_popup_once_{cluster_hash}"
                 st.session_state[_popup_key] = outlook_url
                 _popup_url = st.session_state.pop(_popup_key, None)
+                if st.session_state.get("_bot_bulk_drafts"):
+                    # Dispatch Bot "Generate all": no Outlook window per route.
+                    # Save the email as an Outlook draft when the Graph app is
+                    # set up; otherwise keep it in the on-screen list so the
+                    # dispatcher (or Claude) can save the drafts afterwards.
+                    _popup_url = None
+                    _draft = {"wo": wo_val, "ic": ic.get('name', 'Unknown'),
+                              "to": str(ic.get('email', '') or '').strip(),
+                              "subject": f"Route Request | {wo_val}", "body": final_sig,
+                              "outlook_url": outlook_url, "saved": False}
+                    try:
+                        from migration import outlook_drafts as _od
+                        if _od.configured():
+                            _draft.update(_od.save_draft(_draft["to"], _draft["subject"], final_sig))
+                            _draft["saved"] = True
+                    except Exception as _draft_e:
+                        _draft["error"] = str(_draft_e)
+                        _log_err("bot_bulk/save_draft", _draft_e)
+                    st.session_state.setdefault("_bot_bulk_results", []).append(_draft)
                 if _popup_url and not email_dispatch_paused(DB_ENGINE):
                     st.components.v1.html(
                         f"<script>if(window.screen.width>768){{try{{window.open({json.dumps(_popup_url)},'_blank');}}catch(e){{}}}}</script>",
