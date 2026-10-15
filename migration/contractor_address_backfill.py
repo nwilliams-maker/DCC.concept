@@ -17,7 +17,8 @@ matched contractor with the fixed rules, and reports old vs. new.
     python -m migration.contractor_address_backfill --apply         # write fixes
     python -m migration.contractor_address_backfill --apply --clear-unverified
 
-Needs DATABASE_URL, MONDAY_API_TOKEN, MAPBOX_TOKEN. Touches only the
+Needs DATABASE_URL, MONDAY_API_TOKEN. Geocodes with the free Census/ORS
+provider (MAP_PROVIDER=free or no MAPBOX_TOKEN), else Mapbox. Touches only the
 contractors table's location/lat/lng columns - no OnFleet, no other fields.
 """
 from __future__ import annotations
@@ -134,8 +135,8 @@ def _retired_bulk_main(argv: list[str] | None = None) -> int:  # kept for refere
     ap.add_argument("--csv", default="contractor_address_backfill.csv")
     args = ap.parse_args(argv)
 
-    if not (os.environ.get("MAPBOX_TOKEN") or "").strip():
-        print("Note: MAPBOX_TOKEN not set - only Monday map pins will be used for coordinates.", file=sys.stderr)
+    if not (os.environ.get("MAPBOX_TOKEN") or "").strip() and (os.environ.get("MAP_PROVIDER") or "").strip().lower() == "mapbox":
+        print("Note: MAP_PROVIDER=mapbox but MAPBOX_TOKEN not set - only Monday map pins will be used for coordinates.", file=sys.stderr)
     engine = sa.create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
 
     mapping, items = _fetch_board_rows()

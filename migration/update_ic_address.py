@@ -8,8 +8,8 @@ existing ICs' addresses. When a specific IC moves, update just that IC:
     python -m migration.update_ic_address --email jane@x.com \
         --address "123 Main St, Fresno, CA 93721, USA" --apply
 
-Optional --lat/--lng (e.g. Monday's map pin); otherwise a strict Mapbox
-geocode is used (needs MAPBOX_TOKEN). Pod is re-derived from the new state.
+Optional --lat/--lng (e.g. Monday's map pin); otherwise a strict geocode
+is used (free Census/ORS when MAP_PROVIDER=free or no MAPBOX_TOKEN, else Mapbox). Pod is re-derived from the new state.
 Only this one row's location / lat / lng / pod_color change.
 """
 from __future__ import annotations
