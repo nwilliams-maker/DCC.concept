@@ -122,6 +122,18 @@ class Planning(unittest.TestCase):
         self.assertEqual(bot.waiting_routes_by_ic(sent_db), {"ann": 1})
 
 
+    def test_small_route_goes_to_fn_when_only_far_ics_are_free(self):
+        # Lancaster, CA (Oct 15): nearby ICs busy, bot picked a free IC 50 mi out.
+        df = ic_df([("Busy Bo", "ACTIVE", 3, "1"), ("Far Free", "ACTIVE", 50, "2")])
+        p, = plan([("Red", route(2), "Ready", "h1", None)], df, counts={"1": 40, "2": 0})
+        self.assertEqual(p.action, "fn")
+        self.assertIn("next free IC is 50", p.reason)
+
+    def test_large_route_can_still_reach_a_free_ic_past_25(self):
+        df = ic_df([("Busy Bo", "ACTIVE", 3, "1"), ("Far Free", "ACTIVE", 50, "2")])
+        p, = plan([("Red", route(8), "Ready", "h1", None)], df, counts={"1": 40, "2": 0})
+        self.assertEqual((p.action, p.ic_name), ("ic", "Far Free"))
+
 
 class Reoffer(unittest.TestCase):
     def test_next_closest_ic_skipping_decliners(self):

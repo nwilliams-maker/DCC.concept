@@ -238,6 +238,17 @@ def plan_routes(entries, ics, haversine, route_center, route_hours,
             proposals.append(Proposal(**base, action="skip", closest_miles=closest_val, reason=reason))
             continue
 
+        if (mode == "routes" and stops <= SMALL_ROUTE_MAX_STOPS
+                and available[0][0] > s.fn_distance_small_routes):
+            # Nearby ICs are all loaded up; a 1-5 stop route never reaches past
+            # the Field Nation distance just to find someone free.
+            proposals.append(Proposal(
+                **base, action="fn", closest_miles=closest_val,
+                reason=(f"{stops} stop(s); ICs within {s.fn_distance_small_routes:g} mi are "
+                        f"loaded up and the next free IC is {round(available[0][0], 1)} mi")
+                + declined_note))
+            continue
+
         best_d = available[0][0]
         new_ics = [a for a in available
                    if a[2] == 0 and a[3] == 0 and a[0] <= best_d + s.new_ic_edge_miles]
