@@ -1839,6 +1839,65 @@ def _resolve_bot_followups(all_routes, by_key, db_engine, default_due_days,
         st.rerun()
 
 
+def _drive_bulk_generate(queue, by_key):
+    """'Generate all': open each queued route's card and fire its normal
+    GENERATE LINK (same collision / in-flight / pause checks) one per rerun.
+    A route still live after its attempt means it failed: stop there."""
+    if not queue:
+        return
+    current = queue[0]
+    tried = st.session_state.get("_bot_bulk_current")
+    if tried == current:
+        st.session_state.pop("_bot_bulk_drafts", None)
+        st.session_state.pop("_bot_bulk_current", None)
+        entry = by_key.get(current)
+        where = f"{entry[1].get('city', '')}, {entry[1].get('state', '')}" if entry else current
+        st.session_state["revamp_selected_route"] = current
+        st.warning(f"🤖 Generate all stopped at **{where}** — see the message on its card. "
+                   "Fix it, then click Generate all again for the rest.")
+        return
+    entry = by_key.get(current)
+    if entry is None:
+        return
+    pod, route, _state, route_hash, _ = entry
+    want = "CVS Removal" if route.get("is_removal") else "Routes"
+    st.session_state["_bot_bulk_current"] = current
+    st.session_state["revamp_selected_route"] = current
+    st.session_state[f"_resume_generate_{pod}_{route_hash}"] = True
+    if st.session_state.get("revamp_status") != want:
+        st.session_state.pop("_bot_bulk_current", None)
+        st.session_state["_revamp_show_cvs_next" if want == "CVS Removal" else "_revamp_show_routes_next"] = True
+        st.rerun()
+
+
+def _render_bulk_draft_results():
+    results = st.session_state.get("_bot_bulk_results")
+    if not results:
+        return
+    saved = [r for r in results if r.get("saved")]
+    pending = [r for r in results if not r.get("saved")]
+    running = bool(st.session_state.get("_bot_bulk_drafts"))
+    with st.container(key="revamp_bot_drafts", border=True):
+        head, clear = st.columns([6, 1], vertical_alignment="center")
+        with head:
+            st.markdown(f"**📥 Generated {len(results)} Route Request(s)**"
+                        + (" — still going…" if running else "")
+                        + (f" · {len(saved)} saved to Outlook Drafts" if saved else ""))
+        with clear:
+            if not running and st.button("Clear", key="bot_drafts_clear", use_container_width=True):
+                st.session_state.pop("_bot_bulk_results", None)
+                st.rerun()
+        if pending:
+            st.caption("Not in Drafts yet. Ask Claude to \"save the drafts\" and it will save each email "
+                       "below into your Outlook Drafts, or open each one with its Outlook link.")
+            for i, r in enumerate(pending, 1):
+                with st.expander(f"Draft {i}: {r['subject']} → {r['ic']} <{r['to'] or 'NO EMAIL'}>"
+                                 + (f"  ⚠️ {r['error']}" if r.get("error") else "")):
+                    st.markdown(f"[Open in Outlook]({r['outlook_url']})")
+                    st.code(f"DRAFT-TO: {r['to']}\nDRAFT-SUBJECT: {r['subject']}\n"
+                            f"DRAFT-BODY:\n{r['body']}\nDRAFT-END", language=None)
+
+
 def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_engine,
                          default_due_days, assign_tasks_to_fn_team,
                          fetch_sent_records_from_sheet, status="Routes", move_to_dispatch=None):
@@ -1852,11 +1911,16 @@ def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_e
     _resolve_bot_followups(all_routes, by_key, db_engine, default_due_days,
                            assign_tasks_to_fn_team, fetch_sent_records_from_sheet)
 
+    _render_bulk_draft_results()
+
     # ── Active send queue from an approved plan ──
     if "_dispatch_bot_queue" in st.session_state:
         queue = [k for k in st.session_state["_dispatch_bot_queue"] if live(k)]
+        if st.session_state.get("_bot_bulk_drafts"):
+            _drive_bulk_generate(queue, by_key)
         if not queue:
             st.session_state.pop("_dispatch_bot_queue", None)
+            st.session_state.pop("_bot_bulk_drafts", None)
             st.success("🤖 Bot queue finished — every approved Route Request was generated.")
         else:
             st.session_state["_dispatch_bot_queue"] = queue
@@ -1868,13 +1932,26 @@ def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_e
             info = st.session_state.get("_dispatch_bot_info", {})
             current = info.get(selected if selected in queue else queue[0], {})
             with st.container(key="revamp_bot_queue", border=True):
-                msg_col, next_col, stop_col = st.columns([5, 1.6, 1], vertical_alignment="center")
+                msg_col, all_col, next_col, stop_col = st.columns([4.2, 1.9, 1.5, 0.9], vertical_alignment="center")
+                with all_col:
+                    from migration import outlook_drafts as _od
+                    if st.button(f"📥 Generate all ({len(queue)})", key="bot_queue_all", type="primary",
+                                 use_container_width=True,
+                                 help=("Generates every queued Route Request and saves each email to "
+                                       "Outlook Drafts." if _od.configured() else
+                                       "Generates every queued Route Request without opening Outlook, "
+                                       "then lists the emails so the drafts can be saved in one go.")):
+                        st.session_state["_bot_bulk_drafts"] = True
+                        st.session_state["_bot_bulk_results"] = []
+                        st.session_state.pop("_bot_bulk_current", None)
+                        st.rerun()
                 with msg_col:
                     st.markdown(
                         f"**🤖 Bot queue — {len(queue)} Route Request(s) left.** "
                         f"The card at right has **{html.escape(current.get('ic', ''))}** at "
                         f"**${current.get('rate', 0):.2f}/stop** filled in. Click "
-                        "**GENERATE LINK & OPEN OUTLOOK**, send the email, then go to the next one.")
+                        "**GENERATE LINK & OPEN OUTLOOK**, send the email, then go to the next one — "
+                        "or click **Generate all** to do every route at once without opening Outlook.")
                 with next_col:
                     if st.button("Next route ▶", key="bot_queue_next", use_container_width=True):
                         pos = queue.index(selected) + 1 if selected in queue else 0
@@ -1887,6 +1964,7 @@ def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_e
                 with stop_col:
                     if st.button("Stop", key="bot_queue_stop", use_container_width=True):
                         st.session_state.pop("_dispatch_bot_queue", None)
+                        st.session_state.pop("_bot_bulk_drafts", None)
                         st.rerun()
 
     pod_label = lambda pod: "Digital" if pod == "Global_Digital" else pod
