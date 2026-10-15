@@ -15,7 +15,11 @@ import os
 import re
 import html as _html
 from task_addresses import destination_zip, address_with_zip, task_location_address
-from route_planning import plan_round_trip, task_stop_locations, ordered_route_task_ids
+from route_planning import plan_round_trip, task_stop_locations, ordered_route_task_ids, geographic_order
+from migration import map_provider as _mp
+# MAP_PROVIDER=free -> US Census geocoding + OpenRouteService routing (needs
+# ORS_API_KEY; falls back to public OSRM). Default "mapbox" = unchanged behavior.
+USE_FREE_MAPS = _mp.use_free()
 
 # --- CONFIG & CREDENTIALS ---
 # We check the Environment (Railway) FIRST to avoid the Streamlit Secrets crash.
@@ -44,7 +48,8 @@ if not ONFLEET_KEY or not MAPBOX_TOKEN:
         pass
 
 # Final check — only the keys the app actually needs to function.
-if not ONFLEET_KEY or not MAPBOX_TOKEN:
+# In free-map mode Mapbox is not needed at all.
+if not ONFLEET_KEY or not (MAPBOX_TOKEN or USE_FREE_MAPS):
     st.error("🔑 **API Keys Missing!**")
     st.info("I couldn't find your keys in Railway's 'Variables' tab. Please double-check that you added ONFLEET_KEY and MAPBOX_TOKEN there.")
     st.stop()
@@ -3890,8 +3895,16 @@ fetch_sent_records_from_sheet.clear = _cached_fetch_sent_records_from_db.clear
 def _mapbox_geocode_cache():
     """Process-wide dict: address (str) → (lng, lat) tuple. Lasts until
     Railway redeploys. Geocoding is dirt cheap to retry on miss but free to
-    serve from cache, so this is overwhelmingly net-positive."""
-    return {}
+    serve from cache, so this is overwhelmingly net-positive.
+    Preloaded from Postgres (map_geocode_cache) so redeploys keep it."""
+    return dict(_map_persist().load_geocodes())
+
+
+def _map_persist():
+    """Postgres-backed geocode/route store shared by every session. A no-op
+    when DATABASE_URL is not set. Module-level singleton in map_provider (not
+    st.cache_resource) so geocode worker threads can call it safely."""
+    return _mp.get_persistent_cache(DB_ENGINE)
 
 
 def _mapbox_geocode(address, cache=None):
@@ -3907,7 +3920,7 @@ def _mapbox_geocode(address, cache=None):
     "lat,lng" (matches f-strings like f"{cluster['center'][0]},{cluster['center'][1]}"),
     return is (lng, lat) to match Mapbox's coordinate order.
     """
-    if not MAPBOX_TOKEN or not address:
+    if not (MAPBOX_TOKEN or USE_FREE_MAPS) or not address:
         return None
     addr_key = str(address).strip()
     if not addr_key:
@@ -3929,6 +3942,16 @@ def _mapbox_geocode(address, cache=None):
                 return _result
         except (ValueError, TypeError):
             pass
+    if USE_FREE_MAPS:
+        try:
+            _free = _mp.free_geocode(addr_key)
+        except Exception as e:
+            _log_err("_free_geocode", e)
+            _free = None
+        if _free:
+            cache[addr_key] = _free
+            _map_persist().save_geocode(addr_key, _free, "census/ors")
+        return _free
     from urllib.parse import quote
     enc = quote(addr_key, safe='')
     url = (
@@ -3941,6 +3964,7 @@ def _mapbox_geocode(address, cache=None):
         if feats and feats[0].get('center'):
             lng, lat = feats[0]['center']
             cache[addr_key] = (lng, lat)
+            _map_persist().save_geocode(addr_key, (lng, lat), "mapbox")
             return (lng, lat)
     except Exception as e:
         _log_err("_mapbox_geocode", e)
@@ -4026,8 +4050,14 @@ def get_gmaps(home, waypoints, tasks=None):
     _entry = _cache.get(_key)
     if _entry is not None and (_now - _entry[1] < 86400):
         return _entry[0]
+    # Survives redeploys: a route computed before the last deploy is reused
+    # instead of re-spending map API quota on the startup warm-up.
+    _entry = _map_persist().get_route(_key)
+    if _entry is not None:
+        _cache[_key] = _entry
+        return _entry[0]
 
-    if not MAPBOX_TOKEN:
+    if not (MAPBOX_TOKEN or USE_FREE_MAPS):
         _log_err("get_gmaps", "MAPBOX_TOKEN not set in env — can't compute route")
         return 0, 0, "0h 0m", []
     if not waypoints:
@@ -4059,8 +4089,12 @@ def get_gmaps(home, waypoints, tasks=None):
         return 0, 0, "0h 0m", []
 
     try:
-        total_mi, total_drive_hrs, waypoint_order = plan_round_trip(
-            home_ll, wp_lls, MAPBOX_TOKEN, requests.get)
+        if USE_FREE_MAPS:
+            total_mi, total_drive_hrs, waypoint_order = _mp.plan_round_trip_free(
+                home_ll, wp_lls, seed_order=geographic_order)
+        else:
+            total_mi, total_drive_hrs, waypoint_order = plan_round_trip(
+                home_ll, wp_lls, MAPBOX_TOKEN, requests.get)
     except Exception as e:
         # Do not cache or use partial mileage/order when any road request fails.
         _log_err("get_gmaps", e)
@@ -4075,6 +4109,7 @@ def get_gmaps(home, waypoints, tasks=None):
         waypoint_order,
     )
     _cache[_key] = (_result, _now)  # cache success only
+    _map_persist().save_route(_key, _result, _now)
     # Security audit L3 - bound the process-wide route cache. It is keyed on
     # (home, waypoints) and never evicted, so over a long container uptime it
     # creeps. When it exceeds the cap, drop the oldest ~20% by timestamp.
