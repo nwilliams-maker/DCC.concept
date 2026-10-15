@@ -53,7 +53,13 @@ def provider() -> str:
 
 
 def use_free() -> bool:
-    return provider() == "free"
+    """True for MAP_PROVIDER=free, and also when MAPBOX_TOKEN is gone and no
+    provider was chosen - so deleting the Mapbox token never breaks DCC."""
+    if provider() == "free":
+        return True
+    if (os.environ.get("MAP_PROVIDER") or "").strip():
+        return False
+    return not (os.environ.get("MAPBOX_TOKEN") or "").strip()
 
 
 def ors_key() -> str:

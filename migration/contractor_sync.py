@@ -538,6 +538,14 @@ def _mapbox_match_is_acceptable(location: str, feature: dict[str, Any]) -> bool:
     return True
 
 
+def _use_free_maps() -> bool:
+    try:
+        from .map_provider import use_free
+    except ImportError:  # run as a plain script from migration/
+        from map_provider import use_free  # type: ignore
+    return use_free()
+
+
 def _free_geocode(location: str) -> tuple[float | None, float | None]:
     """MAP_PROVIDER=free: strict Census (then ORS) geocode. Both only return
     street-address/venue-level hits and reject a state/ZIP that contradicts
@@ -553,7 +561,7 @@ def _free_geocode(location: str) -> tuple[float | None, float | None]:
 
 
 def _geocode(location: str | None) -> tuple[float | None, float | None]:
-    if location and (os.environ.get("MAP_PROVIDER") or "").strip().lower() == "free":
+    if location and _use_free_maps():
         return _free_geocode(location)
     token = (os.environ.get("MAPBOX_TOKEN") or "").strip()
     if not token or not location:
