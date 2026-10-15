@@ -11301,7 +11301,15 @@ if (os.environ.get("DCC_REVAMP_UI") == "1"
                      mapbox_geocode=_mapbox_geocode,
                      process_digital_pool=process_digital_pool,
                      fetch_open_tasks=_fetch_onfleet_open_tasks_cached,
-                     pod_configs=POD_CONFIGS)
+                     pod_configs=POD_CONFIGS,
+                     # Dispatch Bot is admin-only (Nick, Oct 15 2026).
+                     dispatch_bot_helpers=None if _user_tier() != "admin" else {
+                         "get_gmaps": get_gmaps,
+                         "ic_home_loc": _ic_home_loc,
+                         "fetch_worker_task_counts": fetch_worker_task_counts,
+                         "is_fa_employee": _is_fa_employee,
+                         "selection_key": _contractor_selection_key,
+                     })
     st.stop()
 
 # Updated Main Tabs
