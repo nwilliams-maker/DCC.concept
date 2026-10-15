@@ -5,6 +5,11 @@ from urllib.parse import urlsplit, parse_qs
 
 import pytest
 from route_planning import geographic_order, plan_round_trip, RoutePlanningError, task_stop_locations
+from migration.map_provider import PersistentMapCache
+
+
+def _NoPersist():
+    return PersistentMapCache(None)
 
 
 def path_length(points):
@@ -114,7 +119,8 @@ def test_failed_measurement_is_not_cached_and_service_pay_includes_all_stops():
              '_gmaps_route_cache': lambda: cache, '_mapbox_geocode_cache': lambda: geocodes,
              '_mapbox_geocode': lambda address, **kwargs: geocodes[address],
              'requests': SimpleNamespace(get=roads), '_log_err': lambda *args: None,
-             'plan_round_trip': plan_round_trip, 'task_stop_locations': task_stop_locations}
+             'plan_round_trip': plan_round_trip, 'task_stop_locations': task_stop_locations,
+             'USE_FREE_MAPS': False, '_map_persist': lambda: _NoPersist()}
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'routing', 'exec'), scope)
     get = scope['get_gmaps']
     stops = tuple(f'stop-{i}' for i in range(52))
@@ -155,7 +161,8 @@ def test_live_pin_changes_invalidate_routing_cache_and_override_old_geocoding():
              '_gmaps_route_cache': lambda: cache, '_mapbox_geocode_cache': lambda: geocodes,
              '_mapbox_geocode': lambda address, **kwargs: geocodes[address],
              'requests': SimpleNamespace(get=roads), '_log_err': lambda *args: None,
-             'plan_round_trip': plan_round_trip, 'task_stop_locations': task_stop_locations}
+             'plan_round_trip': plan_round_trip, 'task_stop_locations': task_stop_locations,
+             'USE_FREE_MAPS': False, '_map_persist': lambda: _NoPersist()}
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'routing', 'exec'), scope)
     get = scope['get_gmaps']
     tasks = [{'full': 'stop', 'lat': 32.01, 'lon': -111.01}]
