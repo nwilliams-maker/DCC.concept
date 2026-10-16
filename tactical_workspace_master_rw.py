@@ -3682,13 +3682,13 @@ def _cached_fetch_sent_records_from_sheet():
                                     # Accepted/Sent/Finalized ghost cards have no Kiosk icon and the
                                     # Shopify "Order Kiosks" button never renders.
                                     _k_cnt_payload = p.get('kCnt', None)
-                                    if _k_cnt_payload in (None, 0):
+                                    if stop_data and any((_sd.get('tasks') or []) for _sd in stop_data):
                                         _k_fallback = 0
                                         for _sd in (stop_data or []):
                                             try:
                                                 for _tk in (_sd.get('tasks', []) or []):
                                                     _tt = str(_tk.get('task_type', '') or _tk.get('taskType', '')).lower()
-                                                    if 'install' in _tt:
+                                                    if 'kiosk install' in _tt:
                                                         _k_fallback += 1
                                             except Exception:
                                                 continue
@@ -4602,7 +4602,7 @@ def process_digital_pool(master_bar=None, warm_only=False):
             "esc_count": sum(1 for x in group if x.get('escalated')),
             "is_digital": True,
             "boosted_tag": _d_boosted_tag,
-            "inst_count": sum(1 for x in group if "install" in str(x.get('task_type', '')).lower()),
+            "inst_count": sum(1 for x in group if 'kiosk install' in str(x.get('task_type', '')).lower()),
             "remov_count": sum(1 for x in group if "remove" in str(x.get('task_type', '')).lower()),
             "wo": anc['wo']
         })
@@ -5160,7 +5160,7 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                     "is_digital": route_is_digital,
                     "is_removal": anc_is_removal,
                     "boosted_tag": _boosted_tag,
-                    "inst_count": sum(1 for x in g_data if "install" in str(x.get('task_type', '')).lower()),
+                    "inst_count": sum(1 for x in g_data if 'kiosk install' in str(x.get('task_type', '')).lower()),
                     "remov_count": sum(1 for x in g_data if str(x.get('task_type', '')).lower() in ["kiosk removal", "remove kiosk"]),
                     "wo": anc_wo,
                     "_default_ic_loc": closest_ic_loc
@@ -5520,7 +5520,7 @@ def _replay_bundles(pod_name):
                     target['data'].append(t)
                     existing_ids.add(tid)
         target['stops'] = len(set(x['full'] for x in target['data']))
-        target['inst_count'] = sum(1 for x in target['data'] if 'install' in str(x.get('task_type','')).lower())
+        target['inst_count'] = sum(1 for x in target['data'] if 'kiosk install' in str(x.get('task_type','')).lower())
         target['remov_count'] = sum(1 for x in target['data'] if str(x.get('task_type','')).lower() in ('kiosk removal','remove kiosk'))
         target['esc_count'] = sum(1 for x in target['data'] if x.get('escalated'))
         target['bundle_count'] = target.get('bundle_count', 0) + len(source_indices)
@@ -5541,7 +5541,7 @@ def get_task_pill(cluster_data):
         return ""
     is_digi = any(t.get('is_digital') for t in cluster_data)
     if is_digi:
-        ins_n = sum(1 for t in cluster_data if t.get('is_digital') and 'install' in str(t.get('task_type','')).lower() and 'ins/re' not in str(t.get('task_type','')).lower())
+        ins_n = sum(1 for t in cluster_data if t.get('is_digital') and 'kiosk install' in str(t.get('task_type','')).lower() and 'ins/re' not in str(t.get('task_type','')).lower())
         rem_n = sum(1 for t in cluster_data if t.get('is_digital') and ('remov' in str(t.get('task_type','')).lower() or 'remove' in str(t.get('task_type','')).lower()))
         insrem_n = sum(1 for t in cluster_data if t.get('is_digital') and 'ins/re' in str(t.get('task_type','')).lower())
         parts = []
@@ -5550,7 +5550,7 @@ def get_task_pill(cluster_data):
         if insrem_n > 0: parts.append(f"{insrem_n} Ins/Rem")
         return f" | 🔧 {' / '.join(parts)}" if parts else ""
     # Static kiosk path: count install tasks
-    k_n = sum(1 for t in cluster_data if 'install' in str(t.get('task_type','')).lower())
+    k_n = sum(1 for t in cluster_data if 'kiosk install' in str(t.get('task_type','')).lower())
     return f" | 🛠️ {k_n} Kiosk" if k_n > 0 else ""
 
 
@@ -5906,7 +5906,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             cluster = dict(cluster)
             cluster['data'] = _pv_data
             cluster['stops'] = len(set(_t['full'] for _t in _pv_data))
-            cluster['inst_count'] = sum(1 for _t in _pv_data if 'install' in str(_t.get('task_type','')).lower())
+            cluster['inst_count'] = sum(1 for _t in _pv_data if 'kiosk install' in str(_t.get('task_type','')).lower())
             cluster['remov_count'] = sum(1 for _t in _pv_data if str(_t.get('task_type','')).lower() in ('kiosk removal','remove kiosk'))
             cluster['esc_count'] = sum(1 for _t in _pv_data if _t.get('escalated'))
             task_ids = [str(_t['id']).strip() for _t in _pv_data]
@@ -6047,7 +6047,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             else: stop_metrics[addr]['digi_srv'] += 1
             found_category = True
         else:
-            if "install" in tt: 
+            if "kiosk install" in tt: 
                 stop_metrics[addr]['inst'] += 1
                 found_category = True
             if any(trigger in tt for trigger in ["kiosk removal", "remove kiosk"]):
@@ -6770,7 +6770,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                             "status": "Ready", "has_ic": cluster.get('has_ic', False),
                             "esc_count": sum(1 for x in tasks_to_move if x.get('escalated')),
                             "is_digital": any(x.get('is_digital') for x in tasks_to_move),
-                            "inst_count": sum(1 for x in tasks_to_move if "install" in str(x.get('task_type','')).lower()),
+                            "inst_count": sum(1 for x in tasks_to_move if 'kiosk install' in str(x.get('task_type','')).lower()),
                             "remov_count": sum(1 for x in tasks_to_move if "remove" in str(x.get('task_type','')).lower()),
                             "wo": "none"
                         }
@@ -6818,7 +6818,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 elif ("offline" not in tt_lower and "ins/re" not in tt_lower) and "⚙️" not in loc_pills[addr]: 
                     loc_pills[addr] += "⚙️"
             else:
-                if "install" in str(t.get('task_type','')).lower() and "🛠️" not in loc_pills[addr]: loc_pills[addr] += "🛠️"
+                if 'kiosk install' in str(t.get('task_type','')).lower() and "🛠️" not in loc_pills[addr]: loc_pills[addr] += "🛠️"
                 if str(t.get('task_type','')).lower() in ["kiosk removal", "remove kiosk"] and "🗑️" not in loc_pills[addr]: 
                     loc_pills[addr] += "🗑️"
 
@@ -6919,7 +6919,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                 elif "ins/re" in clean_tt_lower: category = "🔧 Ins/Rem"
                 else: category = "⚙️ Service"
             else:
-                if "install" in clean_tt_lower: 
+                if "kiosk install" in clean_tt_lower: 
                     category = "🛠️ Kiosk Install"
                     total_installs += 1
                 elif any(x in clean_tt_lower for x in ["kiosk removal", "remove kiosk"]): category = "🗑️ Kiosk Removal"
@@ -7544,7 +7544,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
                     if 'offline' in _tt: _tb = "📵 Offline"
                     elif 'ins/re' in _tt: _tb = "🔧 Ins/Rem"
                     else: _tb = "⚙️ Service"
-                elif 'install' in _tt: _tb = "🛠️ Install"
+                elif 'kiosk install' in _tt: _tb = "🛠️ Install"
                 elif any(x in _tt for x in ['kiosk removal', 'remove kiosk']): _tb = "🗑️ Removal"
                 elif any(x in _tt for x in ['continuity', 'photo retake', 'swap']): _tb = "🔄 Continuity"
                 elif any(x in _tt for x in ['default', 'pull down']): _tb = "⚪ Default"
@@ -8004,7 +8004,7 @@ def smart_sync_pod(pod_name):
                 # Inherit cluster — append task
                 cluster['data'].append(new_task)
                 cluster['stops'] = len(set(x['full'] for x in cluster['data']))
-                cluster['inst_count'] = sum(1 for x in cluster['data'] if "install" in str(x.get('task_type', '')).lower())
+                cluster['inst_count'] = sum(1 for x in cluster['data'] if 'kiosk install' in str(x.get('task_type', '')).lower())
                 cluster['remov_count'] = sum(1 for x in cluster['data'] if str(x.get('task_type', '')).lower() in ["kiosk removal", "remove kiosk"])
                 cluster['esc_count'] = sum(1 for x in cluster['data'] if x.get('escalated'))
                 merged = True
@@ -8052,7 +8052,7 @@ def smart_sync_pod(pod_name):
             "is_digital": anc.get('is_digital', False),
             "is_removal": anc.get('is_removal', False),
             "boosted_tag": _ss_boosted_tag,
-            "inst_count": sum(1 for x in group if "install" in str(x.get('task_type', '')).lower()),
+            "inst_count": sum(1 for x in group if 'kiosk install' in str(x.get('task_type', '')).lower()),
             "remov_count": sum(1 for x in group if str(x.get('task_type', '')).lower() in ["kiosk removal", "remove kiosk"]),
             "wo": anc['wo']
         })
@@ -8968,7 +8968,7 @@ def run_pod_tab(pod_name):
                          else ('boosted' if any('boosted' in v for v in _bs_vals) else ''))
                 return {
                     'stops': len(set(x['full'] for x in _data)),
-                    'inst_count': sum(1 for x in _data if 'install' in str(x.get('task_type','')).lower()),
+                    'inst_count': sum(1 for x in _data if 'kiosk install' in str(x.get('task_type','')).lower()),
                     'remov_count': sum(1 for x in _data if str(x.get('task_type','')).lower() in ('kiosk removal','remove kiosk')),
                     'esc_count': sum(1 for x in _data if x.get('escalated')),
                     'boosted_tag': _btag,
@@ -10656,7 +10656,7 @@ def run_pod_tab(pod_name):
                     
                     _k_by_addr = {}
                     for _tk in c['data']:
-                        if any(kw in str(_tk.get('task_type','')).lower() for kw in ['kiosk install','install']):
+                        if "kiosk install" in str(_tk.get('task_type','')).lower():
                             _addr = _tk['full']
                             _venue = _tk.get('venue_name', '') or _addr
                             _k_by_addr[_venue] = _k_by_addr.get(_venue, 0) + 1
@@ -10676,7 +10676,7 @@ def run_pod_tab(pod_name):
                             loc_rows = []
                             for l in u_locs:
                                 _venue_key = next((_tk.get('venue_name','') for _tk in c['data'] if _tk['full'] == l and _tk.get('venue_name')), '')
-                                _k_cnt = sum(1 for _tk in c['data'] if _tk['full'] == l and 'install' in str(_tk.get('task_type','')).lower())
+                                _k_cnt = sum(1 for _tk in c['data'] if _tk['full'] == l and 'kiosk install' in str(_tk.get('task_type','')).lower())
                                 _k_tag = f" <span style='color:#16a34a; font-weight:800;'>🛠️ {_k_cnt} Kiosk</span>" if _k_cnt > 0 else ""
                                 _v_prefix = f"<span style='color:#94a3b8; font-weight:600;'>{_venue_key} — </span>" if _venue_key else ""
                                 loc_rows.append(f"<li>{_v_prefix}{l}{_k_tag}</li>")
@@ -10786,7 +10786,7 @@ def run_pod_tab(pod_name):
                     
                     _fk_by_addr = {}
                     for _tk in c['data']:
-                        if any(kw in str(_tk.get('task_type','')).lower() for kw in ['kiosk install','install']):
+                        if "kiosk install" in str(_tk.get('task_type','')).lower():
                             _addr = _tk['full']
                             _venue = _tk.get('venue_name', '') or _addr
                             _fk_by_addr[_venue] = _fk_by_addr.get(_venue, 0) + 1
@@ -10801,7 +10801,7 @@ def run_pod_tab(pod_name):
                             loc_rows = []
                             for l in u_locs:
                                 _fvk = next((_tk.get('venue_name','') for _tk in c['data'] if _tk['full'] == l and _tk.get('venue_name')), '')
-                                _k_cnt = sum(1 for _tk in c['data'] if _tk['full'] == l and 'install' in str(_tk.get('task_type','')).lower())
+                                _k_cnt = sum(1 for _tk in c['data'] if _tk['full'] == l and 'kiosk install' in str(_tk.get('task_type','')).lower())
                                 _k_tag = f" <span style='color:#16a34a; font-weight:800;'>🛠️ {_k_cnt} Kiosk</span>" if _k_cnt > 0 else ""
                                 _fv_prefix = f"<span style='color:#94a3b8; font-weight:600;'>{_fvk} — </span>" if _fvk else ""
                                 loc_rows.append(f"<li>{_fv_prefix}{l}{_k_tag}</li>")
@@ -12290,7 +12290,7 @@ with tabs[6]:
                         exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
                             _dacc_fn_badge = "🌐 " if ic_name == "Field Nation" else ""
-                            with st.expander(_dacc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
+                            with st.expander(_dacc_fn_badge + f"✅ {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'kiosk install' in str(tk.get('task_type','')).lower())}" if any('kiosk install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
                                 u_locs, _dalv = [], []
                                 for tk in c['data']:
                                     if tk['full'] not in u_locs:
@@ -12386,7 +12386,7 @@ with tabs[6]:
                         _dfins_pill = f" | 🔧 {_dfins_cnt} Ins/Rem" if _dfins_cnt > 0 else ""
                         exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                         with exp_col:
-                            with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'install' in str(tk.get('task_type','')).lower())}" if any('install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
+                            with st.expander(f"🏁 {c.get('wo', ic_name)} | ${comp} | Due: {due}" + (f" | 🛠️ {sum(1 for tk in c['data'] if 'kiosk install' in str(tk.get('task_type','')).lower())}" if any('kiosk install' in str(tk.get('task_type','')).lower() for tk in c['data']) else "") + _bundle_pill(c)):
                                 u_locs, _dflv = [], []
                                 for tk in c['data']:
                                     if tk['full'] not in u_locs:
