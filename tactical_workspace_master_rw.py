@@ -139,6 +139,10 @@ def _ic_df_from_db(engine):
     comes through as text (no pandas ".0" float artifact to strip, unlike the
     CSV path)."""
     df = _da.get_contractors(engine)
+    # Administrative roster exclusions: retain historical DB rows and route records.
+    if 'name' in df.columns:
+        excluded_names = {'pete valenzuela', 'jodi thurman'}
+        df = df.loc[~df['name'].fillna('').astype(str).str.strip().str.casefold().isin(excluded_names)].copy()
     return df.rename(columns={
         "ic_list": "ic list",
         "pod_color": "pod color",
