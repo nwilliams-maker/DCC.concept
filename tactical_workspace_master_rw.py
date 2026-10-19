@@ -10437,6 +10437,102 @@ def run_pod_tab(pod_name):
         st.markdown(f"<div style='font-size: 1.5rem; font-weight: 800; color: {TB_GREEN}; margin-bottom: 5px; text-align: center;'>⏳ Awaiting Confirmation</div>", unsafe_allow_html=True)
         t_sent, t_acc, t_dec, t_fin = st.tabs(["✉️ Sent", "✅ Accepted", "❌ Declined", "🏁 Finalized"])
         
+        # Bulk re-route controls are scoped to each pod and tab. Selection is
+        # keyed by stable route IDs, not pagination indexes or card positions.
+        def _bulk_route_id(item):
+            if item.get('is_ghost'):
+                g = item
+                return "ghost:" + str(g.get('hash') or g.get('wo') or g.get('route_ts') or '')
+            ids = [str(t.get('id', '')).strip() for t in item.get('data', [])]
+            return "live:" + hashlib.md5("".join(sorted(ids)).encode()).hexdigest()
+
+        def _bulk_key(tab, item):
+            return f"_bulk_reroute_{pod_name}_{tab}_{_bulk_route_id(item)}"
+
+        def _bulk_route_controls(tab, items):
+            if _is_dispatch_associate() or not items:
+                return
+            # Deselect departed routes, including after a fragment-level rerun.
+            valid = {_bulk_key(tab, item) for item in items}
+            prefix = f"_bulk_reroute_{pod_name}_{tab}_"
+            for key in list(st.session_state):
+                if key.startswith(prefix) and key not in valid:
+                    st.session_state.pop(key, None)
+            selected = [item for item in items if st.session_state.get(_bulk_key(tab, item), False)]
+            a, b, c = st.columns([1, 1, 3])
+            with a:
+                if st.button("Select all", key=f"bulk_all_{pod_name}_{tab}",
+                             use_container_width=True):
+                    for item in items:
+                        st.session_state[_bulk_key(tab, item)] = True
+                    st.rerun(scope="fragment")
+            with b:
+                if st.button("Clear", key=f"bulk_clear_{pod_name}_{tab}",
+                             use_container_width=True):
+                    for item in items:
+                        st.session_state[_bulk_key(tab, item)] = False
+                    st.rerun(scope="fragment")
+            with c:
+                with st.popover(f"Re-route selected ({len(selected)})",
+                                disabled=not selected, use_container_width=True):
+                    st.warning(f"Re-route {len(selected)} selected {tab.title()} routes? "
+                               "This runs the existing re-route action for each route, "
+                               "including OnFleet unassignment where applicable.")
+                    if st.button("Confirm re-route", key=f"bulk_confirm_{pod_name}_{tab}",
+                                 type="primary", use_container_width=True):
+                        started, failed = [], []
+                        # Snapshot selection before state-changing actions.
+                        for item in list(selected):
+                            name = item.get('wo') or item.get('contractor_name', 'Unknown')
+                            ic = item.get('contractor_name', 'Unknown')
+                            try:
+                                if item.get('is_ghost'):
+                                    hashes = (item.get('_merged_hashes')
+                                              if tab == 'sent' else None)
+                                    hashes = hashes or [item.get('hash')]
+                                    for route_hash in hashes:
+                                        if not route_hash:
+                                            raise ValueError("Missing route hash")
+                                        kwargs = dict(cluster_hash=route_hash, ic_name=ic,
+                                                      pod_name=pod_name, cluster_data=item,
+                                                      check_onfleet=True)
+                                        if tab == 'sent':
+                                            kwargs['action_label'] = "Re-Routed"
+                                        else:
+                                            kwargs.update(action_label="Ghost Archived",
+                                                          check_completed=True)
+                                        move_to_dispatch(**kwargs)
+                                else:
+                                    route_hash = _bulk_route_id(item).split(":", 1)[1]
+                                    kwargs = dict(cluster_hash=route_hash, ic_name=ic,
+                                                  pod_name=pod_name, cluster_data=item)
+                                    if tab == 'sent':
+                                        kwargs.update(action_label="Re-Routed", check_onfleet=True)
+                                    elif tab == 'accepted':
+                                        kwargs.update(check_completed=True)
+                                    move_to_dispatch(**kwargs)
+                                started.append(name)
+                                st.session_state[_bulk_key(tab, item)] = False
+                            except Exception as exc:
+                                failed.append(f"{name}: {exc}")
+                        st.session_state[f"_bulk_result_{pod_name}_{tab}"] = (started, failed)
+                        st.rerun(scope="fragment")
+            result = st.session_state.pop(f"_bulk_result_{pod_name}_{tab}", None)
+            if result:
+                started, failed = result
+                # move_to_dispatch schedules background OnFleet/archive work;
+                # starting it is not proof of downstream completion.
+                if started:
+                    st.success(f"Re-route initiated for {len(started)} route(s). "
+                               "Background OnFleet/archive completion is not yet verified.")
+                if failed:
+                    st.error(f"{len(failed)} route(s) failed to start: " + "; ".join(failed))
+
+        def _bulk_route_checkbox(tab, item):
+            if not _is_dispatch_associate():
+                st.checkbox("Select route", key=_bulk_key(tab, item),
+                            label_visibility="collapsed")
+
         @st.fragment
         def _render_sent_panel():
             # 🚀 INSTANT RE-ROUTE — the re-route buttons below fire
@@ -10453,6 +10549,7 @@ def run_pod_tab(pod_name):
             _live_sent = [c for c in sent if not _is_reverted_cluster(c)]
             _live_ghosts = [g for g in sent_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
             unified_sent = unify_and_sort_by_date(_live_sent, _live_ghosts, live_hashes)
+            _bulk_route_controls('sent', unified_sent)
             # 🚪 Close the re-route popover after a route moves. Streamlit keeps a
             # popover open when you click a button inside it; once the route is gone the
             # popover is orphaned. The re-route handlers set this flag, then this fires
@@ -10511,6 +10608,7 @@ def run_pod_tab(pod_name):
                     wo_display = c.get('wo', ic_name)
                     _pill_sent = get_task_pill(c.get('data', []))
                     
+                    _bulk_route_checkbox('sent', item)
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}{_pill_sent}  ·  :gray[{len(c['data'])} tasks]{_bundle_pill(c)}"):
@@ -10574,6 +10672,7 @@ def run_pod_tab(pod_name):
                     comp, due = g.get('pay', 0), g.get('due', 'N/A')
                     stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                     
+                    _bulk_route_checkbox('sent', item)
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         with st.expander(f"✉️ {wo_display} | ${comp} | Due: {due}  ·  :gray[{tasks_cnt} tasks]"):
@@ -10640,6 +10739,7 @@ def run_pod_tab(pod_name):
             _live_acc = [c for c in accepted if not _is_reverted_cluster(c)]
             _live_acc_ghosts = [g for g in pod_ghosts if not st.session_state.get(f"reverted_{g.get('hash','')}", False)]
             unified_acc = unify_and_sort_by_date(_live_acc, _live_acc_ghosts, live_hashes)
+            _bulk_route_controls('accepted', unified_acc)
             if not unified_acc: st.info("Waiting for portal acceptances...")
             
             current_date = None
@@ -10666,6 +10766,7 @@ def run_pod_tab(pod_name):
                             _k_by_addr[_venue] = _k_by_addr.get(_venue, 0) + 1
                     _k_total = sum(_k_by_addr.values())
                     _k_pill = f" | 🛠️ {_k_total} Kiosk" if _k_total > 0 else ""
+                    _bulk_route_checkbox('accepted', item)
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         if ic_name == "Field Nation":
@@ -10704,6 +10805,7 @@ def run_pod_tab(pod_name):
                     comp, due = g.get('pay', 0), g.get('due', 'N/A')
                     stops_cnt, tasks_cnt = g.get('stops', 0), g.get('tasks', 0)
                     
+                    _bulk_route_checkbox('accepted', item)
                     exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                     with exp_col:
                         _gk_total = g.get('kCnt', 0) or 0
@@ -10732,6 +10834,7 @@ def run_pod_tab(pod_name):
             _close_popover_if_flagged()
             _live_dec = [c for c in declined if not _is_reverted_cluster(c)]
             unified_dec = unify_and_sort_by_date(_live_dec, [], live_hashes)
+            _bulk_route_controls('declined', unified_dec)
             if not unified_dec: st.info("No declined routes.")
             
             current_date = None
@@ -10746,6 +10849,7 @@ def run_pod_tab(pod_name):
                 ic_name = c.get('contractor_name', 'Unknown')
                 task_ids = [str(tid['id']).strip() for tid in c['data']]
                 cluster_hash = hashlib.md5("".join(sorted(task_ids)).encode()).hexdigest()
+                _bulk_route_checkbox('declined', item)
                 exp_col, btn_col = st.columns([9.5, 0.5], vertical_alignment="center")
                 with exp_col:
                     comp_dec = c.get('comp', 0)
