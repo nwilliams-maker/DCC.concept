@@ -847,6 +847,38 @@ def _saved_status_group_label(route):
     return dt.strftime("%m/%d/%Y") if dt != datetime.min else "Unknown date"
 
 
+def _is_cvs_removal_route(route):
+    """Preserve the CVS Removal label after a route becomes a saved/ghost card."""
+    ghost = route.get("_ghost_record") or {}
+    for record in (route, ghost):
+        value = record.get("is_removal")
+        if value is True or str(value).strip().lower() in ("true", "1", "yes"):
+            return True
+        for field in ("route_type", "task_type", "type", "category"):
+            val = str(record.get(field) or "").lower()
+            if "cvs" in val and ("remov" in val or "pull down" in val):
+                return True
+    # Saved routes may no longer contain live tasks; use persisted stop details.
+    all_tasks = list(route.get("data") or [])
+    stop_data = ghost.get("stop_data") or []
+    if isinstance(stop_data, str):
+        try:
+            stop_data = json.loads(stop_data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            stop_data = []
+    if isinstance(stop_data, list):
+        for stop in stop_data:
+            if isinstance(stop, dict):
+                all_tasks.extend(t for t in (stop.get("tasks") or []) if isinstance(t, dict))
+    return any(
+        ("cvs" in " ".join(str(t.get(k) or "") for k in
+                           ("client_company", "client", "client_name", "venue_name", "task_type")).lower()
+         and ("remov" in str(t.get("task_type") or t.get("type") or "").lower()
+              or "pull down" in str(t.get("task_type") or t.get("type") or "").lower()))
+        for t in all_tasks if isinstance(t, dict)
+    )
+
+
 def _route_list_heading(route, state, route_hash):
     """Put saved work orders first without changing route queues."""
     if state not in ("Sent", "Accepted", "Declined", "Finalized"):
@@ -1355,7 +1387,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                                     label_visibility="collapsed",
                                     on_change=_refresh_bulk_actions)
                 with card_col:
-                    removal = " · CVS Removal" if route.get("is_removal") else ""
+                    removal = " · CVS Removal" if _is_cvs_removal_route(route) else ""
                     card_state = stage if status == "Field Nation" else state
                     provider = str(route.get("_fn_history_provider") or fn_providers.get(route_hash) or "").strip()
                     stops = route.get("stops", 0)
