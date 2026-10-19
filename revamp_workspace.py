@@ -1352,7 +1352,8 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     elif status in ("Sent", "Accepted", "Declined") and state == status:
                         st.checkbox("Select route for re-routing",
                                     key=f"revamp_reroute_{key}",
-                                    label_visibility="collapsed")
+                                    label_visibility="collapsed",
+                                    on_change=_refresh_bulk_actions)
                 with card_col:
                     removal = " · CVS Removal" if route.get("is_removal") else ""
                     card_state = stage if status == "Field Nation" else state
