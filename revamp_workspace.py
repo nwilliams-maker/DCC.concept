@@ -1349,6 +1349,10 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     elif status == "Field Nation" and not route.get("_fn_assigned_history"):
                         st.checkbox("Select for Field Nation CSV", key=f"revamp_fn_{key}",
                                     label_visibility="collapsed", on_change=_refresh_bulk_actions)
+                    elif status in ("Sent", "Accepted", "Declined") and state == status:
+                        st.checkbox("Select route for re-routing",
+                                    key=f"revamp_reroute_{key}",
+                                    label_visibility="collapsed")
                 with card_col:
                     removal = " · CVS Removal" if route.get("is_removal") else ""
                     card_state = stage if status == "Field Nation" else state
@@ -2863,6 +2867,32 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             str(entry[1].get("state") or "").upper(),
             {"Pending": 0, "Posted": 1, "Assigned": 2}[_fn_entry_stage(entry, fn_posted, fn_providers)] if status == "Field Nation" else 0,
             str(entry[1].get("city") or "").lower(), entry[0]))
+    # Saved-route selections belong to the left-hand route cards, as in Field Nation.
+    reroute_status = status in ("Sent", "Accepted", "Declined")
+    reroute_entries = [entry for entry in matching if entry[2] == status] if reroute_status else []
+    reroute_keys = [f"revamp_reroute_{_route_entry_key(*entry[:4])}" for entry in reroute_entries]
+    if reroute_status:
+        visible = set(reroute_keys)
+        # Do not keep stale selections across changes to the status/search/pod view.
+        for old_key in list(st.session_state):
+            if old_key.startswith("revamp_reroute_") and old_key not in visible:
+                st.session_state.pop(old_key, None)
+        with st.container(key="revamp_reroute_toolbar"):
+            select_col, clear_col, total_col = st.columns([1, 1, 2])
+            with select_col:
+                if st.button("Select all", key=f"revamp_reroute_select_{status}",
+                             disabled=not reroute_keys, use_container_width=True):
+                    for key in reroute_keys:
+                        st.session_state[key] = True
+                    st.rerun()
+            with clear_col:
+                if st.button("Clear", key=f"revamp_reroute_clear_{status}",
+                             disabled=not reroute_keys, use_container_width=True):
+                    for key in reroute_keys:
+                        st.session_state[key] = False
+                    st.rerun()
+            with total_col:
+                st.caption(f"{len(reroute_keys)} {status.lower()} routes available for selection")
     selection_prefix = "revamp_fn_" if status == "Field Nation" else "revamp_bulk_"
     visible_keys = [f"{entry[0]}:{entry[3]}" for entry in matching
                     if (entry[2] == "Field Nation" and not entry[1].get("_fn_assigned_history")) or
@@ -3180,6 +3210,67 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
         if _queue_fn_entries(chosen, fn_due, db_engine, assign_tasks_to_fn_team,
                              fetch_sent_records_from_sheet):
             st.rerun()
+
+    # Bulk re-route uses the same underlying handler as the individual detail
+    # pane action; the confirmation is for the entire batch, not per route.
+    if status in ("Sent", "Accepted", "Declined") and move_to_dispatch:
+        selected_routes = [entry for entry in matching if entry[2] == status
+                           and st.session_state.get(
+                               f"revamp_reroute_{_route_entry_key(*entry[:4])}", False)]
+        with st.container(key="revamp_reroute_actions"):
+            confirm_key = f"_revamp_reroute_confirm_{status}"
+            if not st.session_state.get(confirm_key, False):
+                if st.button(f"Re-route selected ({len(selected_routes)})",
+                             disabled=not selected_routes,
+                             key=f"revamp_reroute_start_{status}",
+                             type="primary", use_container_width=True):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+            else:
+                st.warning(f"Re-route {len(selected_routes)} selected {status.lower()} routes? "
+                           "This removes them from their current contractors.")
+                yes_col, no_col = st.columns(2)
+                with yes_col:
+                    if st.button("Confirm re-route", key=f"revamp_reroute_yes_{status}",
+                                 type="primary", use_container_width=True):
+                        started, failed = [], []
+                        for pod, route, state, route_hash, nearest in list(selected_routes):
+                            key = f"revamp_reroute_{_route_entry_key(pod, route, state, route_hash)}"
+                            name = str(route.get("wo") or route.get("contractor_name") or route_hash)
+                            ic = str(route.get("contractor_name") or "Unknown")
+                            ghost = route.get("_ghost_record") or {}
+                            try:
+                                hashes = (ghost.get("_merged_hashes") if status == "Sent" else None) or [route_hash]
+                                for h in hashes:
+                                    kwargs = dict(cluster_hash=h, ic_name=ic, pod_name=pod,
+                                                  cluster_data=ghost if ghost else route,
+                                                  check_onfleet=True)
+                                    if status == "Sent":
+                                        kwargs["action_label"] = "Re-Routed"
+                                    if status == "Accepted":
+                                        kwargs["check_completed"] = True
+                                    if ghost and status == "Accepted":
+                                        kwargs["action_label"] = "Ghost Archived"
+                                    move_to_dispatch(**kwargs)
+                                started.append(name)
+                                st.session_state[key] = False
+                            except Exception as exc:
+                                failed.append(f"{name}: {exc}")
+                        st.session_state[confirm_key] = False
+                        st.session_state["_revamp_notice"] = (
+                            "warning" if failed else "success",
+                            f"Re-route started for {len(started)} route(s); "
+                            f"{len(failed)} could not start. Background OnFleet completion "
+                            "is not yet verified." + (
+                                " Failures: " + "; ".join(failed[:5]) if failed else ""
+                            ),
+                        )
+                        st.rerun()
+                with no_col:
+                    if st.button("Cancel", key=f"revamp_reroute_no_{status}",
+                                 use_container_width=True):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
 
     left, right = st.columns([1.75, 3.25], gap="large")
     with left:
