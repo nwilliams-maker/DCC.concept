@@ -2620,9 +2620,9 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                 if display != last_display:
                                     indicator.progress(display[0], text=display[1])
                                     last_display = display
-                                if time.monotonic() - started > 240:
+                                if time.monotonic() - started > 40:
                                     st.session_state[f"_revamp_load_attempted_{pod}"] = False
-                                    st.info("OnFleet extraction continues in the background. Reload to see the completed routes.")
+                                    st.info("Route building is still running in the background. The page is no longer blocked; click the Routes refresh icon after a moment to display the results.")
                                     return
                     except Exception as exc:
                         print(f"[revamp/sync] background build failed for {pod}: {type(exc).__name__}: {exc}", flush=True)
