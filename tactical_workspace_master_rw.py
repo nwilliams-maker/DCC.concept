@@ -2402,7 +2402,12 @@ def move_to_dispatch(cluster_hash, ic_name, pod_name, action_label="Revoked", ch
     # Phase 2 migration — capture the WO on the main thread (st.session_state
     # isn't safe to read from the background thread below) so
     # background_sheet_move can best-effort mirror this archive into Postgres.
-    _wo_for_pg_mirror = st.session_state.get(f"wo_{cluster_hash}")
+    # Saved/ghost routes in Revamp may not have a wo_<hash> session key.
+    # Their persisted WO must be used or archive_route silently never runs.
+    _wo_for_pg_mirror = (
+        (cluster_data or {}).get("wo")
+        or st.session_state.get(f"wo_{cluster_hash}")
+    )
     def _bg_reconcile():
         # 🌟 PARALLEL RECONCILE (May 2026 revoke-speedup): the Onfleet PUTs and
         # the GAS archiveRoute POST have no dependency on each other — running
