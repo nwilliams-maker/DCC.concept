@@ -5,8 +5,8 @@ Nick's rules (Oct 15 2026):
     already overloaded. Do not reach farther just to use a new IC.
   * New ICs (0 OnFleet tasks and no Route Request waiting on them) are
     preferred when they are essentially as close as the closest IC.
-  * Rate: 1-5 stops -> calculated rate kept between $20.00 and $24.50/stop.
-          6+ stops  -> $20.00/stop.
+  * Automatic rate: 1-5 stops -> $24.00/stop.
+                    6+ stops  -> $20.00/stop.
   * 1-5 stop routes whose closest IC is more than 25 mi away go to
     Field Nation instead of an IC.
 
@@ -20,8 +20,7 @@ from dataclasses import dataclass, field
 
 ELIGIBLE = ("ACTIVE", "IN TRAINING", "NEED INSURANCE")
 SMALL_ROUTE_MAX_STOPS = 5
-SMALL_ROUTE_RATE_MIN = 20.00
-SMALL_ROUTE_RATE_MAX = 24.50
+SMALL_ROUTE_RATE = 24.00
 LARGE_ROUTE_RATE = 20.00
 HOURLY = 25.0
 
@@ -72,14 +71,8 @@ def stop_count(route):
 
 
 def rate_for_route(stops, calc_rate):
-    """Nick's rate rule. calc_rate = route hours x $25 / stops from the IC's home."""
-    if stops > SMALL_ROUTE_MAX_STOPS:
-        return LARGE_ROUTE_RATE
-    try:
-        calc = float(calc_rate or 0)
-    except (TypeError, ValueError):
-        calc = 0.0
-    return round(min(max(calc, SMALL_ROUTE_RATE_MIN), SMALL_ROUTE_RATE_MAX), 2)
+    """Automatic dispatch bot pricing; travel-time estimate is informational only."""
+    return LARGE_ROUTE_RATE if stops > SMALL_ROUTE_MAX_STOPS else SMALL_ROUTE_RATE
 
 
 def phone_last10(raw):
