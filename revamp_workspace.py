@@ -1783,30 +1783,41 @@ def _bot_settings_from_state():
 
 
 def _decline_history(db_engine):
-    """(contractor_name, [task ids]) for every Route Request ever declined in the
-    last 120 days, so a re-offer skips ICs who declined an earlier round."""
+    """Permanent bot exclusions for declined AND dispatcher-revoked routes.
+
+    Match by original OnFleet task IDs rather than WO/hash, which can change
+    when a revoked route is returned to dispatch and regrouped.
+    """
     if db_engine is None:
         return []
-    cached = st.session_state.get("_bot_decline_history")
-    if cached and time.time() - cached[0] < 60:
-        return cached[1]
     rows = []
     try:
         import sqlalchemy as sa
         with db_engine.connect() as conn:
             result = conn.execute(sa.text("""
-                SELECT DISTINCT r.contractor_name, r.payload->>'taskIds' AS task_ids
+                SELECT DISTINCT
+                    CASE WHEN e.action = 'archiveRoute'
+                        THEN COALESCE(NULLIF(e.payload->>'ic_name', ''), r.contractor_name)
+                        ELSE r.contractor_name END AS contractor_name,
+                    r.payload->>'taskIds' AS task_ids
                 FROM routes r JOIN route_events e ON e.route_id = r.id
-                WHERE e.action = 'processDecision' AND e.payload->>'decision' = 'decline'
-                  AND r.created_at >= now() - interval '120 days'""")).mappings().all()
+                WHERE (
+                    (e.action = 'processDecision'
+                     AND lower(e.payload->>'decision') = 'decline')
+                    OR (e.action = 'archiveRoute'
+                        AND lower(coalesce(e.payload->>'action_label', '')) IN
+                            ('revoked', 're-routed', 'ghost archived'))
+                )
+                AND r.created_at >= now() - interval '365 days'
+            """)).mappings().all()
         rows = [(row["contractor_name"],
                  [t.strip() for t in str(row["task_ids"] or "").split(",") if t.strip()])
-                for row in result]
+                for row in result if row["contractor_name"]]
     except Exception as exc:
-        print(f"[dispatch-bot] decline history failed: {type(exc).__name__}: {exc}", flush=True)
-    st.session_state["_bot_decline_history"] = (time.time(), rows)
+        print(f"[dispatch-bot] exclusion history failed: {type(exc).__name__}: {exc}", flush=True)
+        # Never proceed with potentially forbidden ICs if the history lookup fails.
+        raise RuntimeError("Cannot check revoked/declined contractor history; bot planning stopped.") from exc
     return rows
-
 
 def _run_dispatch_bot(matching, helpers, haversine, sent_db, mode="routes", db_engine=None):
     import dispatch_bot as bot
