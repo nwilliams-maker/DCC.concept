@@ -3341,6 +3341,54 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                         )
                         st.rerun()
 
+    # Admin bulk finalize: use the same durable selection as Select all,
+    # intentionally bypassing only the per-route checklist UI.
+    if status == "Accepted" and not is_dispatch_associate:
+        accepted_selected = [
+            entry for entry in matching
+            if entry[2] == "Accepted" and st.session_state.get(
+                f"_reroute_chosen_{_route_entry_key(*entry[:4])}", False)
+        ]
+        with st.popover(f"Finalize selected ({len(accepted_selected)})",
+                        disabled=not accepted_selected, use_container_width=True):
+            st.warning(
+                f"Finalize {len(accepted_selected)} accepted routes without completing "
+                "their individual checklists? This records them as Finalized in Railway."
+            )
+            if st.button("Confirm bulk finalize", key="revamp_bulk_finalize_confirm",
+                         type="primary", use_container_width=True):
+                from migration import data_access as _finalize_data
+                finalized, failed = [], []
+                seen_wo = set()
+                if db_engine is None:
+                    st.error("Railway Postgres is unavailable; no routes finalized.")
+                else:
+                    for pod, route, state, route_hash, nearest in accepted_selected:
+                        ghost = route.get("_ghost_record") or {}
+                        wo = str(ghost.get("wo") or route.get("wo") or "").strip()
+                        if not wo:
+                            failed.append(f"{route_hash}: missing work order number")
+                            continue
+                        if wo in seen_wo:
+                            continue
+                        seen_wo.add(wo)
+                        try:
+                            _finalize_data.finalize_route(db_engine, wo)
+                            st.session_state[f"route_state_{route_hash}"] = "finalized"
+                            st.session_state[f"reverted_{route_hash}"] = True
+                            st.session_state[
+                                f"_reroute_chosen_{_route_entry_key(pod, route, state, route_hash)}"
+                            ] = False
+                            finalized.append(wo)
+                        except Exception as exc:
+                            failed.append(f"{wo}: {exc}")
+                    st.session_state["_revamp_notice"] = (
+                        "warning" if failed else "success",
+                        f"Finalized {len(finalized)} work orders in Railway."
+                        + (f" Failed: {'; '.join(failed[:5])}" if failed else ""),
+                    )
+                    st.rerun()
+
     left, right = st.columns([1.75, 3.25], gap="large")
     with left:
         quiet_context = ((selected_pods, process_pod, process_digital_pool, cluster_store,
