@@ -3343,7 +3343,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     # Admin bulk finalize: use the same durable selection as Select all,
     # intentionally bypassing only the per-route checklist UI.
-    if status == "Accepted" and not is_dispatch_associate:
+    if status == "Accepted" and str(auth_user.get("role") or "").strip().lower() == "admin":
         accepted_selected = [
             entry for entry in matching
             if entry[2] == "Accepted" and st.session_state.get(
