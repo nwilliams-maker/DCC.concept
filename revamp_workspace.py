@@ -1366,7 +1366,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
             if status == "Sent":
                 # Date-header checkbox selects this day only, including collapsed routes.
                 day_keys = [
-                    f"revamp_reroute_{_route_entry_key(*entry[:4])}"
+                    f"_reroute_chosen_{_route_entry_key(*entry[:4])}"
                     for entry in entries if entry[2] == "Sent"
                 ]
                 date_check_key = f"revamp_sent_day_select_{safe_group}"
@@ -1379,6 +1379,10 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     checked = bool(st.session_state.get(checkbox_key))
                     for route_key in keys:
                         st.session_state[route_key] = checked
+                        # A visible checkbox may already exist; synchronize its
+                        # ephemeral widget key before the next fragment run.
+                        widget_key = route_key.replace("_reroute_chosen_", "revamp_reroute_", 1)
+                        st.session_state[widget_key] = checked
                     _refresh_bulk_actions()
 
                 day_checkbox_col, day_label_col = st.columns(
@@ -1415,10 +1419,20 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                         st.checkbox("Select for Field Nation CSV", key=f"revamp_fn_{key}",
                                     label_visibility="collapsed", on_change=_refresh_bulk_actions)
                     elif status in ("Sent", "Accepted", "Declined") and state == status:
+                        # Persist selection outside widget state: collapsed date
+                        # groups do not render their route checkboxes, and Streamlit
+                        # deletes unrendered widget keys on subsequent reruns.
+                        persistent_key = f"_reroute_chosen_{key}"
+                        widget_key = f"revamp_reroute_{key}"
+                        st.session_state[widget_key] = bool(
+                            st.session_state.get(persistent_key, False)
+                        )
+                        def _route_checkbox_changed(w=widget_key, p=persistent_key):
+                            st.session_state[p] = bool(st.session_state.get(w, False))
+                            _refresh_bulk_actions()
                         st.checkbox("Select route for re-routing",
-                                    key=f"revamp_reroute_{key}",
-                                    label_visibility="collapsed",
-                                    on_change=_refresh_bulk_actions)
+                                    key=widget_key, label_visibility="collapsed",
+                                    on_change=_route_checkbox_changed)
                 with card_col:
                     removal = " · CVS Removal" if _is_cvs_removal_route(route) else ""
                     card_state = stage if status == "Field Nation" else state
@@ -2936,12 +2950,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     # Saved-route selections belong to the left-hand route cards, as in Field Nation.
     reroute_status = status in ("Sent", "Accepted", "Declined")
     reroute_entries = [entry for entry in matching if entry[2] == status] if reroute_status else []
-    reroute_keys = [f"revamp_reroute_{_route_entry_key(*entry[:4])}" for entry in reroute_entries]
+    reroute_keys = [f"_reroute_chosen_{_route_entry_key(*entry[:4])}" for entry in reroute_entries]
     if reroute_status:
         visible = set(reroute_keys)
         # Do not keep stale selections across changes to the status/search/pod view.
         for old_key in list(st.session_state):
-            if old_key.startswith("revamp_reroute_") and old_key not in visible:
+            if old_key.startswith("_reroute_chosen_") and old_key not in visible:
                 st.session_state.pop(old_key, None)
         with st.container(key="revamp_reroute_toolbar"):
             select_col, clear_col, total_col = st.columns([1, 1, 2])
@@ -3282,7 +3296,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     if status in ("Sent", "Accepted", "Declined") and move_to_dispatch:
         selected_routes = [entry for entry in matching if entry[2] == status
                            and st.session_state.get(
-                               f"revamp_reroute_{_route_entry_key(*entry[:4])}", False)]
+                               f"_reroute_chosen_{_route_entry_key(*entry[:4])}", False)]
         with st.container(key="revamp_reroute_actions"):
             # A popover opens immediately on the same click; the old two-step
             # app rerun made the confirmation appear unresponsive on mobile.
@@ -3296,7 +3310,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                  type="primary", use_container_width=True):
                         started, failed = [], []
                         for pod, route, state, route_hash, nearest in list(selected_routes):
-                            key = f"revamp_reroute_{_route_entry_key(pod, route, state, route_hash)}"
+                            key = f"_reroute_chosen_{_route_entry_key(pod, route, state, route_hash)}"
                             name = str(route.get("wo") or route.get("contractor_name") or route_hash)
                             ic = str(route.get("contractor_name") or "Unknown")
                             ghost = route.get("_ghost_record") or {}
