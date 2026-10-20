@@ -148,6 +148,12 @@ def _clean_contractor_display_names(df):
             name = updated
         return re.sub(r'\s+', ' ', name).strip(' -–—,; ')
     df['name'] = df['name'].map(clean)
+    # Keep these contractors out of all DCC selection sources (Postgres and CSV).
+    # Preserve database rows and work-order/payment history.
+    blocked = r'\\b(?:pete\\s+valenzuela|jodi\\s+thurman)\\b'
+    df = df.loc[~df['name'].fillna('').astype(str).str.contains(
+        blocked, case=False, regex=True, na=False
+    )].copy()
     return df
 
 
