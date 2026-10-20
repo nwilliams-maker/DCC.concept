@@ -3284,18 +3284,13 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                            and st.session_state.get(
                                f"revamp_reroute_{_route_entry_key(*entry[:4])}", False)]
         with st.container(key="revamp_reroute_actions"):
-            confirm_key = f"_revamp_reroute_confirm_{status}"
-            if not st.session_state.get(confirm_key, False):
-                if st.button(f"Re-route selected ({len(selected_routes)})",
-                             disabled=not selected_routes,
-                             key=f"revamp_reroute_start_{status}",
-                             type="primary", use_container_width=True):
-                    st.session_state[confirm_key] = True
-                    st.rerun()
-            else:
+            # A popover opens immediately on the same click; the old two-step
+            # app rerun made the confirmation appear unresponsive on mobile.
+            with st.popover(f"Re-route selected ({len(selected_routes)})",
+                            disabled=not selected_routes, use_container_width=True):
                 st.warning(f"Re-route {len(selected_routes)} selected {status.lower()} routes? "
                            "This removes them from their current contractors.")
-                yes_col, no_col = st.columns(2)
+                yes_col = st.container()
                 with yes_col:
                     if st.button("Confirm re-route", key=f"revamp_reroute_yes_{status}",
                                  type="primary", use_container_width=True):
@@ -3322,7 +3317,6 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                 st.session_state[key] = False
                             except Exception as exc:
                                 failed.append(f"{name}: {exc}")
-                        st.session_state[confirm_key] = False
                         st.session_state["_revamp_notice"] = (
                             "warning" if failed else "success",
                             f"Re-route started for {len(started)} route(s); "
@@ -3331,11 +3325,6 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                 " Failures: " + "; ".join(failed[:5]) if failed else ""
                             ),
                         )
-                        st.rerun()
-                with no_col:
-                    if st.button("Cancel", key=f"revamp_reroute_no_{status}",
-                                 use_container_width=True):
-                        st.session_state[confirm_key] = False
                         st.rerun()
 
     left, right = st.columns([1.75, 3.25], gap="large")
