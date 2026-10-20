@@ -2055,24 +2055,42 @@ def _render_dispatch_bot(matching, all_routes, helpers, haversine, sent_db, db_e
 
     # ── Declined routes: line up the next IC (Nick, Oct 15 2026) ──
     pending_old = set((st.session_state.get("_bot_decline_followups") or {}).keys())
-    declined = [e for e in all_routes if e[2] == "Declined" and e[1].get("data")
-                and e[0] not in ("Global_Digital", "Digital")
-                and _display_contractor_name(e[1], "Declined").lower() != "field nation"
-                and f"{e[0]}:{e[3]}" not in pending_old]
-    if declined and callable(move_to_dispatch):
+    declined_visible = [
+        e for e in matching
+        if e[2] == "Declined"
+        and e[0] not in ("Global_Digital", "Digital")
+        and _display_contractor_name(e[1], "Declined").lower() != "field nation"
+        and f"{e[0]}:{e[3]}" not in pending_old
+    ]
+    # Persisted Declined cards may no longer have live OnFleet task objects.
+    # Keep the bot visible, but never silently plan a route with no task data
+    # or geographic center: that could choose an unrelated contractor.
+    declined = [e for e in declined_visible
+                if e[1].get("data") and _route_center(e[1]) is not None]
+    if status == "Declined" and callable(move_to_dispatch):
         with st.container(key="revamp_bot_declines", border=True):
             msg_col, btn_col = st.columns([4.4, 2], vertical_alignment="center")
             with msg_col:
-                st.markdown(f"**🔁 {len(declined)} declined route(s).** The bot lines each one up for the "
-                            "next closest IC who hasn't declined it (Routes: 40 mi, CVS Removals: 30 mi). "
-                            "If nobody is left, it goes to Field Nation.")
+                st.markdown(
+                    f"**🔁 Declined dispatch bot — {len(declined_visible)} route(s)** "
+                    f"({len(declined)} ready to re-offer). "
+                    "Find the next closest IC who has not declined "
+                    "(Routes: 40 mi; CVS Removals: 30 mi), otherwise Field Nation."
+                )
             with btn_col:
                 if st.button("🤖 Line up next IC", key="bot_reoffer", type="primary",
-                             use_container_width=True):
+                             disabled=not declined, use_container_width=True):
                     with st.spinner("Finding the next IC for declined routes…"):
                         _run_dispatch_bot(declined, helpers, haversine, sent_db,
                                           mode="reoffer", db_engine=db_engine)
                         st.session_state["_dispatch_bot_plan_pod"] = "Declined"
+            missing = len(declined_visible) - len(declined)
+            if missing:
+                st.warning(
+                    f"{missing} declined route(s) are saved without usable live task "
+                    "details or route coordinates. The bot will not guess their "
+                    "nearest contractor; refresh OnFleet route data first."
+                )
 
     # ── Run / review ──
     # Nick: the bot runs on ONE pod at a time, and only from the Routes tab
