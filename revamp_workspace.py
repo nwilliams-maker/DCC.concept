@@ -41,6 +41,18 @@ def _pod_build_jobs():
             "executor": ThreadPoolExecutor(max_workers=2, thread_name_prefix="pod-build")}
 
 
+@st.fragment(run_every="5s")
+def _watch_background_pod_build(pod, future):
+    """Auto-resume a timed-out pod load when the shared build completes."""
+    if not future.done():
+        st.caption(f"Preparing {pod} routes in the background…")
+        return
+    # Process the now-warm pod on the next full run, rather than requiring
+    # the user to refresh the Routes tab and possibly restart task downloads.
+    st.session_state[f"_revamp_load_attempted_{pod}"] = False
+    st.rerun(scope="app")
+
+
 def _background_pod_build(pod, process_pod, cluster_store, refresh=False):
     jobs = _pod_build_jobs()
     with jobs["lock"]:
@@ -2734,8 +2746,12 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                                     indicator.progress(display[0], text=display[1])
                                     last_display = display
                                 if time.monotonic() - started > 40:
-                                    st.session_state[f"_revamp_load_attempted_{pod}"] = False
-                                    st.info("Route building is still running in the background. The page is no longer blocked; click the Routes refresh icon after a moment to display the results.")
+                                    # Do not restart the work every 40 seconds. Keep
+                                    # this session waiting on the existing future;
+                                    # a lightweight fragment automatically resumes
+                                    # full rendering when that future completes.
+                                    st.session_state[f"_revamp_load_attempted_{pod}"] = True
+                                    _watch_background_pod_build(pod, future)
                                     return
                     except Exception as exc:
                         print(f"[revamp/sync] background build failed for {pod}: {type(exc).__name__}: {exc}", flush=True)
