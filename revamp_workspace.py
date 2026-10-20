@@ -1418,7 +1418,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     elif status == "Field Nation" and not route.get("_fn_assigned_history"):
                         st.checkbox("Select for Field Nation CSV", key=f"revamp_fn_{key}",
                                     label_visibility="collapsed", on_change=_refresh_bulk_actions)
-                    elif status in ("Sent", "Accepted", "Declined") and state == status:
+                    elif (status in ("Sent", "Declined") or (status == "Accepted" and str((st.session_state.get("_auth_user") or {}).get("tier") or "").lower() == "admin")) and state == status:
                         # Persist selection outside widget state: collapsed date
                         # groups do not render their route checkboxes, and Streamlit
                         # deletes unrendered widget keys on subsequent reruns.
@@ -2948,7 +2948,8 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             {"Pending": 0, "Posted": 1, "Assigned": 2}[_fn_entry_stage(entry, fn_posted, fn_providers)] if status == "Field Nation" else 0,
             str(entry[1].get("city") or "").lower(), entry[0]))
     # Saved-route selections belong to the left-hand route cards, as in Field Nation.
-    reroute_status = status in ("Sent", "Accepted", "Declined")
+    accepted_admin = str((st.session_state.get("_auth_user") or {}).get("tier") or "").lower() == "admin"
+    reroute_status = status in ("Sent", "Declined") or (status == "Accepted" and accepted_admin)
     reroute_entries = [entry for entry in matching if entry[2] == status] if reroute_status else []
     reroute_keys = [f"_reroute_chosen_{_route_entry_key(*entry[:4])}" for entry in reroute_entries]
     if reroute_status:
@@ -3293,7 +3294,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     # Bulk re-route uses the same underlying handler as the individual detail
     # pane action; the confirmation is for the entire batch, not per route.
-    if status in ("Sent", "Accepted", "Declined") and move_to_dispatch:
+    if (status in ("Sent", "Declined") or (status == "Accepted" and str(auth_user.get("tier") or "").lower() == "admin")) and move_to_dispatch:
         selected_routes = [entry for entry in matching if entry[2] == status
                            and st.session_state.get(
                                f"_reroute_chosen_{_route_entry_key(*entry[:4])}", False)]
@@ -3343,7 +3344,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
 
     # Admin bulk finalize: use the same durable selection as Select all,
     # intentionally bypassing only the per-route checklist UI.
-    if status == "Accepted" and str(auth_user.get("role") or "").strip().lower() == "admin":
+    if status == "Accepted" and str(auth_user.get("tier") or "").lower() == "admin":
         accepted_selected = [
             entry for entry in matching
             if entry[2] == "Accepted" and st.session_state.get(
