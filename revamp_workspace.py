@@ -1363,10 +1363,43 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
             group_key = f"_revamp_group_{status}_{stage}_{safe_group}"
             st.session_state.setdefault(group_key, group_index == 0)
             is_open = st.session_state[group_key]
-            st.button(f"{group_label}  ·  {len(entries)} {'route' if len(entries) == 1 else 'routes'}  {'−' if is_open else '+'}",
-                      key=f"revamp_group_toggle_{status}_{stage}_{safe_group}",
-                      on_click=_toggle_state_group, args=(group_key,),
-                      use_container_width=True)
+            if status == "Sent":
+                # Date-header checkbox selects this day only, including collapsed routes.
+                day_keys = [
+                    f"revamp_reroute_{_route_entry_key(*entry[:4])}"
+                    for entry in entries if entry[2] == "Sent"
+                ]
+                date_check_key = f"revamp_sent_day_select_{safe_group}"
+                all_day_selected = bool(day_keys) and all(
+                    st.session_state.get(k, False) for k in day_keys
+                )
+                st.session_state[date_check_key] = all_day_selected
+
+                def _toggle_sent_day(keys=tuple(day_keys), checkbox_key=date_check_key):
+                    checked = bool(st.session_state.get(checkbox_key))
+                    for route_key in keys:
+                        st.session_state[route_key] = checked
+                    _refresh_bulk_actions()
+
+                day_checkbox_col, day_label_col = st.columns(
+                    [.09, .91], gap="small", vertical_alignment="center"
+                )
+                with day_checkbox_col:
+                    st.checkbox(f"Select all Sent routes for {group_label}",
+                                key=date_check_key, label_visibility="collapsed",
+                                on_change=_toggle_sent_day)
+                with day_label_col:
+                    st.button(
+                        f"{group_label}  ·  {len(entries)} {'route' if len(entries) == 1 else 'routes'}  {'−' if is_open else '+'}",
+                        key=f"revamp_group_toggle_{status}_{stage}_{safe_group}",
+                        on_click=_toggle_state_group, args=(group_key,),
+                        use_container_width=True,
+                    )
+            else:
+                st.button(f"{group_label}  ·  {len(entries)} {'route' if len(entries) == 1 else 'routes'}  {'−' if is_open else '+'}",
+                          key=f"revamp_group_toggle_{status}_{stage}_{safe_group}",
+                          on_click=_toggle_state_group, args=(group_key,),
+                          use_container_width=True)
             if not is_open:
                 continue
             for pod, route, state, route_hash, nearest in entries:
