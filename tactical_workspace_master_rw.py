@@ -128,6 +128,29 @@ if DATABASE_URL:
         DB_ENGINE = None
 
 
+def _clean_contractor_display_names(df):
+    """Display contractor names without parenthetical roster notes.
+
+    Keep identifiers, contacts, and stored source records unchanged.
+    """
+    if df is None or 'name' not in df.columns:
+        return df
+    df = df.copy()
+    def clean(value):
+        if not isinstance(value, str):
+            return value
+        name = value
+        # Repeated substitution also handles nested annotations.
+        for _ in range(12):
+            updated = re.sub(r'\\([^()]*\\)', '', name)
+            if updated == name:
+                break
+            name = updated
+        return re.sub(r'\\s+', ' ', name).strip(' -–—,; ')
+    df['name'] = df['name'].map(clean)
+    return df
+
+
 def _ic_df_from_db(engine):
     """Adapts data_access.get_contractors()'s SQL-shaped DataFrame to the
     exact legacy column names/casing the rest of this app expects from the
@@ -139,6 +162,7 @@ def _ic_df_from_db(engine):
     comes through as text (no pandas ".0" float artifact to strip, unlike the
     CSV path)."""
     df = _da.get_contractors(engine)
+    df = _clean_contractor_display_names(df)
     # Administrative roster exclusions: retain historical DB rows and route records.
     if 'name' in df.columns:
         excluded_names = {'pete valenzuela', 'jodi thurman'}
@@ -4249,7 +4273,7 @@ def _warm_load_ic_df():
         _url = f"{IC_SHEET_URL.split('/edit')[0]}/export?format=csv&gid=0"
         _df = pd.read_csv(_url)
         _df.columns = [str(_c).strip().lower() for _c in _df.columns]
-        return _df
+        return _clean_contractor_display_names(_df)
     except Exception as _e:
         _log_err("warm_load_ic_df", _e)
         return pd.DataFrame()
@@ -11078,6 +11102,7 @@ if "ic_df" not in st.session_state:
             df = pd.read_csv(url)
             # 🌟 BULLETPROOF: Lowercase all headers the second the data is downloaded
             df.columns = [str(c).strip().lower() for c in df.columns]
+            df = _clean_contractor_display_names(df)
         st.session_state.ic_df = df
     except: st.error("Database connection failed.")
 
