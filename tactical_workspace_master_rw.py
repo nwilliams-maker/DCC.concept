@@ -142,11 +142,11 @@ def _clean_contractor_display_names(df):
         name = value
         # Repeated substitution also handles nested annotations.
         for _ in range(12):
-            updated = re.sub(r'\\([^()]*\\)', '', name)
+            updated = re.sub(r'\([^()]*\)', '', name)
             if updated == name:
                 break
             name = updated
-        return re.sub(r'\\s+', ' ', name).strip(' -–—,; ')
+        return re.sub(r'\s+', ' ', name).strip(' -–—,; ')
     df['name'] = df['name'].map(clean)
     return df
 
