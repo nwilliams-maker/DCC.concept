@@ -6451,7 +6451,7 @@ def render_dispatch(i, cluster, pod_name, is_sent=False, is_declined=False):
             if ic['d'] > 60: reasons.append(f"Distance ({round(ic['d'],1)}mi)")
             if cluster['status'] == 'Flagged': reasons.append("Flagged Route")
             st.markdown(f"""<div style="background:#fef2f2; border:1px solid #ef4444; padding:8px 10px; border-radius:8px; margin:6px 0;"><span style="color:#b91c1c; font-weight:800; font-size:11px;">🔒 ACTION REQUIRED:</span> <span style="color:#7f1d1d; font-size:11px;">{" & ".join(reasons)}</span></div>""", unsafe_allow_html=True)
-            is_unlocked = st.checkbox("Authorize Premium Rate / Distance", key=f"lock_{pod_name}_{cluster_hash}")
+            # Informational warning only; no authorization checkbox required.
 
         # ── INPUTS ──────────────────────────────────────────────────────
         if is_fa:
