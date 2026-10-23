@@ -405,44 +405,60 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
         return False
     excluded_team_ids = [t['id'] for t in teams_res if _is_excluded_team_name(t.get('name', ''))]
 
-    # 🌐 Field Nation placeholder worker — looked up by phone (last 10 digits).
-    # Tasks PUT with this worker_id flip from state=0 to state=1, dropping out
-    # of the unassigned pool. Created in Onfleet by Nick on 2026-04-30.
-    FN_WORKER_PHONE = "6302869764"
+    # Resolve the dedicated Field Nation worker by a stable ID (if configured)
+    # or an unambiguous worker name. The former phone-only lookup used an
+    # obsolete phone number and silently stopped after ten pages.
+    _fn_configured_id = str(os.environ.get("FN_ONFLEET_WORKER_ID", "") or "").strip()
+    _fn_expected_names = {"field nation", "field nation driver", "field nation worker"}
     fn_worker_id = None
-    _fn_worker_lookup_failed = False  # security audit M9
+    _fn_worker_lookup_failed = False
+    _fn_matches = set()
+    _fn_configured_found = False
     _w_lastid = None
     _w_seen = set()
-    for _wp in range(10):
+    _w_completed = False
+    for _wp in range(100):
         _wurl = "https://onfleet.com/api/v2/workers" + (f"?lastId={_w_lastid}" if _w_lastid else "")
         try:
             _wresp = requests.get(_wurl, headers=headers, timeout=10)
             if _wresp.status_code != 200:
-                # Security audit M9 - a non-200 here means the FN worker
-                # lookup is incomplete; flag it so the None worker is not
-                # silently propagated (FN tasks would stay in state=0).
                 _fn_worker_lookup_failed = True
                 break
             _wdata = _wresp.json()
-            _wlist = _wdata if isinstance(_wdata, list) else _wdata.get('workers', [])
+            _wlist = _wdata if isinstance(_wdata, list) else _wdata.get("workers", [])
             if not _wlist:
+                _w_completed = True
                 break
             _new_count = 0
             for _w in _wlist:
-                _wid = _w.get('id')
+                _wid = str(_w.get("id") or "")
                 if not _wid or _wid in _w_seen:
                     continue
                 _w_seen.add(_wid)
                 _new_count += 1
-                _wphone_digits = ''.join(c for c in str(_w.get('phone', '') or '') if c.isdigit())[-10:]
-                if _wphone_digits == FN_WORKER_PHONE:
-                    fn_worker_id = _wid
-                    break
-            if fn_worker_id or _new_count == 0:
+                _name = " ".join(str(_w.get("name") or "").strip().lower().split())
+                if _wid == _fn_configured_id:
+                    _fn_configured_found = True
+                if _name in _fn_expected_names:
+                    _fn_matches.add(_wid)
+            _next_id = _wlist[-1].get("id")
+            if not _new_count or not _next_id or _next_id == _w_lastid:
+                _w_completed = True
                 break
-            _w_lastid = _wlist[-1].get('id')
-        except Exception:
+            _w_lastid = _next_id
+        except Exception as _fn_lookup_error:
+            _log_err("fn_worker_lookup", _fn_lookup_error)
+            _fn_worker_lookup_failed = True
             break
+    if not _fn_worker_lookup_failed and _w_completed:
+        if _fn_configured_id:
+            if _fn_configured_found:
+                fn_worker_id = _fn_configured_id
+        elif len(_fn_matches) == 1:
+            fn_worker_id = next(iter(_fn_matches))
+    if not fn_worker_id:
+        _fn_worker_lookup_failed = True
+        _log_err("fn_worker_lookup", f"Unable to uniquely resolve FN worker: matches={len(_fn_matches)}, configured_id_valid={_fn_configured_found}, scanned={len(_w_seen)}, complete={_w_completed}")
 
     # Fetch the full active OnFleet backlog, not just recent creations.
     #
