@@ -5154,16 +5154,10 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                 
                     # Flag Criteria A: original calculated rate of $25+/stop.
                     if gate_avg >= HIGH_RATE_FLAG_THRESHOLD:
-                        if len(group) > 1:
-                            removed = group.pop()
-                            new_avg, _ = check_viability(group)
-                            if new_avg < HIGH_RATE_FLAG_THRESHOLD:
-                                rem.append(removed)
-                            else:
-                                group.append(removed)
-                                status = "Flagged"
-                        else:
-                            status = "Flagged"
+                        # Keep geographically eligible nearby tasks together.
+                        # High estimated pay flags the whole route for review;
+                        # never eject an individual task and create a second route.
+                        status = "Flagged"
                 
                     # Flag Criteria B: Long Distance (> 60 miles) or No Contractor
                     if not has_ic or ic_dist > 60:
