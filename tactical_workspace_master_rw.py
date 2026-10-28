@@ -5019,7 +5019,15 @@ def process_pod(pod_name, master_bar=None, pod_idx=0, total_pods=1, warm_only=Fa
                     t_wo = fresh_sent_db[t['id']].get('wo', 'none')
                     if _returned_from_fn_to_org(t, fresh_sent_db[t['id']]):
                         t_status, t_wo = 'ready', 'none'
-            
+
+                # Finalized history belongs to its exact OnFleet task ID, never
+                # to the venue/address. Exclude historical finalized IDs from
+                # NEW route clustering so they cannot pull a mixed cluster into
+                # Finalized or suppress fresh task IDs at the same kiosk.
+                # Existing finalized routes remain available through DB/ghost history.
+                if t_status == 'finalized':
+                    continue
+
                 if stt not in config['states']:
                     _skipped_out_of_pod_states += 1
                     continue
