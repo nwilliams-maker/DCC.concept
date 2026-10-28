@@ -8338,7 +8338,7 @@ def make_venue_details(data):
         )
     return "".join(rows)
 
-def make_venue_details_ghost(locs_list, stop_data=None):
+def make_venue_details_ghost(locs_list, stop_data=None, completed_task_ids=None):
     """Expandable accordion rows for ghost routes. Uses rich stop_data if available.
 
     May 16 2026 — upgraded to mirror make_venue_details' per-stop header pills
@@ -8462,14 +8462,19 @@ def make_venue_details_ghost(locs_list, stop_data=None):
         if saved_tasks:
             task_details = []
             for task_idx, task in enumerate(saved_tasks, 1):
+                # Dim completed task rows without altering the saved work order.
+                _task_id = str(task.get('taskId') or '').strip()
+                _done = bool(_task_id and _task_id in (completed_task_ids or set()))
+                _task_style = ("opacity:0.4;filter:grayscale(1);" if _done else "")
+                _done_badge = (" · ✓ Completed" if _done else "")
                 # Use this task's own kiosk location, not a location from a
                 # different kiosk at the same venue. Stop-level fallback is
                 # safe only when the saved stop contains a single task.
                 kiosk_location = (str(task.get('locationInVenue') or task.get('location_in_venue') or '').strip()
                                   or (str(sd.get('locationInVenue') or '').strip() if len(saved_tasks) == 1 else ''))
                 task_details.append(
-                    f"<div style='padding:3px 4px;font-size:11px;color:#344054;'>"
-                    f"Task {task_idx} · {esc(str(task.get('taskType') or 'Task'))}"
+                    f"<div style='padding:3px 4px;font-size:11px;color:#344054;{_task_style}'>"
+                    f"Task {task_idx} · {esc(str(task.get('taskType') or 'Task'))}{_done_badge}"
                     f" · Venue ID: {esc(str(task.get('venueId') or '').strip() or '—')}"
                     f" · Kiosk ID: {esc(str(task.get('kioskId') or '').strip() or '—')}"
                     f" · Kiosk Location: {esc(kiosk_location or '—')}"
