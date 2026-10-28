@@ -1352,6 +1352,15 @@ def _refresh_fn_route_list(matching, posted, providers, context):
 def _render_route_list(matching, status, fn_posted, fn_providers,
                        quiet_context=None, fn_refresh_context=None):
     """State toggles rerun only this list; route clicks refresh the detail pane."""
+    # Fully completed cards remain selectable, but are visibly subdued.
+    st.markdown(
+        '<style>div[class*="st-key-revamp_route_Completed_"] button{'
+        'opacity:.46!important;filter:grayscale(1)!important;'
+        'background:#f1f3f5!important;border-color:#d5d9df!important;'
+        'color:#667085!important;}'
+        'div[class*="st-key-revamp_route_Completed_"] button:hover{opacity:.72!important;}'
+        '</style>', unsafe_allow_html=True,
+    )
     busy = False
     if quiet_context:
         pods, process_pod, process_digital_pool, cluster_store, fetch_open_tasks, eligible_ics, haversine, search = quiet_context[:8]
