@@ -504,7 +504,7 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
         seen_last_ids = set()
         retry_429 = 0
         page = 0
-        max_pages = 100
+        max_pages = 300
 
         while url and page < max_pages:
             page += 1
@@ -538,14 +538,22 @@ def _fetch_onfleet_open_tasks_cached(_progress_callback=None):
                     _progress_callback(_progress_tasks, _progress_pages)
             next_id = res_json.get("lastId") if isinstance(res_json, dict) else None
             if next_id and next_id in seen_last_ids:
-                break
+                raise RuntimeError(
+                    f"Onfleet pagination repeated its cursor in window {window_idx + 1}; "
+                    "refusing to display an incomplete task list"
+                )
             if next_id:
                 seen_last_ids.add(next_id)
                 url = base + f"&lastId={next_id}"
             else:
                 url = None
 
-        return window_tasks, page, page >= max_pages
+        if url and page >= max_pages:
+            raise RuntimeError(
+                f"Onfleet pagination exceeded {max_pages} pages in window {window_idx + 1}; "
+                "refusing to cache an incomplete task list"
+            )
+        return window_tasks, page, False
 
     all_tasks_raw = []
     _page = 0
