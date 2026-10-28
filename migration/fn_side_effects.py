@@ -108,7 +108,7 @@ def onfleet_fetch_with_backoff(method: str, url: str, *, json_body: Any = None, 
     cap, same as GAS. Network-level exceptions get the same backoff treatment
     and re-raise on the final attempt."""
     headers = _onfleet_auth_header()
-    delay = 0.25
+    delay = 0.5
     resp: requests.Response | None = None
     for attempt in range(max_retries + 1):
         try:
@@ -117,7 +117,7 @@ def onfleet_fetch_with_backoff(method: str, url: str, *, json_body: Any = None, 
             if attempt == max_retries:
                 raise
             time.sleep(delay)
-            delay = min(delay * 2, 4.0)
+            delay = min(delay * 2, 8.0)
             continue
 
         code = resp.status_code
@@ -133,7 +133,7 @@ def onfleet_fetch_with_backoff(method: str, url: str, *, json_body: Any = None, 
         if attempt == max_retries:
             return resp
         time.sleep(delay)
-        delay = min(delay * 2, 4.0)
+        delay = min(delay * 2, 8.0)
     return resp  # pragma: no cover -- loop always returns/raises above
 
 
@@ -150,7 +150,7 @@ except ImportError:
 
 def assert_tasks_available(ids, *, wo="", worker_id=None, allow_existing=False):
     def fetch(tid):
-        response = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}", max_retries=2)
+        response = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}", max_retries=6)
         if response.status_code != 200:
             raise RuntimeError(f"OnFleet HTTP {response.status_code}")
         return response.json()
