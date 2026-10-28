@@ -23,7 +23,7 @@ import streamlit as st
 from task_addresses import address_with_zip
 
 
-STATUSES = ("All", "Routes", "CVS Removal", "Field Nation", "Sent", "Accepted", "Declined", "Finalized")
+STATUSES = ("All", "Routes", "CVS Removal", "Field Nation", "Sent", "Accepted", "Declined", "Finalized", "Completed")
 PODS = ("Blue", "Green", "Orange", "Purple", "Red", "Digital")
 HIGH_RATE_FLAG_THRESHOLD = 25.00  # Matches the dispatch card's $24.99 cutoff.
 
@@ -230,7 +230,7 @@ def _route_entry_key(pod, route, state, route_hash):
         return f"{pod}:fn-assigned:" + hashlib.sha256(original_wo.encode()).hexdigest()[:16]
     # Different saved work orders can share task IDs/hash after a resend.
     # Keep their historical cards separate while actions use the real hash.
-    if state in ("Sent", "Accepted", "Declined", "Finalized"):
+    if state in ("Sent", "Accepted", "Declined", "Finalized", "Completed"):
         wo = str(_saved_route_fields(route)["wo"] or "").strip()
         if wo:
             # A saved order's identity is its WO, not the current live
@@ -435,6 +435,22 @@ def _onfleet_saved_task_states(task_ids):
         return dict(pool.map(check, task_ids))
 
 
+def _fully_completed_saved_route(route, state):
+    """Only saved, assigned work orders can enter Completed.
+    No task is inferred complete from Finalized or from an API failure.
+    """
+    if state not in ("Accepted", "Finalized"):
+        return False
+    ghost = route.get("_ghost_record") or {}
+    ids = tuple(dict.fromkeys(str(t).strip() for t in
+        (ghost.get("task_ids") or [t.get("id") for t in route.get("data") or []])
+        if str(t or "").strip()))
+    if not ids:
+        return False
+    states = _onfleet_saved_task_states(ids)
+    return len(states) == len(ids) and all(states.get(tid) == 3 for tid in ids)
+
+
 def _render_saved_route_card(route, state, route_hash, pod, ghost,
                              make_venue_details, make_venue_details_ghost,
                              venue_section, render_finalization_checklist,
@@ -461,6 +477,8 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
             f"{_remaining} remaining · {len(_saved_ids)} total"
             + (f" · {_unknown} status unavailable" if _unknown else "")
         )
+    if state == "Completed":
+        st.caption("✓ All tasks completed in OnFleet — work order retained as read-only history.")
     if is_ghost:
         raw_locs = [part.strip() for part in str(ghost.get("locs") or "").split("|") if part.strip()]
         locs = raw_locs[1:-1] if len(raw_locs) >= 3 else raw_locs
@@ -514,7 +532,7 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
             st.link_button("Order Kiosks on Shopify",
                            "https://admin.shopify.com/store/terraboost/draft_orders/new",
                            use_container_width=True)
-    if is_dispatch_associate():
+    if is_dispatch_associate() or state == "Completed":
         return
     with st.popover("Re-route" if state == "Sent" else "Remove route"):
         st.write(f"Remove this route from {fields['contractor']}?")
@@ -1502,7 +1520,7 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                              or len(_ghost.get("task_ids") or [])
                              or int(_ghost.get("tasks") or _ghost.get("tCnt") or 0))
                     state_icon = {
-                        "Ready": "●", "Flagged": "!", "Field Nation": "FN",
+                        "Completed": "✓", "Ready": "●", "Flagged": "!", "Field Nation": "FN",
                         "Sent": "→", "Accepted": "✓", "Declined": "×", "Finalized": "✓", "Routed": "◆"
                     }.get(card_state, "•")
                     status_text = f"{state_icon} {card_state}"
@@ -1511,6 +1529,8 @@ def _render_route_list(matching, status, fn_posted, fn_providers,
                     if removal:
                         status_text += " · CVS Removal"
                     heading = _route_list_heading(route, state, route_hash)
+                    if state == "Completed":
+                        heading = "✓ Completed · " + (heading or str(_ghost.get("wo") or city))
                     if heading and removal:
                         heading += " · CVS Removal"
                     if heading is None:
@@ -2961,6 +2981,16 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
     # Streamlit widget keys) coincide; keep one route before counts, selection,
     # bulk actions, and the visible list are derived.
     all_routes = _dedupe_route_entries(all_routes)
+    # Visual-only workflow: completed OnFleet tasks keep their original WO
+    # and saved status in Postgres. Once every task is state=3, move the
+    # display card to Completed; never equate manual Finalized with completion.
+    if not fn_only:
+        all_routes = [
+            (pod, {**route, "_completion_source_status": state}, "Completed", route_hash, nearest)
+            if _fully_completed_saved_route(route, state)
+            else (pod, route, state, route_hash, nearest)
+            for pod, route, state, route_hash, nearest in all_routes
+        ]
     all_routes = [(pod, {**route, '_bundle_label': _bundle_label(route, _bundle_sets_for_pod(pod))}, state, route_hash, nearest)
                   for pod, route, state, route_hash, nearest in all_routes]
     if fn_only:
@@ -3025,7 +3055,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
               f"search_active={bool(search)}", flush=True)
     fn_posted = (ghost_db or {}).get("_fn_posted", {}) or {}
     fn_providers = (ghost_db or {}).get("_fn_provider", {}) or {}
-    if status in ("Sent", "Accepted", "Declined", "Finalized"):
+    if status in ("Sent", "Accepted", "Declined", "Finalized", "Completed"):
         matching.sort(
             key=lambda entry: (
                 _saved_status_sort_key(entry[1]),
@@ -3514,7 +3544,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
             return
         pod, route, state, route_hash, nearest = current
         title = f"{route.get('city', 'Route')}, {route.get('state', '')}"
-        saved_fields = _saved_route_fields(route) if state in ("Sent", "Accepted", "Declined", "Finalized") else None
+        saved_fields = _saved_route_fields(route) if state in ("Sent", "Accepted", "Declined", "Finalized", "Completed") else None
         if saved_fields:
             _display_name = _display_contractor_name(route, state)
             _status_time = _route_status_timestamp(route, state)
@@ -3709,7 +3739,7 @@ def render_workspace(can_access_tab, process_pod, render_dispatch,
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Could not assign Field Nation rep: {exc}")
-        elif state in ("Sent", "Accepted", "Declined", "Finalized"):
+        elif state in ("Sent", "Accepted", "Declined", "Finalized", "Completed"):
             if not saved_route_helpers:
                 st.error("Saved route details are unavailable. Refresh the page.")
             else:
