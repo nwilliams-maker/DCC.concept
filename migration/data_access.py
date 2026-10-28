@@ -316,7 +316,7 @@ def process_decision(
             stop_data = []
         for tid in raw_ids:
             try:
-                response = _fx.onfleet_fetch_with_backoff("get", f"{_fx.ONFLEET_BASE}/tasks/{tid}", max_retries=2)
+                response = _fx.onfleet_fetch_with_backoff("get", f"{_fx.ONFLEET_BASE}/tasks/{tid}", max_retries=6)
                 if response.status_code == 404:
                     matching = next((stop for stop in stop_data if isinstance(stop, dict) and
                                      str(stop.get("taskId") or stop.get("task_id") or stop.get("id") or "") == tid), {})
