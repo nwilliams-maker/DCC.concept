@@ -476,7 +476,7 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
     else:
         # Saved live-route cards retain all historical task rows as well.
         # The progress count above reflects their current OnFleet state.
-        venues = make_venue_details(route.get("data") or [])
+        venues = make_venue_details(route.get("data") or [], completed_task_ids=_done_ids)
     venues_html = venue_section(venues) if venues else ""
     esc = lambda value: html.escape(str(value))
     st.markdown(f"""<div class="revamp-route-summary">
