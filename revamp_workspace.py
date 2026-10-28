@@ -410,6 +410,31 @@ def _outlook_route_url(route_hash, fields, ic_df=None, portal_base_url=None):
     })
 
 
+@st.cache_data(ttl=75, show_spinner=False)
+def _onfleet_saved_task_states(task_ids):
+    """Read selected saved WO tasks; never alter OnFleet or saved route history.
+    Unknown statuses stay unknown rather than being counted as remaining.
+    """
+    key = (os.environ.get("ONFLEET_KEY") or "").strip()
+    if not key or not task_ids:
+        return {}
+    headers = {"Authorization": "Basic " + base64.b64encode(f"{key}:".encode()).decode()}
+    def check(tid):
+        try:
+            response = requests.get(f"https://onfleet.com/api/v2/tasks/{tid}",
+                                    headers=headers, timeout=6)
+            if response.status_code == 200:
+                task = response.json()
+                state = task.get("state")
+                if state in (0, 1, 2, 3):
+                    return tid, state
+        except requests.RequestException:
+            pass
+        return tid, None
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        return dict(pool.map(check, task_ids))
+
+
 def _render_saved_route_card(route, state, route_hash, pod, ghost,
                              make_venue_details, make_venue_details_ghost,
                              venue_section, render_finalization_checklist,
@@ -419,6 +444,23 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
     fields["contractor"] = _display_contractor_name(route, state)
     ghost = fields["ghost"]
     is_ghost = bool(route.get("_is_ghost"))
+    # Exact OnFleet task IDs drive progress, never saved WO/venue membership.
+    # Retain every row in history; only dim the ones OnFleet marks state=3.
+    _saved_ids = tuple(dict.fromkeys(
+        str(tid).strip() for tid in
+        (ghost.get("task_ids") or [t.get("id") for t in route.get("data") or []])
+        if str(tid or "").strip()
+    ))
+    _task_states = _onfleet_saved_task_states(_saved_ids)
+    _done_ids = {tid for tid, value in _task_states.items() if value == 3}
+    _remaining = sum(value in (0, 1, 2) for value in _task_states.values())
+    _unknown = len(_saved_ids) - len([v for v in _task_states.values() if v is not None])
+    if _saved_ids:
+        st.caption(
+            f"OnFleet task progress: {len(_done_ids)} completed · "
+            f"{_remaining} remaining · {len(_saved_ids)} total"
+            + (f" · {_unknown} status unavailable" if _unknown else "")
+        )
     if is_ghost:
         raw_locs = [part.strip() for part in str(ghost.get("locs") or "").split("|") if part.strip()]
         locs = raw_locs[1:-1] if len(raw_locs) >= 3 else raw_locs
@@ -427,8 +469,13 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
             locs = list(dict.fromkeys(str(stop.get("addr") or "").strip()
                                       for stop in (ghost.get("stop_data") or [])
                                       if stop.get("addr")))
-        venues = make_venue_details_ghost(locs, stop_data=ghost.get("stop_data") or []) if locs else ""
+        venues = make_venue_details_ghost(
+            locs, stop_data=ghost.get("stop_data") or [],
+            completed_task_ids=_done_ids,
+        ) if locs else ""
     else:
+        # Saved live-route cards retain all historical task rows as well.
+        # The progress count above reflects their current OnFleet state.
         venues = make_venue_details(route.get("data") or [])
     venues_html = venue_section(venues) if venues else ""
     esc = lambda value: html.escape(str(value))
