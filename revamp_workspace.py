@@ -423,6 +423,8 @@ def _onfleet_saved_task_states(task_ids):
         try:
             response = requests.get(f"https://onfleet.com/api/v2/tasks/{tid}",
                                     headers=headers, timeout=6)
+            if response.status_code in (404, 410):
+                return tid, "removed"
             if response.status_code == 200:
                 task = response.json()
                 state = task.get("state")
@@ -475,7 +477,7 @@ def _background_completed_wo_ids(all_routes):
                 # This is executed in a background thread, never during rendering.
                 states = _onfleet_saved_task_states(ids)
                 return {(pod, wo) for pod, wo, group in items
-                        if all(states.get(tid) == 3 for tid in group)}
+                        if all(states.get(tid) in (3, "removed") for tid in group)}
             store["signature"] = signature
             store["future"] = store["pool"].submit(scan, list(jobs))
         return set(store["results"])
@@ -499,16 +501,17 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
     ))
     _task_states = _onfleet_saved_task_states(_saved_ids)
     _done_ids = {tid for tid, value in _task_states.items() if value == 3}
+    _removed_ids = {tid for tid, value in _task_states.items() if value == "removed"}
     _remaining = sum(value in (0, 1, 2) for value in _task_states.values())
     _unknown = len(_saved_ids) - len([v for v in _task_states.values() if v is not None])
     if _saved_ids:
         st.caption(
             f"OnFleet task progress: {len(_done_ids)} completed · "
-            f"{_remaining} remaining · {len(_saved_ids)} total"
+            f"{len(_removed_ids)} removed · {_remaining} remaining · {len(_saved_ids)} total"
             + (f" · {_unknown} status unavailable" if _unknown else "")
         )
     if state == "Completed":
-        st.success("✅ All tasks completed in OnFleet. Original work order retained.")
+        st.success("✅ All tasks resolved in OnFleet (completed or removed). Original work order retained.")
     if is_ghost:
         raw_locs = [part.strip() for part in str(ghost.get("locs") or "").split("|") if part.strip()]
         locs = raw_locs[1:-1] if len(raw_locs) >= 3 else raw_locs
@@ -519,12 +522,12 @@ def _render_saved_route_card(route, state, route_hash, pod, ghost,
                                       if stop.get("addr")))
         venues = make_venue_details_ghost(
             locs, stop_data=ghost.get("stop_data") or [],
-            completed_task_ids=_done_ids,
+            completed_task_ids=_done_ids, removed_task_ids=_removed_ids,
         ) if locs else ""
     else:
         # Saved live-route cards retain all historical task rows as well.
         # The progress count above reflects their current OnFleet state.
-        venues = make_venue_details(route.get("data") or [], completed_task_ids=_done_ids)
+        venues = make_venue_details(route.get("data") or [], completed_task_ids=_done_ids, removed_task_ids=_removed_ids)
     venues_html = venue_section(venues) if venues else ""
     esc = lambda value: html.escape(str(value))
     st.markdown(f"""<div class="revamp-route-summary">
