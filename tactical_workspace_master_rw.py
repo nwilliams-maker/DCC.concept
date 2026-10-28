@@ -8151,7 +8151,7 @@ def smart_sync_pod(pod_name):
         st.toast(f"✅ {pod_name} Pod already in sync — no new tasks.")
 
 
-def make_venue_details(data, completed_task_ids=None):
+def make_venue_details(data, completed_task_ids=None, removed_task_ids=None):
     """Build expandable venue location rows from cluster task data.
 
     Per-stop header pills (only shown when count > 0):
@@ -8257,8 +8257,10 @@ def make_venue_details(data, completed_task_ids=None):
             _kiosk_location = str(t.get('location_in_venue') or t.get('locationInVenue') or '').strip()
             # Keep task detail lines separate when the same kiosk ID has
             # different in-store locations; never assign the wrong location.
-            _done = str(t.get('id') or '').strip() in (completed_task_ids or set())
-            key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip(), _kiosk_location, _done)
+            _tid = str(t.get('id') or '').strip()
+            _done = _tid in (completed_task_ids or set())
+            _removed = _tid in (removed_task_ids or set())
+            key = (cmp, tt_badge, str(t.get('kiosk_id') or t.get('kioskId') or '').strip(), _kiosk_location, _done, _removed)
             grp = camp_groups[key]
             grp['cmp'] = cmp
             grp['tt_badge'] = tt_badge
@@ -8272,7 +8274,7 @@ def make_venue_details(data, completed_task_ids=None):
             elif 'boosted' in bs: grp['boost'] += 1
 
         camp_rows = []
-        for (cmp, tt_badge, _kiosk_id, _kiosk_location, _done), grp in camp_groups.items():
+        for (cmp, tt_badge, _kiosk_id, _kiosk_location, _done, _removed), grp in camp_groups.items():
             cnt = grp['count']
             count_suffix = f" <span style='color:#94a3b8;font-weight:600;'>× {cnt}</span>" if cnt > 1 else ""
             esc_pill   = f" <span style='color:#dc2626;font-weight:800;'>❗ {grp['esc']}</span>" if grp['esc'] > 0 else ""
@@ -8281,8 +8283,8 @@ def make_venue_details(data, completed_task_ids=None):
             kiosk_text = (f" &nbsp;·&nbsp; Kiosk ID{'s' if len(grp['kiosk_ids']) > 1 else ''}: "
                           f"{esc(', '.join(grp['kiosk_ids']))}") if grp['kiosk_ids'] else ""
             kiosk_location_text = (f"&nbsp;·&nbsp; Kiosk Location: {esc(_kiosk_location or '—')}") if grp['kiosk_ids'] else ""
-            _done_style = 'opacity:0.4;filter:grayscale(1);' if _done else ''
-            _done_label = ' · ✓ Completed' if _done else ''
+            _done_style = 'opacity:0.4;filter:grayscale(1);' if (_done or _removed) else ''
+            _done_label = ' · Removed' if _removed else (' · ✓ Completed' if _done else '')
             row = (
                 f"<div style='font-size:11px;color:#475569;padding:2px 4px;margin-top:3px;{_done_style}'>"
                 f"• <span style='color:#0f172a;font-weight:600;'>{esc(cmp)}</span>{_done_label}"
@@ -8341,7 +8343,7 @@ def make_venue_details(data, completed_task_ids=None):
         )
     return "".join(rows)
 
-def make_venue_details_ghost(locs_list, stop_data=None, completed_task_ids=None):
+def make_venue_details_ghost(locs_list, stop_data=None, completed_task_ids=None, removed_task_ids=None):
     """Expandable accordion rows for ghost routes. Uses rich stop_data if available.
 
     May 16 2026 — upgraded to mirror make_venue_details' per-stop header pills
@@ -8468,8 +8470,9 @@ def make_venue_details_ghost(locs_list, stop_data=None, completed_task_ids=None)
                 # Dim completed task rows without altering the saved work order.
                 _task_id = str(task.get('taskId') or '').strip()
                 _done = bool(_task_id and _task_id in (completed_task_ids or set()))
-                _task_style = ("opacity:0.4;filter:grayscale(1);" if _done else "")
-                _done_badge = (" · ✓ Completed" if _done else "")
+                _removed = bool(_task_id and _task_id in (removed_task_ids or set()))
+                _task_style = ("opacity:0.4;filter:grayscale(1);" if (_done or _removed) else "")
+                _done_badge = (" · Removed" if _removed else (" · ✓ Completed" if _done else ""))
                 # Use this task's own kiosk location, not a location from a
                 # different kiosk at the same venue. Stop-level fallback is
                 # safe only when the saved stop contains a single task.
