@@ -766,11 +766,15 @@ def sync_onfleet_for_fn_assignment(
     # when an earlier DB hint is stale; never rename some other route.
     details = {}
     discovered_ids = set()
+    missing_ids = []
     for tid in ids:
         if time.monotonic() - start > _FA_BUDGET_S - 20:
             return failure("OnFleet task verification timed out; retry Assign.")
         try:
             response = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}")
+            if response.status_code == 404:
+                missing_ids.append(tid)
+                continue
             if response.status_code != 200:
                 return failure(f"Cannot verify OnFleet task {tid}: HTTP {response.status_code}")
             task = read_json(response, f"Task {tid}")
@@ -779,6 +783,53 @@ def sync_onfleet_for_fn_assignment(
         details[tid] = task
         if task.get("routePlan"):
             discovered_ids.add(str(task["routePlan"]).strip())
+
+    # Some older FN records retain task IDs that OnFleet subsequently replaced.
+    # Never create another route to recover. A stale ID can only be reconciled
+    # against a known Route Plan with the SAME number of tasks and at least one
+    # independently verified task anchoring it to this work order.
+    if missing_ids:
+        anchor = next(iter(discovered_ids), None) or hint
+        if not anchor or not details:
+            return failure(
+                f"OnFleet task IDs are stale ({len(missing_ids)} missing); "
+                "no verified existing task/Route Plan anchor is available. "
+                "Manual OnFleet reconciliation is required.")
+        if discovered_ids and (len(discovered_ids) != 1 or anchor not in discovered_ids):
+            return failure("OnFleet tasks refer to conflicting Route Plans; nothing was changed.")
+        try:
+            plan_response = onfleet_fetch_with_backoff(
+                "get", f"{ONFLEET_BASE}/routePlans/{anchor}")
+            if plan_response.status_code != 200:
+                return failure(f"Cannot reconcile stale tasks: Route Plan HTTP {plan_response.status_code}")
+            existing_plan = read_json(plan_response, "Reconcile Route Plan")
+            raw = existing_plan.get("tasks")
+            if not isinstance(raw, list):
+                return failure("Cannot reconcile stale tasks: Route Plan has no task list.")
+            canonical_ids = [
+                str(t.get("id") if isinstance(t, dict) else t).strip() for t in raw
+            ]
+            if (len(canonical_ids) != len(ids)
+                    or len(set(canonical_ids)) != len(ids)
+                    or not set(details).issubset(set(canonical_ids))
+                    or not any(tid in canonical_ids for tid in details)):
+                return failure(
+                    "OnFleet Route Plan membership differs from saved tasks; "
+                    "manual reconciliation required to avoid assigning the wrong work.")
+            for tid in canonical_ids:
+                if tid in details:
+                    continue
+                check = onfleet_fetch_with_backoff("get", f"{ONFLEET_BASE}/tasks/{tid}")
+                if check.status_code != 200:
+                    return failure(f"Replacement OnFleet task {tid} cannot be verified: HTTP {check.status_code}")
+                task = read_json(check, f"Replacement task {tid}")
+                if str(task.get("routePlan") or "").strip() != anchor:
+                    return failure("Replacement task does not belong to the verified Route Plan.")
+                details[tid] = task
+            ids = canonical_ids
+            discovered_ids.add(anchor)
+        except Exception as exc:
+            return failure(f"Cannot reconcile OnFleet task IDs safely: {exc}")
 
     if len(discovered_ids) > 1:
         return failure("The selected tasks belong to more than one OnFleet Route Plan; nothing was renamed.")
