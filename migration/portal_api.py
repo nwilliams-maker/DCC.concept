@@ -382,13 +382,17 @@ def get_route(action: str = "", routeId: str = ""):
 
     with engine.connect() as conn:
         route = _resolve_route(conn, wo)
-    if not route:
-        # Matches the portal's existing error-banner path (see the [M22]/[H4]
-        # comments in portal-dcc-rw.html) -- a plain res.error string it
-        # already knows how to display.
-        return {"error": "This route link has expired or the route was not found."}
-
-    payload_value = route[1]
+        if not route:
+            return {"error": "This route link has expired or the route was not found."}
+        canonical_wo, linked_payload, is_legacy = route
+        current = conn.execute(sa.text(
+            "SELECT status::text AS status, payload FROM routes WHERE wo = :wo"
+        ), {"wo": canonical_wo}).mappings().first()
+        if not current or current["status"] != "sent":
+            return {"error": "This offer has been revoked, rerouted, or is no longer available. Contact dispatch."}
+        if is_legacy and current["payload"] != linked_payload:
+            return {"error": "This route was changed after this link was sent. Contact dispatch for the current link."}
+        payload_value = current["payload"]
     payload = payload_value if isinstance(payload_value, dict) else json.loads(payload_value)
     return {"payload": payload}
 
@@ -421,14 +425,13 @@ async def post_decision(request: Request):
         if not resolved:
             return {"error": "This route link has expired or the route was not found."}
         wo, linked_payload, is_legacy = resolved
-        if is_legacy:
-            current = conn.execute(sa.text("SELECT payload, status::text AS status FROM routes WHERE wo = :wo"), {"wo": wo}).mappings().first()
-            if not current:
-                return {"error": "This route link has expired or the route was not found."}
-            if current["status"] in ("archived", "finalized"):
-                return {"error": "This route is no longer open. Contact dispatch."}
-            if current["status"] == "sent" and current["payload"] != linked_payload:
-                return {"error": "This route was changed after this link was sent. Contact dispatch for the current link."}
+        current = conn.execute(sa.text(
+            "SELECT status::text AS status, payload FROM routes WHERE wo = :wo"
+        ), {"wo": wo}).mappings().first()
+        if not current or current["status"] != "sent":
+            return {"error": "This offer has been revoked, rerouted, or is no longer available. Contact dispatch."}
+        if is_legacy and current["payload"] != linked_payload:
+            return {"error": "This route was changed after this link was sent. Contact dispatch for the current link."}
 
     try:
         result = da.process_decision(
