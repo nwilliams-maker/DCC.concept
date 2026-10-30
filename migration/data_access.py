@@ -276,7 +276,16 @@ def process_decision(
     if not current:
         return {"success": False, "error": "Route not found."}
 
-    current_status = current["status"]
+    current_status = str(current["status"]).lower()
+    # An offer is actionable only while it is still in Sent. Never let an
+    # old contractor link reopen a revoked/rerouted/archived route, or trigger
+    # OnFleet side effects after dispatch has withdrawn the offer.
+    if current_status not in ("sent", "accepted", "declined"):
+        return {"success": False, "error":
+                "This offer has been revoked, rerouted, or is no longer available. Contact dispatch."}
+    if current_status != "sent" and current_status != target_status:
+        return {"success": False, "error":
+                "This offer is no longer available. Contact dispatch."}
     # Idempotent no-op: already in the target state (refresh-and-resubmit,
     # double-click) -- matches GAS's isInAccepted/isInDeclined short-circuit.
     if current_status == target_status:
